@@ -1,0 +1,44 @@
+[package]
+name = "foundry-circle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Typed Foundry VTT world broker and Dioxus operator console"
+
+[features]
+default = ["server"]
+web = ["dioxus/web", "tartan-ui-dioxus/web", "dep:wasm-bindgen"]
+server = [
+  "dioxus/server",
+  "tartan-ui-dioxus/server",
+  "dep:axum",
+  "dep:sqlx",
+  "dep:tokio",
+  "dep:tower-http",
+  "dep:tracing",
+  "dep:tracing-subscriber",
+]
+devtools = ["dioxus/devtools", "tartan-ui-dioxus/devtools"]
+
+[dependencies]
+dioxus.workspace = true
+dioxus-router.workspace = true
+tartan-ui-core.workspace = true
+tartan-ui-dioxus.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+axum = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tower-http = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+
+[[bin]]
+name = "foundry-circle"
+path = "src/main.rs"

@@ -1,0 +1,8 @@
+[ci]
+runtime = "nix"
+runner = "atlas"
+workspace = true
+with_nextest = true
+with_msrv = true
+with_audit = true
+with_deny = true

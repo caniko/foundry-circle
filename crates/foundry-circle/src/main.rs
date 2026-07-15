@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .layer(TraceLayer::new_for_http());
 
     let bind =
-        std::env::var("FOUNDRY_CIRCLE_BIND").unwrap_or_else(|_| "127.0.0.1:8031".to_string());
+        std::env::var("FOUNDRY_CIRCLE_BIND").unwrap_or_else(|_| "127.0.0.1:8032".to_string());
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!(%bind, "foundry-circle listening");
     axum::serve(listener, app.into_make_service()).await?;

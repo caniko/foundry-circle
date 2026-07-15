@@ -23,7 +23,7 @@ in {
 
     listenPort = lib.mkOption {
       type = lib.types.port;
-      default = 8031;
+      default = 8032;
     };
 
     database = {

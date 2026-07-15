@@ -22,7 +22,7 @@ cargo check --all-targets --all-features
 cargo test --all-targets --all-features
 ```
 
-The production service binds to `127.0.0.1:8031` by default. It does not
+The production service binds to `127.0.0.1:8032` by default. It does not
 accept a Foundry password through command-line arguments or store credentials
 in the repository.
 

@@ -156,10 +156,12 @@ in {
         ensureUsers = [
           {
             name = cfg.database.user;
-            ensureDBOwnership = true;
           }
         ];
       };
+      systemd.services.postgresql-setup.script = lib.mkAfter ''
+        psql -tAc 'ALTER DATABASE "${cfg.database.name}" OWNER TO "${cfg.database.user}";'
+      '';
     })
   ]);
 }

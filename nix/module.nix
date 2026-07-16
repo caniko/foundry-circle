@@ -68,7 +68,7 @@ in {
       issuer = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
-        description = "Rauthy issuer URL. Kanidm remains the identity source; this service trusts Rauthy only.";
+        description = "Primary internal OIDC issuer URL (Canix uses Kanidm; Rauthy remains the federation surface).";
       };
       clientId = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
@@ -102,24 +102,31 @@ in {
         wantedBy = ["multi-user.target"];
         after = ["network.target"] ++ lib.optional cfg.database.createLocally "postgresql.service";
         wants = lib.optional cfg.database.createLocally "postgresql.service";
-        environment = {
-          FOUNDRY_API_USER = cfg.foundryApiUser;
-        } // lib.optionalAttrs (cfg.database.url != null || cfg.database.createLocally) {
-          DATABASE_URL =
-            if cfg.database.url != null
-            then cfg.database.url
-            else "postgresql://${cfg.database.user}@/${cfg.database.name}?host=/run/postgresql";
-        } // lib.optionalAttrs (cfg.database.urlFile != null) {
-          DATABASE_URL_FILE = "/run/credentials/foundry-circle.service/database-url";
-        } // lib.optionalAttrs (cfg.foundryApiUserPasswordFile != null) {
-          FOUNDRY_API_USER_PASSWORD_FILE = "/run/credentials/foundry-circle.service/foundry-api-user-password";
-        } // lib.optionalAttrs (cfg.oidc.issuer != null) {
-          FOUNDRY_CIRCLE_OIDC_ISSUER = cfg.oidc.issuer;
-        } // lib.optionalAttrs (cfg.oidc.clientId != null) {
-          FOUNDRY_CIRCLE_OIDC_CLIENT_ID = cfg.oidc.clientId;
-        } // lib.optionalAttrs (cfg.oidc.clientSecretFile != null) {
-          FOUNDRY_CIRCLE_OIDC_CLIENT_SECRET_FILE = "/run/credentials/foundry-circle.service/oidc-client-secret";
-        };
+        environment =
+          {
+            FOUNDRY_API_USER = cfg.foundryApiUser;
+          }
+          // lib.optionalAttrs (cfg.database.url != null || cfg.database.createLocally) {
+            DATABASE_URL =
+              if cfg.database.url != null
+              then cfg.database.url
+              else "postgresql://${cfg.database.user}@/${cfg.database.name}?host=/run/postgresql";
+          }
+          // lib.optionalAttrs (cfg.database.urlFile != null) {
+            DATABASE_URL_FILE = "/run/credentials/foundry-circle.service/database-url";
+          }
+          // lib.optionalAttrs (cfg.foundryApiUserPasswordFile != null) {
+            FOUNDRY_API_USER_PASSWORD_FILE = "/run/credentials/foundry-circle.service/foundry-api-user-password";
+          }
+          // lib.optionalAttrs (cfg.oidc.issuer != null) {
+            FOUNDRY_CIRCLE_OIDC_ISSUER = cfg.oidc.issuer;
+          }
+          // lib.optionalAttrs (cfg.oidc.clientId != null) {
+            FOUNDRY_CIRCLE_OIDC_CLIENT_ID = cfg.oidc.clientId;
+          }
+          // lib.optionalAttrs (cfg.oidc.clientSecretFile != null) {
+            FOUNDRY_CIRCLE_OIDC_CLIENT_SECRET_FILE = "/run/credentials/foundry-circle.service/oidc-client-secret";
+          };
         serviceConfig = {
           User = "foundry-circle";
           Group = "foundry-circle";

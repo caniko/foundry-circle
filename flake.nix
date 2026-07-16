@@ -94,6 +94,13 @@
           rustToolchain = toolchain.rustToolchain;
         };
       };
+      devShell = toolchain.craneLib.devShell {
+        checks = self.checks.${system};
+        packages = with pkgs;
+          [cargo-deny cargo-nextest cargo-audit jq pre-commit rust-analyzer]
+          ++ preCommit.enabledPackages;
+        shellHook = preCommit.shellHook;
+      };
     in {
       packages = {
         default = dioxusPackage;
@@ -124,12 +131,11 @@
           });
       };
 
-      devShells.default = toolchain.craneLib.devShell {
-        checks = self.checks.${system};
-        packages = with pkgs;
-          [cargo-deny cargo-nextest cargo-audit jq pre-commit rust-analyzer]
-          ++ preCommit.enabledPackages;
-        shellHook = preCommit.shellHook;
+      devShells = {
+        default = devShell;
+        # Simit's generated publish workflow uses this named shell for the
+        # crate documentation gate.
+        docs = devShell;
       };
     }))
     // {

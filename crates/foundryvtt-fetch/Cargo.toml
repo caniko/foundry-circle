@@ -1,0 +1,39 @@
+[package]
+name = "foundryvtt-fetch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Credential-safe Foundry VTT release acquisition and archive validation"
+readme = "README.md"
+repository = "ssh://git@codeberg.org/caniko/foundry-circle.git"
+keywords = ["foundryvtt", "nix", "provenance"]
+categories = ["command-line-utilities", "filesystem"]
+publish = true
+
+[lib]
+name = "foundryvtt_fetch"
+path = "src/lib.rs"
+
+[[bin]]
+name = "foundryvtt-fetch"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+reqwest.workspace = true
+scraper.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

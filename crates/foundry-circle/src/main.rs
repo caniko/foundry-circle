@@ -12,12 +12,38 @@ fn main() {
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use axum::{Router, routing::get};
     use dioxus::server::{DioxusRouterExt, FullstackState, ServeConfig};
-    use foundry_circle::http::api_router;
+    use foundry_circle::http::{AppState, api_router_with_state};
     use tower_http::compression::CompressionLayer;
     use tower_http::limit::RequestBodyLimitLayer;
     use tower_http::trace::TraceLayer;
 
     tracing_subscriber::fmt::init();
+
+    let database_url = std::env::var("DATABASE_URL").ok().or_else(|| {
+        std::env::var("DATABASE_URL_FILE")
+            .ok()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .map(|value| value.trim().to_owned())
+    });
+    let database = match database_url {
+        Some(url) => match sqlx::PgPool::connect(&url).await {
+            Ok(pool) => match sqlx::migrate!("./migrations").run(&pool).await {
+                Ok(()) => Some(pool),
+                Err(error) => {
+                    tracing::error!(%error, "PostgreSQL migrations failed");
+                    None
+                }
+            },
+            Err(error) => {
+                tracing::error!(%error, "PostgreSQL connection failed");
+                None
+            }
+        },
+        None => {
+            tracing::warn!("DATABASE_URL is unset; readiness will remain false");
+            None
+        }
+    };
 
     let state = FullstackState::new(ServeConfig::new(), foundry_circle::App);
     let pages = Router::<FullstackState>::new()
@@ -26,7 +52,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .fallback(get(FullstackState::render_handler))
         .with_state(state);
 
-    let app: Router = api_router()
+    let app: Router = api_router_with_state(AppState {
+        driver: std::sync::Arc::new(foundry_circle::driver::FakeDriver::new(
+            foundry_circle::driver::WorldState::Starting,
+        )),
+        database,
+    })
         .merge(pages)
         .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024))
         .layer(CompressionLayer::new())

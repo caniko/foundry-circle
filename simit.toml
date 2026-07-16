@@ -6,3 +6,18 @@ with_nextest = true
 with_msrv = true
 with_audit = true
 with_deny = true
+with_docs = true
+
+[release.signing]
+key = "818D507F1E62139F8A17EAA64623DEA06FDACFE1"
+
+[release.codeberg]
+repo = "caniko/foundry-circle"
+
+[release.artifacts]
+runner = "atlas"
+build_commands = [
+  "mkdir -p release",
+  "nix build .#release-bundle --out-link release/foundry-circle.tar.gz",
+]
+sign = false

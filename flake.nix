@@ -31,7 +31,7 @@
     nix-foundryvtt,
     ...
   }:
-    flake-utils.lib.eachDefaultSystem (system: let
+    (flake-utils.lib.eachDefaultSystem (system: let
       pkgs = import nixpkgs {
         inherit system;
         overlays = [(import rust-overlay)];
@@ -53,6 +53,19 @@
           inherit cargoArtifacts;
           cargoExtraArgs = "--workspace --all-features";
         });
+      fetchPackage = toolchain.craneLib.buildPackage (commonArgs
+        // {
+          pname = "foundryvtt-fetch";
+          cargoExtraArgs = "-p foundryvtt-fetch --bin foundryvtt-fetch";
+        });
+      releaseBundle = pkgs.runCommand "foundry-circle-release-bundle" {
+        nativeBuildInputs = [pkgs.gnutar pkgs.gzip];
+      } ''
+        mkdir -p staging/bin
+        cp ${dioxusPackage}/bin/foundry-circle staging/bin/
+        cp ${fetchPackage}/bin/foundryvtt-fetch staging/bin/
+        tar -C staging -czf "$out" .
+      '';
       dioxusPackage = rs-harbor.lib.mkDioxusFullstackPackage {
         inherit pkgs src;
         craneLib = toolchain.craneLib;
@@ -85,6 +98,8 @@
         default = dioxusPackage;
         foundry-circle = dioxusPackage;
         foundry-circle-cli = cargoPackage;
+        foundryvtt-fetch = fetchPackage;
+        release-bundle = releaseBundle;
       };
 
       apps.default = flake-utils.lib.mkApp {
@@ -116,6 +131,8 @@
         shellHook = preCommit.shellHook;
       };
 
+    }))
+    // {
       nixosModules.default = import ./nix/module.nix;
       # Composition surface for a consumer that wants the upstream native
       # Foundry service plus the companion broker. Canix supplies the concrete
@@ -123,8 +140,9 @@
       nixosModules.foundry-stack = {
         imports = [
           nix-foundryvtt.nixosModules.foundryvtt
+          (import ./nix/addons.nix)
           (import ./nix/module.nix)
         ];
       };
-    });
+    };
 }

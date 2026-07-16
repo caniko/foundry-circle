@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Typed Foundry VTT world broker and Dioxus operator console"
+publish = false
 
 [features]
 default = ["server"]

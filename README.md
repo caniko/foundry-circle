@@ -26,10 +26,16 @@ The production service binds to `127.0.0.1:8032` by default. It does not
 accept a Foundry password through command-line arguments or store credentials
 in the repository.
 
+Phase 02 also ships the standalone `foundryvtt-fetch` crate. It acquires
+licensed releases outside Nix evaluation, records SHA-256/Nix-SRI provenance,
+and reconciles immutable module/system outputs from
+`services.foundryvtt.declarativePackages`. Use `state = "absent"` for an
+explicit package deletion; worlds remain mutable Foundry-owned state.
+
 ## Boundaries
 
-- Kanidm is the credential source; Rauthy is the only OIDC issuer trusted by
-  the service.
+- Kanidm is the primary internal OIDC issuer; Rauthy remains the
+  nix-provenance-managed federation surface for outward identity flows.
 - SQLite is not supported; PostgreSQL is the only database backend.
 - Arbitrary JavaScript/evaluate endpoints are not part of the production
   feature set.

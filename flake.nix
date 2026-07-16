@@ -58,14 +58,15 @@
           pname = "foundryvtt-fetch";
           cargoExtraArgs = "-p foundryvtt-fetch --bin foundryvtt-fetch";
         });
-      releaseBundle = pkgs.runCommand "foundry-circle-release-bundle" {
-        nativeBuildInputs = [pkgs.gnutar pkgs.gzip];
-      } ''
-        mkdir -p staging/bin
-        cp ${dioxusPackage}/bin/foundry-circle staging/bin/
-        cp ${fetchPackage}/bin/foundryvtt-fetch staging/bin/
-        tar -C staging -czf "$out" .
-      '';
+      releaseBundle =
+        pkgs.runCommand "foundry-circle-release-bundle" {
+          nativeBuildInputs = [pkgs.gnutar pkgs.gzip];
+        } ''
+          mkdir -p staging/bin
+          cp ${dioxusPackage}/bin/foundry-circle staging/bin/
+          cp ${fetchPackage}/bin/foundryvtt-fetch staging/bin/
+          tar -C staging -czf "$out" .
+        '';
       dioxusPackage = rs-harbor.lib.mkDioxusFullstackPackage {
         inherit pkgs src;
         craneLib = toolchain.craneLib;
@@ -130,9 +131,13 @@
           ++ preCommit.enabledPackages;
         shellHook = preCommit.shellHook;
       };
-
     }))
     // {
+      lib.mkFoundryPackage = {pkgs, ...} @ args:
+        import ./nix/package.nix {
+          lib = nixpkgs.lib;
+          inherit pkgs;
+        } (builtins.removeAttrs args ["pkgs"]);
       nixosModules.default = import ./nix/module.nix;
       # Composition surface for a consumer that wants the upstream native
       # Foundry service plus the companion broker. Canix supplies the concrete

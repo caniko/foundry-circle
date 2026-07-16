@@ -888,8 +888,24 @@ mod tests {
         (HttpStatus::OK, Body::from((*state.archive).clone()))
     }
 
-    #[tokio::test]
-    async fn account_flow_uses_numeric_build_and_validates_archive() {
+    #[test]
+    fn account_flow_uses_numeric_build_and_validates_archive() {
+        std::thread::Builder::new()
+            .name("foundry-fetch-fake-server".into())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(account_flow_uses_numeric_build_and_validates_archive_inner());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    async fn account_flow_uses_numeric_build_and_validates_archive_inner() {
         let temp = tempfile::tempdir().unwrap();
         let archive_path = temp.path().join("source.zip");
         archive(&archive_path, "13.351");

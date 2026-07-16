@@ -58,10 +58,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         )),
         database,
     })
-        .merge(pages)
-        .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024))
-        .layer(CompressionLayer::new())
-        .layer(TraceLayer::new_for_http());
+    .merge(pages)
+    .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024))
+    .layer(CompressionLayer::new())
+    .layer(TraceLayer::new_for_http());
 
     let bind =
         std::env::var("FOUNDRY_CIRCLE_BIND").unwrap_or_else(|_| "127.0.0.1:8032".to_string());

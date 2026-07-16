@@ -10,7 +10,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
-use crate::driver::{FoundryDriver, FakeDriver, WorldState};
+use crate::driver::{FakeDriver, FoundryDriver, WorldState};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -78,7 +78,11 @@ async fn healthz() -> impl IntoResponse {
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
     let world_state = state.driver.world_state();
     let ready = world_state == WorldState::Ready && state.database.is_some();
-    let status = if ready { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    let status = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
     (
         status,
         Json(serde_json::json!({
@@ -127,7 +131,13 @@ async fn world(State(state): State<AppState>) -> impl IntoResponse {
 async fn capabilities() -> impl IntoResponse {
     Json(Capabilities {
         collections: vec!["actors", "scenes", "messages", "playlists", "tables"],
-        commands: vec!["chat.create", "dice.roll", "scene.activate", "combat.update", "playlist.control"],
+        commands: vec![
+            "chat.create",
+            "dice.roll",
+            "scene.activate",
+            "combat.update",
+            "playlist.control",
+        ],
         supports_events: true,
         supports_json_patch: true,
     })

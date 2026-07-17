@@ -1,8 +1,8 @@
 //! Credential-safe Foundry VTT release acquisition.
 //!
 //! This crate intentionally owns only acquisition and validation.  Nix update
-//! tooling consumes [`Artifact::provenance`] and writes exact hashes to the
-//! nix-foundryvtt lock; Nix evaluation/builds never contact foundryvtt.com.
+//! tooling consumes [`Artifact::provenance`] to validate the exact hash selected
+//! by nix-foundryvtt; Nix evaluation/builds never contact foundryvtt.com.
 
 use std::{
     fs::{self, File},
@@ -13,7 +13,7 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use futures_util::StreamExt;
-use reqwest::{Client, StatusCode, Url};
+use reqwest::{Client, RequestBuilder, Response, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
@@ -28,6 +28,7 @@ const DEFAULT_SITE: &str = "https://foundryvtt.com";
 const DEFAULT_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_ZIP_ENTRIES: usize = 100_000;
 const MAX_PACKAGE_JSON_BYTES: u64 = 4 * 1024 * 1024;
+const DEFAULT_MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum FetchError {
@@ -41,8 +42,8 @@ pub enum FetchError {
     TooLarge { limit: u64 },
     #[error("archive validation failed: {0}")]
     InvalidArchive(String),
-    #[error("HTTP request failed: {0}")]
-    Http(#[from] reqwest::Error),
+    #[error("HTTP request failed while {context}; URL and response content redacted")]
+    Http { context: &'static str },
     #[error("remote release endpoint returned {status}: {context}")]
     Remote { status: StatusCode, context: String },
     #[error("required login form field was not found: {0}")]
@@ -71,7 +72,16 @@ impl ReleaseId {
             .unwrap_or(value)
             .strip_suffix(".zip")
             .unwrap_or(value);
-        let (major, build) = value
+        let normalized = if let Some((version, build)) = value.split_once('+') {
+            let major = version
+                .split('.')
+                .next()
+                .ok_or_else(|| FetchError::InvalidRelease(value.to_string()))?;
+            format!("{major}.{build}")
+        } else {
+            value.to_owned()
+        };
+        let (major, build) = normalized
             .split_once('.')
             .ok_or_else(|| FetchError::InvalidRelease(value.to_string()))?;
         if major.is_empty() || build.is_empty() || build.contains('.') {
@@ -102,6 +112,7 @@ impl std::fmt::Display for ReleaseId {
 pub enum Platform {
     #[default]
     Node,
+    Linux,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,13 +133,27 @@ pub struct AccountCredentials {
 impl std::fmt::Debug for AccountCredentials {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AccountCredentials")
-            .field("username", &self.username)
+            .field("username", &"<redacted>")
             .field("password", &"<redacted>")
             .finish()
     }
 }
 
 impl AccountCredentials {
+    pub fn from_values(
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Result<Self, FetchError> {
+        let username = username.into().trim().to_owned();
+        let password = Zeroizing::new(password.into().trim_end().to_owned());
+        if username.is_empty() || password.is_empty() {
+            return Err(FetchError::InvalidRelease(
+                "credentials must not be empty".into(),
+            ));
+        }
+        Ok(Self { username, password })
+    }
+
     pub fn from_files(
         username: impl AsRef<Path>,
         password: impl AsRef<Path>,
@@ -171,6 +196,28 @@ pub struct FetchOptions {
     pub platform: Platform,
     pub max_bytes: u64,
     pub timeout: Duration,
+    pub max_response_bytes: u64,
+    pub retry: RetryPolicy,
+    /// Test/operator supplied acquisition time. Production uses the system clock.
+    pub acquired_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RetryPolicy {
+    pub max_attempts: u8,
+    pub initial_backoff: Duration,
+}
+
+impl RetryPolicy {
+    fn delay(self, retry_index: u8) -> Duration {
+        self.initial_backoff
+            .checked_mul(
+                1_u32
+                    .checked_shl(u32::from(retry_index))
+                    .unwrap_or(u32::MAX),
+            )
+            .unwrap_or(Duration::MAX)
+    }
 }
 
 impl Default for FetchOptions {
@@ -181,6 +228,12 @@ impl Default for FetchOptions {
             platform: Platform::Node,
             max_bytes: DEFAULT_MAX_BYTES,
             timeout: Duration::from_secs(90),
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
+            retry: RetryPolicy {
+                max_attempts: 3,
+                initial_backoff: Duration::from_millis(250),
+            },
+            acquired_at_unix: None,
         }
     }
 }
@@ -215,12 +268,26 @@ impl Cache {
         Ok(Self { root })
     }
 
+    /// Make an already populated cache readable by the Nix build group while
+    /// retaining a non-world-readable directory and files.
+    pub fn prepare_shared_read_cache(&self) -> Result<(), FetchError> {
+        set_mode(&self.root, 0o2750)?;
+        for entry in fs::read_dir(&self.root)? {
+            let path = entry?.path();
+            if path.is_file() {
+                set_mode(&path, 0o440)?;
+            }
+        }
+        sync_directory(&self.root)?;
+        Ok(())
+    }
+
     pub fn path_for(&self, release: &ReleaseId, platform: Platform) -> PathBuf {
-        self.root.join(format!(
-            "foundryvtt-{}-{}.zip",
-            release,
-            platform_name(platform)
-        ))
+        let name = match platform {
+            Platform::Node => format!("FoundryVTT-Node-{release}.zip"),
+            Platform::Linux => release.archive_name(),
+        };
+        self.root.join(name)
     }
 
     pub fn root(&self) -> &Path {
@@ -294,6 +361,18 @@ impl Cache {
         input: &Path,
         max_bytes: u64,
     ) -> Result<Artifact, FetchError> {
+        self.put_at(release, platform, source, input, max_bytes, now_unix())
+    }
+
+    fn put_at(
+        &self,
+        release: &ReleaseId,
+        platform: Platform,
+        source: SourceKind,
+        input: &Path,
+        max_bytes: u64,
+        acquired_at_unix: u64,
+    ) -> Result<Artifact, FetchError> {
         let (sha256, size) = validate_archive(input, release, max_bytes)?;
         let archive = self.path_for(release, platform);
         let metadata = self.metadata_path(release, platform);
@@ -302,7 +381,6 @@ impl Cache {
         tmp.as_file().sync_all()?;
         let tmp_path = tmp.into_temp_path();
         fs::rename(&tmp_path, &archive)?;
-        let acquired_at_unix = now_unix();
         let provenance = Provenance {
             release: release.clone(),
             platform,
@@ -410,6 +488,29 @@ fn validate_package_release(
     package: &serde_json::Value,
     release: &ReleaseId,
 ) -> Result<(), FetchError> {
+    if let Some(release_obj) = package
+        .get("release")
+        .and_then(serde_json::Value::as_object)
+    {
+        let generation = json_u32(release_obj.get("generation")).ok_or_else(|| {
+            FetchError::InvalidArchive("package.json release.generation is missing".into())
+        })?;
+        let build = json_u32(release_obj.get("build")).ok_or_else(|| {
+            FetchError::InvalidArchive("package.json release.build is missing".into())
+        })?;
+        if generation != u32::from(release.major) || build != release.build {
+            return Err(FetchError::InvalidArchive(format!(
+                "package.json release {generation}.{build} does not match requested {release}"
+            )));
+        }
+        return Ok(());
+    }
+    if release.major >= 13 {
+        return Err(FetchError::InvalidArchive(
+            "modern Foundry releases require package.json release.generation and release.build"
+                .into(),
+        ));
+    }
     if let Some(version) = package.get("version").and_then(serde_json::Value::as_str) {
         let found = ReleaseId::parse(version).map_err(|_| {
             FetchError::InvalidArchive("package.json has an invalid version".into())
@@ -421,24 +522,9 @@ fn validate_package_release(
         }
         return Ok(());
     }
-    let release_obj = package
-        .get("release")
-        .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| {
-            FetchError::InvalidArchive("package.json has no release/version field".into())
-        })?;
-    let generation = json_u32(release_obj.get("generation")).ok_or_else(|| {
-        FetchError::InvalidArchive("package.json release.generation is missing".into())
-    })?;
-    let build = json_u32(release_obj.get("build")).ok_or_else(|| {
-        FetchError::InvalidArchive("package.json release.build is missing".into())
-    })?;
-    if generation != u32::from(release.major) || build != release.build {
-        return Err(FetchError::InvalidArchive(format!(
-            "package.json release {generation}.{build} does not match requested {release}"
-        )));
-    }
-    Ok(())
+    Err(FetchError::InvalidArchive(
+        "package.json has no release/version field".into(),
+    ))
 }
 
 fn json_u32(value: Option<&serde_json::Value>) -> Option<u32> {
@@ -458,18 +544,28 @@ pub async fn acquire_account(
     credentials: &AccountCredentials,
     options: &FetchOptions,
 ) -> Result<Artifact, FetchError> {
-    let client = http_client(options)?;
+    let client = foundry_client(options)?;
     let login_url = join_url(&options.site, "auth/login/")?;
-    let login = client.get(login_url.clone()).send().await?;
-    let login_text = checked_text(login, "login page").await?;
+    let login = send_with_retry(
+        client.get(login_url.clone()),
+        options,
+        "fetching login page",
+    )
+    .await?;
+    let login_text = checked_text(login, "login page", options.max_response_bytes).await?;
     let csrf = extract_input(&login_text, "csrfmiddlewaretoken")
         .ok_or(FetchError::MissingFormField("csrfmiddlewaretoken"))?;
     let mut form = std::collections::HashMap::new();
     form.insert("username", credentials.username.as_str());
     form.insert("password", credentials.password.as_str());
     form.insert("csrfmiddlewaretoken", csrf.as_str());
-    let response = client.post(login_url).form(&form).send().await?;
-    let response_text = checked_text(response, "account login").await?;
+    let response = send_with_retry(
+        client.post(login_url).form(&form),
+        options,
+        "submitting account login",
+    )
+    .await?;
+    let response_text = checked_text(response, "account login", options.max_response_bytes).await?;
     if !response_text.contains("login-welcome") && !response_text.contains("logout") {
         return Err(FetchError::Remote {
             status: StatusCode::UNAUTHORIZED,
@@ -482,42 +578,26 @@ pub async fn acquire_account(
         .append_pair("build", &release.build.to_string())
         .append_pair("platform", platform_name(options.platform))
         .append_pair("response_type", "json");
-    let release_response = client.get(endpoint).send().await?;
     let release_response =
-        checked_json::<ReleaseResponse>(release_response, "release URL endpoint").await?;
+        send_with_retry(client.get(endpoint), options, "requesting release URL").await?;
+    let release_response = checked_json::<ReleaseResponse>(
+        release_response,
+        "release URL endpoint",
+        options.max_response_bytes,
+    )
+    .await?;
     let signed_url = Url::parse(&release_response.url).map_err(|_| {
         FetchError::InvalidUrl("release endpoint returned an invalid download URL".into())
     })?;
-    let response = client.get(signed_url).send().await?;
-    if !response.status().is_success() {
-        return Err(FetchError::Remote {
-            status: response.status(),
-            context: "Foundry archive download failed".into(),
-        });
-    }
-    let mut tmp = NamedTempFile::new_in(&cache.root)?;
-    let mut size = 0_u64;
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        size = size.saturating_add(chunk.len() as u64);
-        if size > options.max_bytes {
-            return Err(FetchError::TooLarge {
-                limit: options.max_bytes,
-            });
-        }
-        tmp.write_all(&chunk)?;
-    }
-    tmp.as_file().sync_all()?;
-    let staged = tmp.path().to_path_buf();
-    let artifact = cache.put(
+    validate_download_url(&signed_url, &options.site)?;
+    download_to_cache(
+        cache,
         release,
-        options.platform,
+        signed_url,
+        options,
         SourceKind::LicensedAccount,
-        &staged,
-        options.max_bytes,
-    )?;
-    Ok(artifact)
+    )
+    .await
 }
 
 pub async fn acquire_signed_url(
@@ -592,8 +672,9 @@ async fn download_to_cache(
     options: &FetchOptions,
     source: SourceKind,
 ) -> Result<Artifact, FetchError> {
-    let client = http_client(options)?;
-    let response = client.get(url).send().await?;
+    validate_download_url(&url, &options.site)?;
+    let client = download_client(options)?;
+    let response = send_with_retry(client.get(url), options, "downloading Foundry archive").await?;
     if !response.status().is_success() {
         return Err(FetchError::Remote {
             status: response.status(),
@@ -604,7 +685,9 @@ async fn download_to_cache(
     let mut size = 0_u64;
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+        let chunk = chunk.map_err(|_| FetchError::Http {
+            context: "streaming Foundry archive",
+        })?;
         size = size
             .checked_add(chunk.len() as u64)
             .ok_or(FetchError::TooLarge {
@@ -618,24 +701,52 @@ async fn download_to_cache(
         tmp.write_all(&chunk)?;
     }
     tmp.as_file().sync_all()?;
-    cache.put(
+    cache.put_at(
         release,
         options.platform,
         source,
         tmp.path(),
         options.max_bytes,
+        options.acquired_at_unix.unwrap_or_else(now_unix),
     )
 }
 
-fn http_client(options: &FetchOptions) -> Result<Client, FetchError> {
+fn foundry_client(options: &FetchOptions) -> Result<Client, FetchError> {
+    let expected_origin = origin(&options.site);
     Client::builder()
         .cookie_store(true)
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= 5 || origin(attempt.url()) != expected_origin {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        }))
         .connect_timeout(Duration::from_secs(15))
         .timeout(options.timeout)
         .user_agent("foundryvtt-fetch/0.1")
         .build()
-        .map_err(FetchError::Http)
+        .map_err(|_| FetchError::Http {
+            context: "building Foundry HTTP client",
+        })
+}
+
+fn download_client(options: &FetchOptions) -> Result<Client, FetchError> {
+    Client::builder()
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 || !secure_or_loopback(attempt.url()) {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        }))
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(options.timeout)
+        .user_agent("foundryvtt-fetch/0.1")
+        .build()
+        .map_err(|_| FetchError::Http {
+            context: "building download HTTP client",
+        })
 }
 
 fn join_url(site: &Url, path: &str) -> Result<Url, FetchError> {
@@ -643,33 +754,112 @@ fn join_url(site: &Url, path: &str) -> Result<Url, FetchError> {
         .map_err(|_| FetchError::InvalidUrl(format!("cannot join {path:?} to Foundry site")))
 }
 
-async fn checked_text(response: reqwest::Response, context: &str) -> Result<String, FetchError> {
+async fn checked_text(
+    response: Response,
+    context: &str,
+    max_bytes: u64,
+) -> Result<String, FetchError> {
     let status = response.status();
-    let body = response.text().await?;
     if !status.is_success() {
-        let _ = body;
         return Err(FetchError::Remote {
             status,
             context: context.into(),
         });
     }
-    Ok(body)
+    let body = read_limited_body(response, max_bytes, "reading HTTP response").await?;
+    String::from_utf8(body)
+        .map_err(|_| FetchError::InvalidArchive(format!("{context} was not valid UTF-8")))
 }
 
 async fn checked_json<T: for<'de> Deserialize<'de>>(
     response: reqwest::Response,
     context: &str,
+    max_bytes: u64,
 ) -> Result<T, FetchError> {
     let status = response.status();
-    let body = response.text().await?;
     if !status.is_success() {
-        let _ = body;
         return Err(FetchError::Remote {
             status,
             context: context.into(),
         });
     }
-    serde_json::from_str(&body).map_err(FetchError::Metadata)
+    let body = read_limited_body(response, max_bytes, "reading JSON response").await?;
+    serde_json::from_slice(&body).map_err(FetchError::Metadata)
+}
+
+async fn send_with_retry(
+    request: RequestBuilder,
+    options: &FetchOptions,
+    context: &'static str,
+) -> Result<Response, FetchError> {
+    let attempts = options.retry.max_attempts.max(1);
+    for attempt in 0..attempts {
+        let next = request.try_clone().ok_or(FetchError::Http { context })?;
+        match next.send().await {
+            Ok(response) if retryable_status(response.status()) && attempt + 1 < attempts => {
+                tokio::time::sleep(options.retry.delay(attempt)).await;
+            }
+            Ok(response) => return Ok(response),
+            Err(_) if attempt + 1 < attempts => {
+                tokio::time::sleep(options.retry.delay(attempt)).await;
+            }
+            Err(_) => return Err(FetchError::Http { context }),
+        }
+    }
+    Err(FetchError::Http { context })
+}
+
+fn retryable_status(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+async fn read_limited_body(
+    response: Response,
+    max_bytes: u64,
+    context: &'static str,
+) -> Result<Vec<u8>, FetchError> {
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| FetchError::Http { context })?;
+        let next = u64::try_from(body.len())
+            .ok()
+            .and_then(|size| size.checked_add(chunk.len() as u64))
+            .ok_or(FetchError::TooLarge { limit: max_bytes })?;
+        if next > max_bytes {
+            return Err(FetchError::TooLarge { limit: max_bytes });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn origin(url: &Url) -> (String, Option<String>, Option<u16>) {
+    (
+        url.scheme().to_owned(),
+        url.host_str().map(str::to_owned),
+        url.port_or_known_default(),
+    )
+}
+
+fn secure_or_loopback(url: &Url) -> bool {
+    url.scheme() == "https"
+        || url.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        })
+}
+
+fn validate_download_url(url: &Url, site: &Url) -> Result<(), FetchError> {
+    if secure_or_loopback(url) && (url.scheme() == "https" || secure_or_loopback(site)) {
+        Ok(())
+    } else {
+        Err(FetchError::InvalidUrl(
+            "download URL must use HTTPS (loopback HTTP is allowed only for tests)".into(),
+        ))
+    }
 }
 
 fn extract_input(html: &str, name: &'static str) -> Option<String> {
@@ -732,6 +922,7 @@ fn copy_file(input: &Path, output: &mut File, max_bytes: u64) -> Result<(), Fetc
 fn platform_name(platform: Platform) -> &'static str {
     match platform {
         Platform::Node => "node",
+        Platform::Linux => "linux",
     }
 }
 
@@ -779,27 +970,47 @@ mod tests {
     use axum::{
         Router,
         body::Body,
-        extract::{Query, State},
-        http::{StatusCode as HttpStatus, header},
+        extract::{Form, Query, State},
+        http::{HeaderMap, StatusCode as HttpStatus, header},
         response::{IntoResponse, Json},
         routing::get,
     };
     use std::io::Write;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
     use zip::write::SimpleFileOptions;
 
-    fn archive(path: &Path, package_version: &str) {
+    fn archive(path: &Path, package: serde_json::Value, platform: Platform) {
         let file = File::create(path).unwrap();
         let mut writer = zip::ZipWriter::new(file);
+        let prefix = if platform == Platform::Linux {
+            "resources/app/"
+        } else {
+            ""
+        };
         writer
-            .start_file("resources/app/package.json", SimpleFileOptions::default())
+            .start_file(
+                format!("{prefix}package.json"),
+                SimpleFileOptions::default(),
+            )
             .unwrap();
-        write!(writer, "{{\"version\":\"{package_version}\"}}").unwrap();
         writer
-            .start_file("resources/app/index.js", SimpleFileOptions::default())
+            .write_all(serde_json::to_string(&package).unwrap().as_bytes())
+            .unwrap();
+        writer
+            .start_file(format!("{prefix}index.js"), SimpleFileOptions::default())
             .unwrap();
         writer.write_all(b"ok").unwrap();
         writer.finish().unwrap();
+    }
+
+    fn modern_package(major: u16, build: u32) -> serde_json::Value {
+        serde_json::json!({
+            "version": format!("{major}.0.0+{build}"),
+            "release": {"generation": major, "build": build}
+        })
     }
 
     #[test]
@@ -815,6 +1026,13 @@ mod tests {
             ReleaseId::parse("13.351").unwrap().archive_name(),
             "FoundryVTT-Linux-13.351.zip"
         );
+        assert_eq!(
+            ReleaseId::parse("14.0.0+412").unwrap(),
+            ReleaseId {
+                major: 14,
+                build: 412
+            }
+        );
         assert!(ReleaseId::parse("13").is_err());
     }
 
@@ -822,7 +1040,7 @@ mod tests {
     fn validates_and_hashes_archive() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("release.zip");
-        archive(&path, "13.351");
+        archive(&path, modern_package(13, 351), Platform::Linux);
         let result = validate_archive(
             &path,
             &ReleaseId {
@@ -834,6 +1052,47 @@ mod tests {
         .unwrap();
         assert_eq!(result.1, fs::metadata(path).unwrap().len());
         assert_eq!(result.0.len(), 64);
+    }
+
+    #[test]
+    fn validates_node_layout_and_rejects_modern_legacy_bypass() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = dir.path().join("node.zip");
+        archive(&node, modern_package(14, 412), Platform::Node);
+        validate_archive(
+            &node,
+            &ReleaseId {
+                major: 14,
+                build: 412,
+            },
+            1024 * 1024,
+        )
+        .unwrap();
+
+        let conflict = dir.path().join("conflict.zip");
+        archive(
+            &conflict,
+            serde_json::json!({
+                "version": "13.0.0+351",
+                "release": {"generation": 14, "build": 412}
+            }),
+            Platform::Linux,
+        );
+        assert!(matches!(
+            validate_archive(&conflict, &ReleaseId { major: 13, build: 351 }, 1024 * 1024),
+            Err(FetchError::InvalidArchive(message)) if message.contains("does not match")
+        ));
+
+        let legacy_only = dir.path().join("legacy-only.zip");
+        archive(
+            &legacy_only,
+            serde_json::json!({"version": "13.0.0+351"}),
+            Platform::Linux,
+        );
+        assert!(matches!(
+            validate_archive(&legacy_only, &ReleaseId { major: 13, build: 351 }, 1024 * 1024),
+            Err(FetchError::InvalidArchive(message)) if message.contains("modern Foundry")
+        ));
     }
 
     #[test]
@@ -865,24 +1124,60 @@ mod tests {
         archive: Arc<Vec<u8>>,
         base: Arc<String>,
         requested_build: Arc<Mutex<Option<String>>>,
+        release_attempts: Arc<AtomicUsize>,
+        login_valid: Arc<Mutex<bool>>,
     }
 
     async fn fake_login() -> &'static str {
         "<input name=\"csrfmiddlewaretoken\" value=\"token\">"
     }
-    async fn fake_post_login() -> impl IntoResponse {
-        (
-            HttpStatus::OK,
-            [(header::SET_COOKIE, "sessionid=test")],
-            "login-welcome",
-        )
+    async fn fake_post_login(
+        State(state): State<FakeState>,
+        Form(form): Form<std::collections::HashMap<String, String>>,
+    ) -> axum::response::Response {
+        let valid = form.get("csrfmiddlewaretoken").map(String::as_str) == Some("token")
+            && form.get("username").map(String::as_str) == Some("user@example.test")
+            && form.get("password").map(String::as_str) == Some("secret");
+        *state.login_valid.lock().unwrap() = valid;
+        if valid {
+            (
+                HttpStatus::OK,
+                [(header::SET_COOKIE, "sessionid=test; Path=/; HttpOnly")],
+                "login-welcome",
+            )
+                .into_response()
+        } else {
+            (HttpStatus::UNAUTHORIZED, "rejected").into_response()
+        }
     }
     async fn fake_release(
         State(state): State<FakeState>,
         Query(query): Query<std::collections::HashMap<String, String>>,
+        headers: HeaderMap,
     ) -> impl IntoResponse {
+        if headers
+            .get(header::COOKIE)
+            .and_then(|value| value.to_str().ok())
+            != Some("sessionid=test")
+        {
+            return (
+                HttpStatus::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "cookie"})),
+            );
+        }
         *state.requested_build.lock().unwrap() = query.get("build").cloned();
-        Json(serde_json::json!({"url": format!("{}/archive.zip", state.base), "lifetime": 60}))
+        if state.release_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            return (
+                HttpStatus::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({"error": "retry"})),
+            );
+        }
+        assert_eq!(query.get("platform").map(String::as_str), Some("linux"));
+        assert_eq!(query.get("response_type").map(String::as_str), Some("json"));
+        (
+            HttpStatus::OK,
+            Json(serde_json::json!({"url": format!("{}/archive.zip", state.base), "lifetime": 60})),
+        )
     }
     async fn fake_archive(State(state): State<FakeState>) -> impl IntoResponse {
         (HttpStatus::OK, Body::from((*state.archive).clone()))
@@ -908,15 +1203,19 @@ mod tests {
     async fn account_flow_uses_numeric_build_and_validates_archive_inner() {
         let temp = tempfile::tempdir().unwrap();
         let archive_path = temp.path().join("source.zip");
-        archive(&archive_path, "13.351");
+        archive(&archive_path, modern_package(13, 351), Platform::Linux);
         let bytes = Arc::new(fs::read(&archive_path).unwrap());
         let requested_build = Arc::new(Mutex::new(None));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = Arc::new(format!("http://{}", listener.local_addr().unwrap()));
+        let login_valid = Arc::new(Mutex::new(false));
+        let release_attempts = Arc::new(AtomicUsize::new(0));
         let state = FakeState {
             archive: bytes,
             base: base.clone(),
             requested_build: requested_build.clone(),
+            release_attempts: release_attempts.clone(),
+            login_valid: login_valid.clone(),
         };
         let app = Router::new()
             .route("/auth/login/", get(fake_login).post(fake_post_login))
@@ -933,6 +1232,12 @@ mod tests {
         };
         let options = FetchOptions {
             site: Url::parse(&base).unwrap(),
+            platform: Platform::Linux,
+            retry: RetryPolicy {
+                max_attempts: 2,
+                initial_backoff: Duration::ZERO,
+            },
+            acquired_at_unix: Some(1_700_000_000),
             ..FetchOptions::default()
         };
         let artifact = acquire_account(
@@ -948,5 +1253,146 @@ mod tests {
         .unwrap();
         assert_eq!(artifact.provenance.source, SourceKind::LicensedAccount);
         assert_eq!(requested_build.lock().unwrap().as_deref(), Some("351"));
+        assert_eq!(artifact.provenance.acquired_at_unix, 1_700_000_000);
+        assert!(*login_valid.lock().unwrap());
+        assert_eq!(release_attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            artifact.archive.file_name().unwrap(),
+            "FoundryVTT-Linux-13.351.zip"
+        );
+    }
+
+    #[test]
+    fn exact_offline_cache_fallback_is_verified() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.zip");
+        archive(&source, modern_package(13, 351), Platform::Node);
+        let cache = Cache::new(temp.path().join("cache")).unwrap();
+        let release = ReleaseId {
+            major: 13,
+            build: 351,
+        };
+        cache
+            .put_at(
+                &release,
+                Platform::Node,
+                SourceKind::PreAcquiredArchive,
+                &source,
+                1024 * 1024,
+                42,
+            )
+            .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let artifact = runtime
+            .block_on(acquire(
+                &cache,
+                &release,
+                &AcquireSources {
+                    offline: true,
+                    ..AcquireSources::default()
+                },
+                &FetchOptions {
+                    platform: Platform::Node,
+                    ..FetchOptions::default()
+                },
+            ))
+            .unwrap();
+        assert_eq!(artifact.provenance.acquired_at_unix, 42);
+        assert!(
+            cache
+                .get(
+                    &ReleaseId {
+                        major: 13,
+                        build: 352
+                    },
+                    Platform::Node
+                )
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn credentials_and_http_errors_are_redacted() {
+        let credentials = AccountCredentials {
+            username: "private@example.test".into(),
+            password: Zeroizing::new("super-secret".into()),
+        };
+        let debug = format!("{credentials:?}");
+        assert!(!debug.contains("private@example.test"));
+        assert!(!debug.contains("super-secret"));
+        let error = FetchError::Http {
+            context: "downloading Foundry archive",
+        }
+        .to_string();
+        assert!(!error.contains("http://"));
+        assert!(!error.contains("https://"));
+    }
+
+    #[test]
+    fn retry_backoff_is_bounded_and_deterministic() {
+        let retry = RetryPolicy {
+            max_attempts: 3,
+            initial_backoff: Duration::from_millis(125),
+        };
+        assert_eq!(retry.delay(0), Duration::from_millis(125));
+        assert_eq!(retry.delay(1), Duration::from_millis(250));
+        assert_eq!(retry.delay(2), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn rejected_login_fails_closed() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let temp = tempfile::tempdir().unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = Arc::new(format!("http://{}", listener.local_addr().unwrap()));
+            let state = FakeState {
+                archive: Arc::new(Vec::new()),
+                base: base.clone(),
+                requested_build: Arc::new(Mutex::new(None)),
+                release_attempts: Arc::new(AtomicUsize::new(0)),
+                login_valid: Arc::new(Mutex::new(false)),
+            };
+            let app = Router::new()
+                .route("/auth/login/", get(fake_login).post(fake_post_login))
+                .with_state(state);
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let cache = Cache::new(temp.path().join("cache")).unwrap();
+            let credentials = AccountCredentials {
+                username: "user@example.test".into(),
+                password: Zeroizing::new("wrong".into()),
+            };
+            let options = FetchOptions {
+                site: Url::parse(&base).unwrap(),
+                retry: RetryPolicy {
+                    max_attempts: 1,
+                    initial_backoff: Duration::ZERO,
+                },
+                ..FetchOptions::default()
+            };
+            assert!(matches!(
+                acquire_account(
+                    &cache,
+                    &ReleaseId {
+                        major: 13,
+                        build: 351
+                    },
+                    &credentials,
+                    &options,
+                )
+                .await,
+                Err(FetchError::Remote {
+                    status: StatusCode::UNAUTHORIZED,
+                    ..
+                })
+            ));
+        });
     }
 }

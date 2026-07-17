@@ -1,21 +1,27 @@
 use std::sync::Arc;
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Path, State},
     http::StatusCode,
+    middleware::from_fn_with_state,
     response::IntoResponse,
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sqlx::PgPool;
 
 use crate::driver::{FakeDriver, FoundryDriver, WorldState};
+
+#[path = "auth.rs"]
+pub mod auth;
 
 #[derive(Clone)]
 pub struct AppState {
     pub driver: Arc<dyn FoundryDriver>,
     pub database: Option<PgPool>,
+    pub auth: Option<auth::AuthState>,
 }
 
 impl AppState {
@@ -23,6 +29,7 @@ impl AppState {
         Self {
             driver: Arc::new(FakeDriver::new(WorldState::Starting)),
             database: None,
+            auth: None,
         }
     }
 }
@@ -60,14 +67,22 @@ pub fn api_router() -> Router {
 }
 
 pub fn api_router_with_state(state: AppState) -> Router {
-    Router::new()
-        .route("/api/v1/healthz", get(healthz))
-        .route("/api/v1/readyz", get(readyz))
+    let protected = Router::new()
         .route("/api/v1", get(discovery))
+        .route("/api/v1/me", get(me))
         .route("/api/v1/world", get(world))
         .route("/api/v1/world/capabilities", get(capabilities))
         .route("/api/v1/world/documents/{collection}/{id}", get(document))
         .route("/api/v1/world/commands", post(command))
+        .layer(from_fn_with_state(state.clone(), auth::require_session));
+
+    Router::new()
+        .route("/api/v1/healthz", get(healthz))
+        .route("/api/v1/readyz", get(readyz))
+        .route("/api/auth/login", get(auth::login_start))
+        .route("/api/auth/oidc/callback", get(auth::oidc_callback))
+        .route("/api/auth/logout", post(auth::logout))
+        .merge(protected)
         .with_state(state)
 }
 
@@ -105,6 +120,16 @@ async fn discovery() -> impl IntoResponse {
             "capabilities": "/api/v1/world/capabilities",
             "console": "/api/console",
         }
+    }))
+}
+
+async fn me(Extension(principal): Extension<auth::Principal>) -> impl IntoResponse {
+    Json(json!({
+        "subject": principal.subject,
+        "issuer": principal.issuer,
+        "displayName": principal.display_name,
+        "email": principal.email,
+        "groups": principal.groups,
     }))
 }
 
@@ -171,8 +196,21 @@ async fn document(
 
 async fn command(
     State(state): State<AppState>,
+    Extension(principal): Extension<auth::Principal>,
     Json(request): Json<CommandRequest>,
 ) -> impl IntoResponse {
+    let Some(auth) = state.auth.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "oidc_not_configured"})),
+        );
+    };
+    if !principal.is_admin(&auth.admin_group) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "admin_required"})),
+        );
+    }
     if state.driver.world_state() != WorldState::Ready {
         return (
             StatusCode::SERVICE_UNAVAILABLE,

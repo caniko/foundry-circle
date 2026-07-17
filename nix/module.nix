@@ -7,6 +7,18 @@
   cfg = config.services.foundry-circle;
   packageType = lib.types.nullOr lib.types.package;
 in {
+  imports = [
+    (lib.mkRenamedOptionModule
+      ["services" "foundry-circle" "foundryApiUser"]
+      ["services" "foundry-circle" "foundryWorld" "apiUser"])
+    (lib.mkRenamedOptionModule
+      ["services" "foundry-circle" "foundryApiUserPasswordFile"]
+      ["services" "foundry-circle" "foundryWorld" "apiPasswordFile"])
+    (lib.mkRemovedOptionModule
+      ["services" "foundry-circle" "oidc" "clientSecretFile"]
+      "Foundry Circle uses a public PKCE client; configure Rauthy issuer, clientId, publicBaseUrl, and scopes instead.")
+  ];
+
   options.services.foundry-circle = {
     enable = lib.mkEnableOption "the Foundry Circle broker";
 
@@ -52,32 +64,51 @@ in {
       };
     };
 
-    foundryApiUserPasswordFile = lib.mkOption {
-      type = lib.types.nullOr lib.types.path;
-      default = null;
-      description = "Runtime-only password file for the dedicated Foundry API user.";
-    };
+    foundryWorld = {
+      apiPasswordFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "Runtime-only credential for the dedicated Foundry-world API user; never used for human Foundry Circle login.";
+      };
 
-    foundryApiUser = lib.mkOption {
-      type = lib.types.str;
-      default = "foundry-circle-api";
-      description = "Dedicated Foundry API user name, provisioned in the live world.";
+      apiUser = lib.mkOption {
+        type = lib.types.str;
+        default = "foundry-circle-api";
+        description = "Dedicated Foundry-world API user name, provisioned in the live world.";
+      };
     };
 
     oidc = {
       issuer = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
-        description = "Primary internal OIDC issuer URL (Canix uses Kanidm; Rauthy remains the federation surface).";
+        description = "Rauthy issuer URL. Kanidm is upstream of Rauthy and is not a Foundry Circle client.";
       };
       clientId = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
       };
-      clientSecretFile = lib.mkOption {
-        type = lib.types.nullOr lib.types.path;
+      publicBaseUrl = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
         default = null;
-        description = "Runtime-only OIDC client secret file.";
+        description = "Canonical public origin used for OIDC redirect and origin checks.";
+      };
+      scopes = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = ["openid" "profile" "email" "groups"];
+      };
+      accessGroup = lib.mkOption {
+        type = lib.types.str;
+        default = "foundry-circle-users";
+      };
+      adminGroup = lib.mkOption {
+        type = lib.types.str;
+        default = "foundry-circle-admins";
+      };
+      sessionTtlSeconds = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 43200;
+        description = "Maximum opaque browser-session lifetime; no refresh token is stored.";
       };
     };
   };
@@ -88,6 +119,10 @@ in {
         {
           assertion = cfg.package != null;
           message = "services.foundry-circle.package must be set when the service is enabled";
+        }
+        {
+          assertion = cfg.oidc.issuer != null && cfg.oidc.clientId != null && cfg.oidc.publicBaseUrl != null;
+          message = "services.foundry-circle.oidc must define the Rauthy issuer, public clientId, and publicBaseUrl; Foundry Circle has no local password or OIDC client-secret fallback";
         }
       ];
 
@@ -100,11 +135,11 @@ in {
       systemd.services.foundry-circle = {
         description = "Foundry Circle typed Foundry VTT broker";
         wantedBy = ["multi-user.target"];
-        after = ["network.target"] ++ lib.optional cfg.database.createLocally "postgresql.service";
-        wants = lib.optional cfg.database.createLocally "postgresql.service";
+        after = ["network-online.target"] ++ lib.optional cfg.database.createLocally "postgresql.service";
+        wants = ["network-online.target"] ++ lib.optional cfg.database.createLocally "postgresql.service";
         environment =
           {
-            FOUNDRY_API_USER = cfg.foundryApiUser;
+            FOUNDRY_WORLD_API_USER = cfg.foundryWorld.apiUser;
           }
           // lib.optionalAttrs (cfg.database.url != null || cfg.database.createLocally) {
             DATABASE_URL =
@@ -115,17 +150,17 @@ in {
           // lib.optionalAttrs (cfg.database.urlFile != null) {
             DATABASE_URL_FILE = "/run/credentials/foundry-circle.service/database-url";
           }
-          // lib.optionalAttrs (cfg.foundryApiUserPasswordFile != null) {
-            FOUNDRY_API_USER_PASSWORD_FILE = "/run/credentials/foundry-circle.service/foundry-api-user-password";
+          // lib.optionalAttrs (cfg.foundryWorld.apiPasswordFile != null) {
+            FOUNDRY_WORLD_API_PASSWORD_FILE = "/run/credentials/foundry-circle.service/foundry-world-api-password";
           }
-          // lib.optionalAttrs (cfg.oidc.issuer != null) {
+          // lib.optionalAttrs (cfg.oidc.issuer != null && cfg.oidc.clientId != null && cfg.oidc.publicBaseUrl != null) {
             FOUNDRY_CIRCLE_OIDC_ISSUER = cfg.oidc.issuer;
-          }
-          // lib.optionalAttrs (cfg.oidc.clientId != null) {
             FOUNDRY_CIRCLE_OIDC_CLIENT_ID = cfg.oidc.clientId;
-          }
-          // lib.optionalAttrs (cfg.oidc.clientSecretFile != null) {
-            FOUNDRY_CIRCLE_OIDC_CLIENT_SECRET_FILE = "/run/credentials/foundry-circle.service/oidc-client-secret";
+            FOUNDRY_CIRCLE_OIDC_PUBLIC_BASE_URL = cfg.oidc.publicBaseUrl;
+            FOUNDRY_CIRCLE_OIDC_SCOPES = lib.concatStringsSep " " cfg.oidc.scopes;
+            FOUNDRY_CIRCLE_OIDC_ACCESS_GROUP = cfg.oidc.accessGroup;
+            FOUNDRY_CIRCLE_OIDC_ADMIN_GROUP = cfg.oidc.adminGroup;
+            FOUNDRY_CIRCLE_SESSION_TTL_SECONDS = toString cfg.oidc.sessionTtlSeconds;
           };
         serviceConfig = {
           User = "foundry-circle";
@@ -141,12 +176,10 @@ in {
           ProtectHome = true;
           ReadWritePaths = ["/run/foundry-circle" "/var/lib/foundry-circle"];
           LoadCredential =
-            (lib.optional (cfg.foundryApiUserPasswordFile != null)
-              "foundry-api-user-password:${cfg.foundryApiUserPasswordFile}")
+            (lib.optional (cfg.foundryWorld.apiPasswordFile != null)
+              "foundry-world-api-password:${cfg.foundryWorld.apiPasswordFile}")
             ++ (lib.optional (cfg.database.urlFile != null)
-              "database-url:${cfg.database.urlFile}")
-            ++ (lib.optional (cfg.oidc.clientSecretFile != null)
-              "oidc-client-secret:${cfg.oidc.clientSecretFile}");
+              "database-url:${cfg.database.urlFile}");
         };
       };
     }

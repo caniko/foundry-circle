@@ -205,6 +205,8 @@ fn validate_package(package: &DesiredPackage) -> Result<(), ReconcileError> {
         )));
     }
     if package.id.is_empty()
+        || package.id == "."
+        || package.id == ".."
         || !package
             .id
             .chars()
@@ -339,10 +341,10 @@ fn write_state(path: &Path, state: &ManagedState) -> Result<(), ReconcileError> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn p(root: &Path, version: &str) -> DesiredPackage {
+    fn p(root: &Path, kind: &str, id: &str, version: &str) -> DesiredPackage {
         DesiredPackage {
-            kind: "module".into(),
-            id: "demo".into(),
+            kind: kind.into(),
+            id: id.into(),
             state: "present".into(),
             version: version.into(),
             store_path: root.join(version),
@@ -359,12 +361,39 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             packages,
         };
-        reconcile(manifest(vec![p(temp.path(), "1")]), &data, &state).unwrap();
+        let world = data.join("Data/worlds/kept/world.json");
+        fs::create_dir_all(world.parent().unwrap()).unwrap();
+        fs::write(&world, b"foundry-owned").unwrap();
+        reconcile(
+            manifest(vec![p(temp.path(), "module", "demo", "1")]),
+            &data,
+            &state,
+        )
+        .unwrap();
         assert_eq!(
             fs::read_link(data.join("Data/modules/demo")).unwrap(),
             temp.path().join("1")
         );
-        reconcile(manifest(vec![p(temp.path(), "2")]), &data, &state).unwrap();
+        reconcile(
+            manifest(vec![p(temp.path(), "module", "demo", "2")]),
+            &data,
+            &state,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_link(data.join("Data/modules/demo")).unwrap(),
+            temp.path().join("2")
+        );
+        reconcile(
+            manifest(vec![p(temp.path(), "module", "demo", "1")]),
+            &data,
+            &state,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_link(data.join("Data/modules/demo")).unwrap(),
+            temp.path().join("1")
+        );
         // Omitting a package preserves it; deletion requires a tombstone.
         reconcile(manifest(vec![]), &data, &state).unwrap();
         assert!(data.join("Data/modules/demo").exists());
@@ -381,10 +410,72 @@ mod tests {
         )
         .unwrap();
         assert!(!data.join("Data/modules/demo").exists());
+        assert_eq!(fs::read(&world).unwrap(), b"foundry-owned");
         fs::create_dir_all(data.join("Data/modules/demo")).unwrap();
         assert!(matches!(
-            reconcile(manifest(vec![p(temp.path(), "1")]), &data, &state),
+            reconcile(
+                manifest(vec![p(temp.path(), "module", "demo", "1")]),
+                &data,
+                &state
+            ),
             Err(ReconcileError::ForeignPath(_))
+        ));
+    }
+
+    #[test]
+    fn manages_systems_and_rejects_state_mismatch() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("1")).unwrap();
+        fs::create_dir_all(temp.path().join("foreign")).unwrap();
+        let data = temp.path().join("data");
+        let state = temp.path().join("state.json");
+        let manifest = |packages| DesiredManifest {
+            schema_version: SCHEMA_VERSION,
+            packages,
+        };
+        reconcile(
+            manifest(vec![p(temp.path(), "system", "rules", "1")]),
+            &data,
+            &state,
+        )
+        .unwrap();
+        let target = data.join("Data/systems/rules");
+        fs::remove_file(&target).unwrap();
+        unix_fs::symlink(temp.path().join("foreign"), &target).unwrap();
+        assert!(matches!(
+            reconcile(
+                manifest(vec![DesiredPackage {
+                    kind: "system".into(),
+                    id: "rules".into(),
+                    state: "absent".into(),
+                    version: String::new(),
+                    store_path: PathBuf::new(),
+                }]),
+                &data,
+                &state,
+            ),
+            Err(ReconcileError::StateMismatch(path)) if path == target
+        ));
+    }
+
+    #[test]
+    fn rejects_dot_path_components_and_duplicate_packages() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("1")).unwrap();
+        let data = temp.path().join("data");
+        let state = temp.path().join("state.json");
+        let manifest = |packages| DesiredManifest {
+            schema_version: SCHEMA_VERSION,
+            packages,
+        };
+        assert!(matches!(
+            reconcile(manifest(vec![p(temp.path(), "module", "..", "1")]), &data, &state),
+            Err(ReconcileError::UnsafeId(id)) if id == ".."
+        ));
+        let package = p(temp.path(), "module", "demo", "1");
+        assert!(matches!(
+            reconcile(manifest(vec![package.clone(), package]), &data, &state),
+            Err(ReconcileError::UnsafeId(message)) if message.contains("duplicate")
         ));
     }
 }

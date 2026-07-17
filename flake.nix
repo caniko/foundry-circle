@@ -56,7 +56,7 @@
       fetchPackage = toolchain.craneLib.buildPackage (commonArgs
         // {
           pname = "foundryvtt-fetch";
-          cargoExtraArgs = "-p foundryvtt-fetch --bin foundryvtt-fetch";
+          cargoExtraArgs = "-p foundryvtt-fetch --bins";
         });
       releaseBundle =
         pkgs.runCommand "foundry-circle-release-bundle" {
@@ -65,6 +65,8 @@
           mkdir -p staging/bin
           cp ${dioxusPackage}/bin/foundry-circle staging/bin/
           cp ${fetchPackage}/bin/foundryvtt-fetch staging/bin/
+          cp ${fetchPackage}/bin/foundryvtt-fetchd staging/bin/
+          cp ${fetchPackage}/bin/foundryvtt-fetch-hook staging/bin/
           tar -C staging -czf "$out" .
         '';
       dioxusPackage = rs-harbor.lib.mkDioxusFullstackPackage {
@@ -94,6 +96,30 @@
           rustToolchain = toolchain.rustToolchain;
         };
       };
+      packageFixtureSource = pkgs.runCommand "foundry-package-fixture-source" {} ''
+        mkdir -p "$out/module"
+        cat > "$out/module/module.json" <<'JSON'
+        {"id":"phase-two-fixture","version":"1.2.3","download":"https://example.invalid/phase-two-fixture.zip","compatibility":{"minimum":"13","verified":"14"}}
+        JSON
+        printf 'fixture\n' > "$out/module/content.txt"
+      '';
+      packageFixture = import ./nix/package-output.nix {
+        lib = nixpkgs.lib;
+        inherit pkgs;
+        source = packageFixtureSource;
+        kind = "module";
+        id = "phase-two-fixture";
+        version = "1.2.3";
+        manifestName = "module.json";
+        manifestUrl = "https://example.invalid/module.json";
+        url = "https://example.invalid/phase-two-fixture.zip";
+        hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        downloadUrl = "https://example.invalid/phase-two-fixture.zip";
+        compatibility = {
+          minimum = "13";
+          verified = "14";
+        };
+      };
       devShell = toolchain.craneLib.devShell {
         checks = self.checks.${system};
         packages = with pkgs;
@@ -107,6 +133,8 @@
         foundry-circle = dioxusPackage;
         foundry-circle-cli = cargoPackage;
         foundryvtt-fetch = fetchPackage;
+        foundryvtt-fetchd = fetchPackage;
+        foundryvtt-fetch-hook = fetchPackage;
         release-bundle = releaseBundle;
       };
 
@@ -129,6 +157,11 @@
             inherit cargoArtifacts;
             cargoClippyExtraArgs = "--workspace --all-targets --all-features -- --deny warnings";
           });
+        foundry-package-fixture = packageFixture;
+        foundry-reconcile-vm = import ./nix/tests/reconcile.nix {
+          inherit pkgs;
+          foundryvttFetch = fetchPackage;
+        };
       };
 
       devShells = {
@@ -149,9 +182,11 @@
       # Foundry service plus the companion broker. Canix supplies the concrete
       # package, host policy, credentials, and route values.
       nixosModules.foundry-stack = {
+        _module.args.nixFoundryvtt = nix-foundryvtt;
         imports = [
           nix-foundryvtt.nixosModules.foundryvtt
           (import ./nix/addons.nix)
+          (import ./nix/acquisition.nix)
           (import ./nix/module.nix)
         ];
       };

@@ -34,8 +34,8 @@ explicit package deletion; worlds remain mutable Foundry-owned state.
 
 ## Boundaries
 
-- Kanidm is the primary internal OIDC issuer; Rauthy remains the
-  nix-provenance-managed federation surface for outward identity flows.
+- Rauthy is the production OIDC issuer. Existing Kanidm identities reach it
+  through the nix-provenance-managed federation surface.
 - SQLite is not supported; PostgreSQL is the only database backend.
 - Arbitrary JavaScript/evaluate endpoints are not part of the production
   feature set.

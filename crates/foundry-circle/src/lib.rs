@@ -53,11 +53,9 @@ pub mod driver {
 /// behind the same application/service boundary as `/api/v1`.
 #[component]
 pub fn App() -> Element {
-    let identity = Some(Identity {
-        display_name: "Foundry Circle".to_string(),
-        email: None,
-        account_url: None,
-    });
+    // The browser identity is supplied by the authenticated `/api/v1/me`
+    // response.  Never render a fabricated human identity in the shell.
+    let identity: Option<Identity> = None;
 
     rsx! {
         AppShell { title: "Foundry Circle".to_string(), identity,

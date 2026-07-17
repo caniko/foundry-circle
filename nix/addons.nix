@@ -54,6 +54,30 @@
       else toString entry.package;
   };
   desired = lib.mapAttrsToList packageValue cfg.declarativePackages;
+  safePackage = entry:
+    entry.id
+    != "."
+    && entry.id != ".."
+    && builtins.match "[A-Za-z0-9._-]+" entry.id != null;
+  provenanceMatches = entry:
+    if entry.state == "absent"
+    then true
+    else let
+      provenance =
+        if entry.package == null
+        then {}
+        else entry.package.foundryPackage or {};
+      expectedVersion =
+        if entry.version != ""
+        then entry.version
+        else provenance.version or "";
+    in
+      entry.package
+      != null
+      && (provenance.kind or null) == entry.kind
+      && (provenance.id or null) == entry.id
+      && (provenance.version or null) == expectedVersion
+      && expectedVersion != "";
   desiredFile = pkgs.writeText "foundry-circle-packages.json" (builtins.toJSON {
     schemaVersion = 1;
     packages = desired;
@@ -79,12 +103,12 @@ in {
           message = "services.foundryvtt.packageManager must be set when declarativePackages are configured";
         }
         {
-          assertion = lib.all (entry: builtins.match "[A-Za-z0-9._-]+" entry.id != null) (lib.attrValues cfg.declarativePackages);
+          assertion = lib.all safePackage (lib.attrValues cfg.declarativePackages);
           message = "declarative Foundry package ids must be safe path components";
         }
         {
-          assertion = lib.all (entry: entry.state == "absent" || (entry.package != null && entry.version != "" || (entry.package != null && (entry.package.foundryPackage.version or "") != ""))) (lib.attrValues cfg.declarativePackages);
-          message = "present declarative Foundry packages must provide a version or package provenance";
+          assertion = lib.all provenanceMatches (lib.attrValues cfg.declarativePackages);
+          message = "present declarative Foundry packages must match their package kind/id/version provenance";
         }
       ];
     }

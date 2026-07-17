@@ -43,6 +43,8 @@ enum Command {
         password_file: PathBuf,
         #[arg(long, default_value = "./foundry-cache")]
         cache_dir: PathBuf,
+        #[arg(long, default_value = "node")]
+        platform: String,
         #[arg(long, default_value = "https://foundryvtt.com")]
         site: String,
     },
@@ -52,6 +54,8 @@ enum Command {
         release: String,
         #[arg(long, default_value = "./foundry-cache")]
         cache_dir: PathBuf,
+        #[arg(long, default_value = "node")]
+        platform: String,
         #[arg(long)]
         release_url_file: Option<PathBuf>,
         #[arg(long)]
@@ -111,13 +115,16 @@ async fn main() -> Result<()> {
             username_file,
             password_file,
             cache_dir,
+            platform,
             site,
         } => {
             let release = ReleaseId::parse(&release).context("parse --release")?;
+            let platform = parse_platform(&platform)?;
             let credentials = AccountCredentials::from_files(username_file, password_file)
                 .context("read credentials")?;
             let options = FetchOptions {
                 site: Url::parse(&site).context("parse --site")?,
+                platform,
                 ..FetchOptions::default()
             };
             let cache = Cache::new(cache_dir).context("create cache")?;
@@ -129,6 +136,7 @@ async fn main() -> Result<()> {
         Command::Acquire {
             release,
             cache_dir,
+            platform,
             release_url_file,
             username_file,
             password_file,
@@ -136,8 +144,10 @@ async fn main() -> Result<()> {
             site,
         } => {
             let release = ReleaseId::parse(&release).context("parse --release")?;
+            let platform = parse_platform(&platform)?;
             let options = FetchOptions {
                 site: Url::parse(&site).context("parse --site")?,
+                platform,
                 ..FetchOptions::default()
             };
             let cache = Cache::new(cache_dir).context("create cache")?;
@@ -183,7 +193,9 @@ fn print_artifact(artifact: &Artifact) -> Result<()> {
 fn parse_platform(value: &str) -> Result<Platform> {
     if value.eq_ignore_ascii_case("node") {
         Ok(Platform::Node)
+    } else if value.eq_ignore_ascii_case("linux") {
+        Ok(Platform::Linux)
     } else {
-        bail!("unsupported platform {value:?}; only node is supported")
+        bail!("unsupported platform {value:?}; expected node or linux")
     }
 }

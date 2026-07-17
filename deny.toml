@@ -6,8 +6,10 @@ version = 2
 allow = [
   "Apache-2.0",
   "BSD-2-Clause",
+  "BSD-3-Clause",
   "BSL-1.0",
   "CC0-1.0",
+  "CDLA-Permissive-2.0",
   "ISC",
   "LicenseRef-UFL-1.0",
   "MIT",
@@ -25,3 +27,4 @@ wildcards = "allow"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = ["https://codeberg.org/caniko/tartan-ui.git"]

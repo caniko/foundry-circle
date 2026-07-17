@@ -20,6 +20,9 @@ server = [
   "dep:tower-http",
   "dep:tracing",
   "dep:tracing-subscriber",
+  "dep:oidc-app-auth",
+  "dep:chrono",
+  "dep:uuid",
 ]
 devtools = ["dioxus/devtools", "tartan-ui-dioxus/devtools"]
 
@@ -31,6 +34,9 @@ tartan-ui-dioxus.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+oidc-app-auth = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
 
 axum = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }

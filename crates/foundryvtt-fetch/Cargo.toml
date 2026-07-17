@@ -7,7 +7,7 @@ license.workspace = true
 authors.workspace = true
 description = "Credential-safe Foundry VTT release acquisition and archive validation"
 readme = "README.md"
-repository = "ssh://git@codeberg.org/caniko/foundry-circle.git"
+repository = "https://codeberg.org/caniko/foundry-circle"
 keywords = ["foundryvtt", "nix", "provenance"]
 categories = ["command-line-utilities", "filesystem"]
 publish = true
@@ -19,6 +19,14 @@ path = "src/lib.rs"
 [[bin]]
 name = "foundryvtt-fetch"
 path = "src/main.rs"
+
+[[bin]]
+name = "foundryvtt-fetchd"
+path = "src/daemon.rs"
+
+[[bin]]
+name = "foundryvtt-fetch-hook"
+path = "src/hook.rs"
 
 [dependencies]
 anyhow.workspace = true

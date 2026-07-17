@@ -3122,7 +3122,7 @@ version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51e219e79014df21a225b1860a479e2dcd7cbd9130f4defd4bd0e191ea31d67d"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.21.7",
  "chrono",
  "getrandom 0.2.17",
  "http",
@@ -4623,7 +4623,7 @@ dependencies = [
 [[package]]
 name = "tartan-ui-core"
 version = "0.1.0"
-source = "git+https://codeberg.org/caniko/tartan-ui.git?rev=a52223edf2f3119797d82d44b51b938b85f06639#a52223edf2f3119797d82d44b51b938b85f06639"
+source = "git+https://codeberg.org/caniko/tartan-ui.git?rev=fb1010b4213f4fd1abb68c52f53c0c5f05e4a06a#fb1010b4213f4fd1abb68c52f53c0c5f05e4a06a"
 dependencies = [
  "serde",
 ]
@@ -4631,7 +4631,7 @@ dependencies = [
 [[package]]
 name = "tartan-ui-dioxus"
 version = "0.1.0"
-source = "git+https://codeberg.org/caniko/tartan-ui.git?rev=a52223edf2f3119797d82d44b51b938b85f06639#a52223edf2f3119797d82d44b51b938b85f06639"
+source = "git+https://codeberg.org/caniko/tartan-ui.git?rev=fb1010b4213f4fd1abb68c52f53c0c5f05e4a06a#fb1010b4213f4fd1abb68c52f53c0c5f05e4a06a"
 dependencies = [
  "dioxus",
  "tartan-ui-core",
@@ -5387,7 +5387,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

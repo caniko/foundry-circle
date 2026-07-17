@@ -1,6 +1,6 @@
 [ci]
 runtime = "nix"
-runner = "atlas"
+runner = "atlas-nix-trusted"
 workspace = true
 with_nextest = true
 with_msrv = true
@@ -16,7 +16,7 @@ key = "818D507F1E62139F8A17EAA64623DEA06FDACFE1"
 repo = "caniko/foundry-circle"
 
 [release.artifacts]
-runner = "atlas"
+runner = "atlas-nix-trusted"
 build_commands = [
   "mkdir -p release",
   "nix build .#release-bundle --out-link release/foundry-circle.tar.gz",

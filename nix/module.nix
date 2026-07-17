@@ -11,9 +11,9 @@ in {
     (lib.mkRenamedOptionModule
       ["services" "foundry-circle" "foundryApiUser"]
       ["services" "foundry-circle" "foundryWorld" "apiUser"])
-    (lib.mkRenamedOptionModule
+    (lib.mkRemovedOptionModule
       ["services" "foundry-circle" "foundryApiUserPasswordFile"]
-      ["services" "foundry-circle" "foundryWorld" "apiPasswordFile"])
+      "Foundry Circle uses Kanidm + Rauthy for human authentication and has no password credential.")
     (lib.mkRemovedOptionModule
       ["services" "foundry-circle" "oidc" "clientSecretFile"]
       "Foundry Circle uses a public PKCE client; configure Rauthy issuer, clientId, publicBaseUrl, and scopes instead.")
@@ -65,12 +65,6 @@ in {
     };
 
     foundryWorld = {
-      apiPasswordFile = lib.mkOption {
-        type = lib.types.nullOr lib.types.path;
-        default = null;
-        description = "Runtime-only credential for the dedicated Foundry-world API user; never used for human Foundry Circle login.";
-      };
-
       apiUser = lib.mkOption {
         type = lib.types.str;
         default = "foundry-circle-api";
@@ -150,9 +144,6 @@ in {
           // lib.optionalAttrs (cfg.database.urlFile != null) {
             DATABASE_URL_FILE = "/run/credentials/foundry-circle.service/database-url";
           }
-          // lib.optionalAttrs (cfg.foundryWorld.apiPasswordFile != null) {
-            FOUNDRY_WORLD_API_PASSWORD_FILE = "/run/credentials/foundry-circle.service/foundry-world-api-password";
-          }
           // lib.optionalAttrs (cfg.oidc.issuer != null && cfg.oidc.clientId != null && cfg.oidc.publicBaseUrl != null) {
             FOUNDRY_CIRCLE_OIDC_ISSUER = cfg.oidc.issuer;
             FOUNDRY_CIRCLE_OIDC_CLIENT_ID = cfg.oidc.clientId;
@@ -176,10 +167,8 @@ in {
           ProtectHome = true;
           ReadWritePaths = ["/run/foundry-circle" "/var/lib/foundry-circle"];
           LoadCredential =
-            (lib.optional (cfg.foundryWorld.apiPasswordFile != null)
-              "foundry-world-api-password:${cfg.foundryWorld.apiPasswordFile}")
-            ++ (lib.optional (cfg.database.urlFile != null)
-              "database-url:${cfg.database.urlFile}");
+            lib.optional (cfg.database.urlFile != null)
+            "database-url:${cfg.database.urlFile}";
         };
       };
     }

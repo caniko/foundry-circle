@@ -10,10 +10,10 @@ Foundry Circle is a Rust/Axum broker for the active Foundry VTT world, with a
 Dioxus 0.7 operator console using tartan-ui. PostgreSQL stores control-plane
 state only; Foundry remains authoritative for world documents.
 
-The repository is intentionally bootstrapped with health, discovery, a typed
-driver seam, and a non-ready readiness contract. The live browser driver,
-OIDC, migrations, capability registry, and route integrations are added only
-after the licensed Foundry archive and disposable v13.351 world are available.
+The repository provides health, discovery, a typed driver seam, OIDC login,
+PostgreSQL-backed sessions, a capability registry, and a non-ready readiness
+contract. Foundry world documents remain behind the typed driver seam until a
+licensed archive and disposable v13.351 world certify the live browser driver.
 
 ## Development
 

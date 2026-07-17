@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     rs-harbor = {
-      url = "git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk";
+      url = "git+https://codeberg.org/caniko/rs-harbor.git?rev=8692201d374c50e74e4db552072fe9665c83cab8";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.rust-overlay.follows = "rust-overlay";
     };
@@ -41,23 +41,33 @@
         channel = "stable";
         extensions = ["rustfmt" "clippy" "rust-src"];
       };
+      sccachePackage = rs-harbor.packages.${system}.sccache;
+      buildCache = rs-harbor.lib.mkBuildCachePolicy {
+        inherit pkgs sccachePackage;
+        buildPackageSet = pkgs.buildPackages;
+        cacheRoot = "/tmp/sccache";
+        namespaceScope = "canix-rust";
+        namespaceGeneration = 4;
+      };
+      cacheRust = package: buildCache.withRustCache {inherit package;};
+      cacheDioxus = package: buildCache.withDioxusCache {inherit package;};
       src = (toolchain.craneLib).cleanCargoSource ./.;
       commonArgs = {
         inherit src;
         pname = "foundry-circle";
         strictDeps = true;
       };
-      cargoArtifacts = toolchain.craneLib.buildDepsOnly commonArgs;
-      cargoPackage = toolchain.craneLib.buildPackage (commonArgs
+      cargoArtifacts = cacheRust (toolchain.craneLib.buildDepsOnly commonArgs);
+      cargoPackage = cacheRust (toolchain.craneLib.buildPackage (commonArgs
         // {
           inherit cargoArtifacts;
           cargoExtraArgs = "--workspace --all-features";
-        });
-      fetchPackage = toolchain.craneLib.buildPackage (commonArgs
+        }));
+      fetchPackage = cacheRust (toolchain.craneLib.buildPackage (commonArgs
         // {
           pname = "foundryvtt-fetch";
           cargoExtraArgs = "-p foundryvtt-fetch --bins";
-        });
+        }));
       releaseBundle =
         pkgs.runCommand "foundry-circle-release-bundle" {
           nativeBuildInputs = [pkgs.gnutar pkgs.gzip];
@@ -69,7 +79,7 @@
           cp ${fetchPackage}/bin/foundryvtt-fetch-hook staging/bin/
           tar -C staging -czf "$out" .
         '';
-      dioxusPackage = rs-harbor.lib.mkDioxusFullstackPackage {
+      dioxusPackage = cacheDioxus (rs-harbor.lib.mkDioxusFullstackPackage {
         inherit pkgs src;
         craneLib = toolchain.craneLib;
         rustToolchain = toolchain.rustToolchain;
@@ -86,7 +96,7 @@
         serverFeatures = ["server"];
         publicSubdir = "share/foundry-circle/public";
         wrapServer = false;
-      };
+      });
       treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
       preCommit = git-hooks.lib.${system}.run {
         src = ./.;
@@ -152,11 +162,11 @@
           inherit src;
           pname = "foundry-circle";
         };
-        clippy = toolchain.craneLib.cargoClippy (commonArgs
+        clippy = cacheRust (toolchain.craneLib.cargoClippy (commonArgs
           // {
             inherit cargoArtifacts;
             cargoClippyExtraArgs = "--workspace --all-targets --all-features -- --deny warnings";
-          });
+          }));
         foundry-package-fixture = packageFixture;
         foundry-reconcile-vm = import ./nix/tests/reconcile.nix {
           inherit pkgs;

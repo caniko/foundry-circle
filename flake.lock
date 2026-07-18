@@ -62,11 +62,11 @@
     },
     "crane_5": {
       "locked": {
-        "lastModified": 1781825982,
-        "narHash": "sha256-SlXKwIRIhrOSAcTjCB3ftPLzJWZStQIPS7J1FlZPnKk=",
+        "lastModified": 1784248371,
+        "narHash": "sha256-0l0Y4D4wbZhp1Oi6h8OpbLtIm/4FN88oCf54MK2ZgiM=",
         "owner": "ipetkov",
         "repo": "crane",
-        "rev": "469fd08d0bcf6926321fa973c6777fbc87785dd7",
+        "rev": "f7d151ec0bf52cf9662e2f59d7bea28588c2f070",
         "type": "github"
       },
       "original": {
@@ -871,17 +871,17 @@
         ]
       },
       "locked": {
-        "lastModified": 1784323542,
-        "narHash": "sha256-M1Ap9kNSk4uJ18v2xrD3KVwpse1tYL0ZyUxF5aqxhvs=",
+        "lastModified": 1784370889,
+        "narHash": "sha256-GgFEdnCBL2AFLiG2uVjGqBK0tSQk0jAZC0+GzX2DSgA=",
         "ref": "trunk",
-        "rev": "9bfa8bdb0ecb22d7bc11448665f7fbaebae7a759",
-        "revCount": 134,
+        "rev": "b40cd4c4fdf6133962f67bd68a48bfd5d554d47f",
+        "revCount": 144,
         "type": "git",
         "url": "https://codeberg.org/caniko/rs-harbor.git"
       },
       "original": {
         "ref": "trunk",
-        "rev": "9bfa8bdb0ecb22d7bc11448665f7fbaebae7a759",
+        "rev": "b40cd4c4fdf6133962f67bd68a48bfd5d554d47f",
         "type": "git",
         "url": "https://codeberg.org/caniko/rs-harbor.git"
       }

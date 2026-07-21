@@ -11,6 +11,11 @@ publish = false
 [features]
 default = ["server"]
 web = ["dioxus/web", "tartan-ui-dioxus/web", "dep:wasm-bindgen"]
+web-split = [
+  "dioxus/wasm-split",
+  "dioxus-router/wasm-split",
+  "tartan-ui-dioxus/wasm-split",
+]
 server = [
   "dioxus/server",
   "tartan-ui-dioxus/server",

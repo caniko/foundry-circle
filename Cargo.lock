@@ -116,6 +116,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-once-cell"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4288f83726785267c6f2ef073a3d83dc3f9b81464e9f99898240cced85fce35a"
+
+[[package]]
 name = "async-stream"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1043,6 +1049,7 @@ dependencies = [
  "serde",
  "subsecond",
  "warnings",
+ "wasm-splitter",
 ]
 
 [[package]]
@@ -4623,7 +4630,7 @@ dependencies = [
 [[package]]
 name = "tartan-ui-core"
 version = "0.1.0"
-source = "git+https://codeberg.org/caniko/tartan-ui.git?rev=fb1010b4213f4fd1abb68c52f53c0c5f05e4a06a#fb1010b4213f4fd1abb68c52f53c0c5f05e4a06a"
+source = "git+https://codeberg.org/caniko/tartan-ui.git?rev=d8f994da26846b6785194e7969a5d31d9fc050f1#d8f994da26846b6785194e7969a5d31d9fc050f1"
 dependencies = [
  "serde",
 ]
@@ -4631,7 +4638,7 @@ dependencies = [
 [[package]]
 name = "tartan-ui-dioxus"
 version = "0.1.0"
-source = "git+https://codeberg.org/caniko/tartan-ui.git?rev=fb1010b4213f4fd1abb68c52f53c0c5f05e4a06a#fb1010b4213f4fd1abb68c52f53c0c5f05e4a06a"
+source = "git+https://codeberg.org/caniko/tartan-ui.git?rev=d8f994da26846b6785194e7969a5d31d9fc050f1#d8f994da26846b6785194e7969a5d31d9fc050f1"
 dependencies = [
  "dioxus",
  "tartan-ui-core",
@@ -5302,6 +5309,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc1b4cb0cc549fcf58d7dfc081778139b3d283a081644e833e84682ad71cea24"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "wasm-split-macro"
+version = "0.7.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "540776437e21577983e166d89a0c65f355c0409a20e27ca79f72798d7192f0a3"
+dependencies = [
+ "base16",
+ "digest",
+ "proc-macro2",
+ "quote",
+ "sha2",
+ "syn",
+]
+
+[[package]]
+name = "wasm-splitter"
+version = "0.7.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e70a57a19a59bd771cd2db8320d6a65de1763995e9fbdc0d1508301138526231"
+dependencies = [
+ "async-once-cell",
+ "wasm-split-macro",
 ]
 
 [[package]]

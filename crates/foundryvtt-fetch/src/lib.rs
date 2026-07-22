@@ -1264,55 +1264,63 @@ mod tests {
 
     #[test]
     fn exact_offline_cache_fallback_is_verified() {
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("source.zip");
-        archive(&source, modern_package(13, 351), Platform::Node);
-        let cache = Cache::new(temp.path().join("cache")).unwrap();
-        let release = ReleaseId {
-            major: 13,
-            build: 351,
-        };
-        cache
-            .put_at(
-                &release,
-                Platform::Node,
-                SourceKind::PreAcquiredArchive,
-                &source,
-                1024 * 1024,
-                42,
-            )
+        std::thread::Builder::new()
+            .name("foundry-fetch-offline-cache".into())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let temp = tempfile::tempdir().unwrap();
+                let source = temp.path().join("source.zip");
+                archive(&source, modern_package(13, 351), Platform::Node);
+                let cache = Cache::new(temp.path().join("cache")).unwrap();
+                let release = ReleaseId {
+                    major: 13,
+                    build: 351,
+                };
+                cache
+                    .put_at(
+                        &release,
+                        Platform::Node,
+                        SourceKind::PreAcquiredArchive,
+                        &source,
+                        1024 * 1024,
+                        42,
+                    )
+                    .unwrap();
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let artifact = runtime
+                    .block_on(acquire(
+                        &cache,
+                        &release,
+                        &AcquireSources {
+                            offline: true,
+                            ..AcquireSources::default()
+                        },
+                        &FetchOptions {
+                            platform: Platform::Node,
+                            ..FetchOptions::default()
+                        },
+                    ))
+                    .unwrap();
+                assert_eq!(artifact.provenance.acquired_at_unix, 42);
+                assert!(
+                    cache
+                        .get(
+                            &ReleaseId {
+                                major: 13,
+                                build: 352
+                            },
+                            Platform::Node
+                        )
+                        .unwrap()
+                        .is_none()
+                );
+            })
+            .unwrap()
+            .join()
             .unwrap();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let artifact = runtime
-            .block_on(acquire(
-                &cache,
-                &release,
-                &AcquireSources {
-                    offline: true,
-                    ..AcquireSources::default()
-                },
-                &FetchOptions {
-                    platform: Platform::Node,
-                    ..FetchOptions::default()
-                },
-            ))
-            .unwrap();
-        assert_eq!(artifact.provenance.acquired_at_unix, 42);
-        assert!(
-            cache
-                .get(
-                    &ReleaseId {
-                        major: 13,
-                        build: 352
-                    },
-                    Platform::Node
-                )
-                .unwrap()
-                .is_none()
-        );
     }
 
     #[test]

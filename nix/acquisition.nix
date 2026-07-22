@@ -40,6 +40,15 @@
   });
   hook = "${cfg.fetchPackage}/bin/foundryvtt-fetch-hook";
   daemon = "${cfg.fetchPackage}/bin/foundryvtt-fetchd";
+  # Nix executes `pre-build-hook` as a single executable path; it does not
+  # perform shell-style argument splitting. Keep the configured value free of
+  # arguments and forward the hook's derivation arguments from a wrapper.
+  hookWrapper = pkgs.writeShellScript "foundryvtt-fetch-hook-wrapper" ''
+    exec ${lib.escapeShellArg hook} \
+      --socket ${lib.escapeShellArg cfg.socketPath} \
+      --nix ${lib.escapeShellArg "${pkgs.nix}/bin/nix"} \
+      "$@"
+  '';
 in {
   options.services.foundryvtt.acquisition = {
     enable = lib.mkEnableOption "declarative licensed Foundry VTT acquisition";
@@ -102,7 +111,7 @@ in {
 
     services.foundryvtt.package = lib.mkDefault licensedPackage;
     nix.settings = {
-      pre-build-hook = "${hook} --socket ${cfg.socketPath} --nix ${pkgs.nix}/bin/nix";
+      pre-build-hook = hookWrapper;
       system-features = lib.mkAfter ["foundry-license"];
     };
     users.users.foundryvtt-acquire = {

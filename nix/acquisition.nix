@@ -133,7 +133,9 @@ in {
         ExecStart = "${daemon} --socket ${cfg.socketPath} --cache-dir ${cfg.cacheDir} --username ${lib.escapeShellArg cfg.accountUsername} --site ${lib.escapeShellArg cfg.site}";
         ExecStartPost = "+${pkgs.coreutils}/bin/chgrp nixbld ${cfg.socketPath}";
         RuntimeDirectory = "foundryvtt-acquisition";
-        RuntimeDirectoryMode = "0750";
+        # Nix build users reach the socket after ExecStartPost changes its
+        # group to nixbld; they also need directory traversal to get there.
+        RuntimeDirectoryMode = "0755";
         Restart = "on-failure";
         RestartSec = 5;
         NoNewPrivileges = true;

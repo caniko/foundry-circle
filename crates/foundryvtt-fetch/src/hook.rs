@@ -22,6 +22,8 @@ const MAX_RESPONSE_BYTES: usize = 16 * 1024;
 struct Args {
     #[arg(value_name = "DERIVATION")]
     derivation: PathBuf,
+    #[arg(value_name = "SANDBOX")]
+    _sandbox: Option<PathBuf>,
     #[arg(long, default_value = "/run/foundryvtt-acquisition.sock")]
     socket: PathBuf,
     #[arg(long, default_value = "nix")]

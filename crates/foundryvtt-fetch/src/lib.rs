@@ -562,7 +562,12 @@ pub async fn acquire_account(
     form.insert("password", credentials.password.as_str());
     form.insert("csrfmiddlewaretoken", csrf.as_str());
     let response = send_with_retry(
-        client.post(login_url).form(&form),
+        client
+            .post(login_url.clone())
+            // Foundry enforces Django's HTTPS CSRF referer check in addition
+            // to the cookie and hidden form token.
+            .header(reqwest::header::REFERER, login_url.as_str())
+            .form(&form),
         options,
         "submitting account login",
     )
@@ -1135,11 +1140,17 @@ mod tests {
     }
     async fn fake_post_login(
         State(state): State<FakeState>,
+        headers: HeaderMap,
         Form(form): Form<std::collections::HashMap<String, String>>,
     ) -> axum::response::Response {
+        let expected_referer = format!("{}/auth/login/", state.base);
         let valid = form.get("csrfmiddlewaretoken").map(String::as_str) == Some("token")
             && form.get("username").map(String::as_str) == Some("user@example.test")
-            && form.get("password").map(String::as_str) == Some("secret");
+            && form.get("password").map(String::as_str) == Some("secret")
+            && headers
+                .get(header::REFERER)
+                .and_then(|value| value.to_str().ok())
+                == Some(expected_referer.as_str());
         *state.login_valid.lock().unwrap() = valid;
         if valid {
             (

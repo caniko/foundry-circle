@@ -41,6 +41,7 @@
         channel = "stable";
         extensions = ["rustfmt" "clippy" "rust-src"];
       };
+      wasmToolchain = rs-harbor.lib.mkWasmToolchain {inherit pkgs;};
       sccachePackage = rs-harbor.packages.${system}.sccache;
       buildCache = rs-harbor.lib.mkBuildCachePolicy {
         inherit pkgs sccachePackage;
@@ -83,14 +84,16 @@
         '';
       dioxusPackage = cacheDioxus (rs-harbor.lib.mkDioxusFullstackPackage {
         inherit pkgs src;
-        craneLib = toolchain.craneLib;
-        rustToolchain = toolchain.rustToolchain;
+        craneLib = wasmToolchain.craneLib;
+        rustToolchain = wasmToolchain.rustToolchain;
         cargoLock = ./Cargo.lock;
         pname = "foundry-circle";
         package = "foundry-circle";
         binary = "foundry-circle";
         serverInstallName = "foundry-circle";
-        serverBinary = "foundry-circle";
+        # Dioxus fullstack emits the server artifact as `server`; the Cargo
+        # binary remains foundry-circle and is selected above.
+        serverBinary = "server";
         profile = "release";
         debugSymbols = false;
         noDefaultFeatures = true;
@@ -170,6 +173,9 @@
             cargoClippyExtraArgs = "--workspace --all-targets --all-features -- --deny warnings";
           }));
         foundry-package-fixture = packageFixture;
+        foundry-module = import ./nix/tests/module.nix {
+          inherit nixpkgs pkgs;
+        };
         foundry-reconcile-vm = import ./nix/tests/reconcile.nix {
           inherit pkgs;
           foundryvttFetch = fetchPackage;

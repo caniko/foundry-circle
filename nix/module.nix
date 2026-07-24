@@ -134,6 +134,8 @@ in {
         environment =
           {
             FOUNDRY_WORLD_API_USER = cfg.foundryWorld.apiUser;
+            FOUNDRY_CIRCLE_BIND = "${cfg.listenAddress}:${toString cfg.listenPort}";
+            DIOXUS_PUBLIC_PATH = "${cfg.package}/${cfg.package.dioxus.publicDir or "share/foundry-circle/public"}";
           }
           // lib.optionalAttrs (cfg.database.url != null || cfg.database.createLocally) {
             DATABASE_URL =
@@ -157,7 +159,6 @@ in {
           User = "foundry-circle";
           Group = "foundry-circle";
           ExecStart = "${cfg.package}/bin/foundry-circle";
-          Environment = "FOUNDRY_CIRCLE_BIND=${cfg.listenAddress}:${toString cfg.listenPort}";
           RuntimeDirectory = "foundry-circle";
           StateDirectory = "foundry-circle";
           Restart = "on-failure";

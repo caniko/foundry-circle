@@ -14,7 +14,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use foundryvtt_fetch::{
-    AccountCredentials, Cache, FetchOptions, Platform, ReleaseId, acquire_account,
+    AccountCredentials, Cache, FetchError, FetchOptions, Platform, ReleaseId, acquire_account,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -88,6 +88,12 @@ impl AcquireResponse {
             error: Some(message.into()),
         }
     }
+}
+
+fn acquisition_failure(error: FetchError) -> AcquireResponse {
+    let message = error.to_string();
+    eprintln!("foundryvtt-fetchd: acquisition failed: {message}");
+    AcquireResponse::error(message)
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -215,7 +221,7 @@ async fn acquire(
             AcquireResponse::ready(&artifact)
         }
         Ok(_) => AcquireResponse::error("cached archive hash does not match the declared Nix hash"),
-        Err(_) => AcquireResponse::error("licensed Foundry archive acquisition failed"),
+        Err(error) => acquisition_failure(error),
     }
 }
 
@@ -226,4 +232,37 @@ fn restrict_socket(path: &Path) -> Result<()> {
         fs::set_permissions(path, fs::Permissions::from_mode(0o660))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::StatusCode;
+
+    #[test]
+    fn endpoint_statuses_reach_the_daemon_error() {
+        for (status, context) in [
+            (StatusCode::UNAUTHORIZED, "account login"),
+            (StatusCode::FORBIDDEN, "release URL endpoint"),
+            (StatusCode::TOO_MANY_REQUESTS, "release URL endpoint"),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "downloading Foundry archive",
+            ),
+        ] {
+            let response = acquisition_failure(FetchError::Remote {
+                status,
+                context: context.into(),
+            });
+            let message = response.error.expect("error response has a message");
+            assert!(message.contains(status.as_str()), "{message}");
+            assert!(message.contains(context), "{message}");
+        }
+
+        let response = acquisition_failure(FetchError::AuthenticationRejected {
+            status: StatusCode::OK,
+        });
+        let message = response.error.expect("error response has a message");
+        assert!(message.contains("200 OK"), "{message}");
+    }
 }

@@ -162,6 +162,7 @@ in {
           RuntimeDirectory = "foundry-circle";
           StateDirectory = "foundry-circle";
           Restart = "on-failure";
+          RestartSec = "30s";
           NoNewPrivileges = true;
           PrivateTmp = true;
           ProtectSystem = "strict";
@@ -170,6 +171,10 @@ in {
           LoadCredential =
             lib.optional (cfg.database.urlFile != null)
             "database-url:${cfg.database.urlFile}";
+        };
+        unitConfig = {
+          StartLimitIntervalSec = "5min";
+          StartLimitBurst = 5;
         };
       };
     }

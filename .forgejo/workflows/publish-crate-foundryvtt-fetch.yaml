@@ -14,7 +14,7 @@ concurrency:
 jobs:
   publish:
     enable-openid-connect: true
-    runs-on: atlas
+    runs-on: atlas-nix-trusted
     env:
       NIX_CONFIG: "experimental-features = nix-command flakes"
       XDG_CACHE_HOME: "/tmp/.cache"
@@ -129,7 +129,7 @@ jobs:
               exit 1
             fi
           fi
-          if ! status="$(curl --retry 3 -sS -o /dev/null -w '%{http_code}' -A 'simit init-ci publish check' "https://crates.io/api/v1/crates/${crate_name}/${version}")"; then
+          if ! status="$(curl --retry 3 -sS -o /dev/null -w '%{http_code}' -A 'simit init ci publish check' "https://crates.io/api/v1/crates/${crate_name}/${version}")"; then
             status=000
           fi
           case "$status" in

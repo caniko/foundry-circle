@@ -44,8 +44,10 @@ pub enum FetchError {
     InvalidArchive(String),
     #[error("HTTP request failed while {context}; URL and response content redacted")]
     Http { context: &'static str },
-    #[error("remote release endpoint returned {status}: {context}")]
+    #[error("Foundry endpoint returned {status}: {context}")]
     Remote { status: StatusCode, context: String },
+    #[error("Foundry account login response did not indicate success ({status})")]
+    AuthenticationRejected { status: StatusCode },
     #[error("required login form field was not found: {0}")]
     MissingFormField(&'static str),
     #[error("cache metadata is invalid: {0}")]
@@ -560,16 +562,21 @@ pub async fn acquire_account(
     form.insert("password", credentials.password.as_str());
     form.insert("csrfmiddlewaretoken", csrf.as_str());
     let response = send_with_retry(
-        client.post(login_url).form(&form),
+        client
+            .post(login_url.clone())
+            // Foundry enforces Django's HTTPS CSRF referer check in addition
+            // to the cookie and hidden form token.
+            .header(reqwest::header::REFERER, login_url.as_str())
+            .form(&form),
         options,
         "submitting account login",
     )
     .await?;
+    let response_status = response.status();
     let response_text = checked_text(response, "account login", options.max_response_bytes).await?;
     if !response_text.contains("login-welcome") && !response_text.contains("logout") {
-        return Err(FetchError::Remote {
-            status: StatusCode::UNAUTHORIZED,
-            context: "Foundry account login was rejected".into(),
+        return Err(FetchError::AuthenticationRejected {
+            status: response_status,
         });
     }
     let mut endpoint = join_url(&options.site, "releases/download")?;
@@ -1133,11 +1140,17 @@ mod tests {
     }
     async fn fake_post_login(
         State(state): State<FakeState>,
+        headers: HeaderMap,
         Form(form): Form<std::collections::HashMap<String, String>>,
     ) -> axum::response::Response {
+        let expected_referer = format!("{}/auth/login/", state.base);
         let valid = form.get("csrfmiddlewaretoken").map(String::as_str) == Some("token")
             && form.get("username").map(String::as_str) == Some("user@example.test")
-            && form.get("password").map(String::as_str) == Some("secret");
+            && form.get("password").map(String::as_str) == Some("secret")
+            && headers
+                .get(header::REFERER)
+                .and_then(|value| value.to_str().ok())
+                == Some(expected_referer.as_str());
         *state.login_valid.lock().unwrap() = valid;
         if valid {
             (
@@ -1338,6 +1351,11 @@ mod tests {
         .to_string();
         assert!(!error.contains("http://"));
         assert!(!error.contains("https://"));
+        let rejected_login = FetchError::AuthenticationRejected {
+            status: StatusCode::OK,
+        }
+        .to_string();
+        assert!(rejected_login.contains("200 OK"));
     }
 
     #[test]

@@ -413,7 +413,7 @@ impl Cache {
 }
 
 /// Validate and hash a pre-acquired archive.  The ZIP is checked for a
-/// package.json, a matching release, path traversal, and symlink entries.
+/// package.json, a matching release, path traversal, and unsafe symlink targets.
 pub fn validate_archive(
     path: &Path,
     release: &ReleaseId,
@@ -446,7 +446,7 @@ pub fn validate_archive(
     let mut package_json = None;
     let mut expanded = 0_u64;
     for index in 0..zip.len() {
-        let entry = zip
+        let mut entry = zip
             .by_index(index)
             .map_err(|e| FetchError::InvalidArchive(e.to_string()))?;
         let name = entry.name().replace('\\', "/");
@@ -456,9 +456,15 @@ pub fn validate_archive(
             )));
         }
         if is_symlink(&entry) {
-            return Err(FetchError::InvalidArchive(format!(
-                "symlink ZIP entry {name:?}"
-            )));
+            let mut target = String::new();
+            entry.read_to_string(&mut target).map_err(|_| {
+                FetchError::InvalidArchive(format!("symlink target for {name:?} is not UTF-8"))
+            })?;
+            if !safe_symlink_target(&name, &target) {
+                return Err(FetchError::InvalidArchive(format!(
+                    "unsafe symlink target for {name:?}"
+                )));
+            }
         }
         expanded = expanded
             .checked_add(entry.size())
@@ -908,6 +914,26 @@ fn is_symlink(entry: &zip::read::ZipFile<'_>) -> bool {
         .is_some_and(|mode| mode & 0o170000 == 0o120000)
 }
 
+fn safe_symlink_target(name: &str, target: &str) -> bool {
+    let target = target.trim_end_matches('\0').replace('\\', "/");
+    if target.is_empty() || target.starts_with('/') || target.contains(':') {
+        return false;
+    }
+    let mut resolved = Path::new(name)
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .to_path_buf();
+    for component in Path::new(&target).components() {
+        match component {
+            Component::Normal(part) => resolved.push(part),
+            Component::CurDir => {}
+            Component::ParentDir if resolved.pop() => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return false,
+        }
+    }
+    true
+}
+
 fn copy_file(input: &Path, output: &mut File, max_bytes: u64) -> Result<(), FetchError> {
     let mut source = File::open(input)?;
     let mut copied = 0_u64;
@@ -1123,6 +1149,22 @@ mod tests {
                 1024
             ),
             Err(FetchError::InvalidArchive(_))
+        ));
+    }
+
+    #[test]
+    fn accepts_safe_symlink_targets_and_rejects_escape() {
+        assert!(safe_symlink_target(
+            "resources/app/node_modules/.bin/crc32",
+            "../crc32/bin/crc32.js"
+        ));
+        assert!(!safe_symlink_target(
+            "resources/app/node_modules/.bin/crc32",
+            "../../../../../../etc/shadow"
+        ));
+        assert!(!safe_symlink_target(
+            "resources/app/node_modules/.bin/crc32",
+            "/etc/shadow"
         ));
     }
 

@@ -134,16 +134,16 @@ in {
       wants = ["network-online.target"];
       serviceConfig = {
         User = "foundryvtt-acquire";
-        Group = "foundryvtt-acquire";
-        SupplementaryGroups = ["nixbld"];
+        # The daemon creates the socket with mode 0660. Make its primary
+        # group the Nix builder group so the socket has the right group from
+        # bind time; an ExecStartPost chgrp races the daemon's bind.
+        Group = "nixbld";
         ExecStartPre = [
           "+${pkgs.coreutils}/bin/chown -R foundryvtt-acquire:nixbld ${cfg.cacheDir}"
         ];
         ExecStart = "${daemon} --socket ${cfg.socketPath} --cache-dir ${cfg.cacheDir} --username ${lib.escapeShellArg cfg.accountUsername} --site ${lib.escapeShellArg cfg.site}";
-        ExecStartPost = "+${pkgs.coreutils}/bin/chgrp nixbld ${cfg.socketPath}";
         RuntimeDirectory = "foundryvtt-acquisition";
-        # Nix build users reach the socket after ExecStartPost changes its
-        # group to nixbld; they also need directory traversal to get there.
+        # Nix build users need directory traversal to reach the socket.
         RuntimeDirectoryMode = "0755";
         Restart = "on-failure";
         RestartSec = 5;

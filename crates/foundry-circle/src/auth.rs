@@ -96,7 +96,7 @@ pub async fn login_start(
     let Some(auth) = state.auth.as_ref() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "OIDC is not configured").into_response();
     };
-    let Some(pool) = state.database.as_ref() else {
+    let Some(pool) = state.database.pool().await else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "database is not configured",
@@ -110,7 +110,7 @@ pub async fn login_start(
         Ok(request) => request,
         Err(error) => return auth_error_response(error),
     };
-    if let Err(error) = save_transaction(pool, &request.transaction).await {
+    if let Err(error) = save_transaction(&pool, &request.transaction).await {
         tracing::error!(%error, "failed to save OIDC login transaction");
         return (StatusCode::INTERNAL_SERVER_ERROR, "login transaction error").into_response();
     }
@@ -124,7 +124,7 @@ pub async fn oidc_callback(
     let Some(auth) = state.auth.as_ref() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "OIDC is not configured").into_response();
     };
-    let Some(pool) = state.database.as_ref() else {
+    let Some(pool) = state.database.pool().await else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "database is not configured",
@@ -134,7 +134,7 @@ pub async fn oidc_callback(
     let Some(state_value) = callback.state.as_deref() else {
         return (StatusCode::BAD_REQUEST, "missing OIDC state").into_response();
     };
-    let transaction = match take_transaction(pool, state_value).await {
+    let transaction = match take_transaction(&pool, state_value).await {
         Ok(Some(transaction)) => transaction,
         Ok(None) => {
             return (StatusCode::BAD_REQUEST, "invalid or replayed login flow").into_response();
@@ -162,7 +162,7 @@ pub async fn oidc_callback(
     let token = SessionToken::generate();
     let return_to = sanitize_return_to(transaction.return_to.as_deref())
         .unwrap_or_else(|| "/api/console".into());
-    if let Err(error) = save_principal_and_session(pool, auth, &identity, &token).await {
+    if let Err(error) = save_principal_and_session(&pool, auth, &identity, &token).await {
         tracing::error!(%error, "failed to create Foundry Circle session");
         return (StatusCode::INTERNAL_SERVER_ERROR, "session error").into_response();
     }
@@ -177,7 +177,7 @@ pub async fn oidc_callback(
 }
 
 pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let Some(pool) = state.database.as_ref() else {
+    let Some(pool) = state.database.pool().await else {
         return (StatusCode::NO_CONTENT, "").into_response();
     };
     if let Some(token) = cookie(&headers, "foundry_circle_session") {
@@ -185,7 +185,7 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Respon
         if let Err(error) =
             sqlx::query("UPDATE sessions SET revoked_at = now() WHERE token_hash = $1")
                 .bind(hash)
-                .execute(pool)
+                .execute(&pool)
                 .await
         {
             tracing::warn!(%error, "failed to revoke Foundry Circle session");
@@ -206,7 +206,7 @@ pub async fn require_session(
     let Some(auth) = state.auth.as_ref() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "OIDC is not configured").into_response();
     };
-    let Some(pool) = state.database.as_ref() else {
+    let Some(pool) = state.database.pool().await else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "database is not configured",
@@ -217,7 +217,7 @@ pub async fn require_session(
         return Redirect::to("/api/auth/login").into_response();
     };
     let hash = SessionToken::hash_value(token);
-    let principal = match session_principal(pool, &hash).await {
+    let principal = match session_principal(&pool, &hash).await {
         Ok(Some(principal)) => principal,
         Ok(None) => return Redirect::to("/api/auth/login").into_response(),
         Err(error) => {

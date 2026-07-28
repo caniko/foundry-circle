@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{
     Extension, Json, Router,
@@ -10,7 +10,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sqlx::PgPool;
+use sqlx::{PgPool, postgres::PgPoolOptions};
+use tokio::{sync::RwLock, time::sleep};
 
 use crate::driver::{FakeDriver, FoundryDriver, WorldState};
 
@@ -20,15 +21,81 @@ pub mod auth;
 #[derive(Clone)]
 pub struct AppState {
     pub driver: Arc<dyn FoundryDriver>,
-    pub database: Option<PgPool>,
+    pub database: DatabaseState,
     pub auth: Option<auth::AuthState>,
+}
+
+#[derive(Clone, Default)]
+pub struct DatabaseState {
+    pool: Arc<RwLock<Option<PgPool>>>,
+}
+
+impl DatabaseState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn pool(&self) -> Option<PgPool> {
+        self.pool.read().await.clone()
+    }
+
+    pub async fn is_ready(&self) -> bool {
+        self.pool.read().await.is_some()
+    }
+
+    pub fn supervise(&self, url: Option<String>, url_file: Option<PathBuf>) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Some(pool) = state.pool().await {
+                    if sqlx::query("SELECT 1").execute(&pool).await.is_err() {
+                        *state.pool.write().await = None;
+                        pool.close().await;
+                        tracing::warn!("PostgreSQL connection lost; readiness is false");
+                    }
+                } else if let Some(database_url) = database_url(&url, url_file.as_ref()) {
+                    match PgPoolOptions::new()
+                        .max_connections(5)
+                        .connect(&database_url)
+                        .await
+                    {
+                        Ok(pool) => match sqlx::migrate!("./migrations").run(&pool).await {
+                            Ok(()) => {
+                                *state.pool.write().await = Some(pool);
+                                tracing::info!("PostgreSQL is ready");
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "PostgreSQL migrations are not ready");
+                                pool.close().await;
+                            }
+                        },
+                        Err(error) => tracing::warn!(%error, "PostgreSQL connection is not ready"),
+                    }
+                }
+                sleep(Duration::from_secs(5)).await;
+            }
+        });
+    }
+}
+
+fn database_url(url: &Option<String>, url_file: Option<&PathBuf>) -> Option<String> {
+    url.as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            url_file
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        })
 }
 
 impl AppState {
     pub fn unconfigured() -> Self {
         Self {
             driver: Arc::new(FakeDriver::new(WorldState::Starting)),
-            database: None,
+            database: DatabaseState::new(),
             auth: None,
         }
     }
@@ -41,6 +108,9 @@ pub struct WorldDescriptor {
     pub epoch: u64,
     pub state: WorldState,
     pub foundry_version: Option<String>,
+    pub system_id: Option<String>,
+    pub system_version: Option<String>,
+    pub is_gm: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,7 +162,8 @@ async fn healthz() -> impl IntoResponse {
 
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
     let world_state = state.driver.world_state();
-    let ready = world_state == WorldState::Ready && state.database.is_some();
+    let database = state.database.is_ready().await;
+    let ready = world_state == WorldState::Ready && database;
     let status = if ready {
         StatusCode::OK
     } else {
@@ -102,7 +173,7 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
         status,
         Json(serde_json::json!({
             "state": world_state,
-            "database": state.database.is_some(),
+            "database": database,
             "ready": ready,
         })),
     )
@@ -134,11 +205,15 @@ async fn me(Extension(principal): Extension<auth::Principal>) -> impl IntoRespon
 }
 
 async fn world(State(state): State<AppState>) -> impl IntoResponse {
+    let snapshot = state.driver.snapshot();
     let descriptor = WorldDescriptor {
-        id: "active".to_string(),
-        epoch: 0,
-        state: state.driver.world_state(),
-        foundry_version: None,
+        id: snapshot.id.clone().unwrap_or_else(|| "active".to_string()),
+        epoch: snapshot.epoch,
+        state: snapshot.state,
+        foundry_version: snapshot.foundry_version.clone(),
+        system_id: snapshot.system_id.clone(),
+        system_version: snapshot.system_version.clone(),
+        is_gm: snapshot.is_gm,
     };
     if descriptor.state == WorldState::Ready {
         (StatusCode::OK, Json(serde_json::json!(descriptor)))
@@ -225,4 +300,23 @@ async fn command(
             "accepted": false,
         })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::database_url;
+    use std::path::PathBuf;
+
+    #[test]
+    fn database_url_ignores_empty_environment_and_missing_credential() {
+        assert_eq!(database_url(&Some("  ".into()), None), None);
+        assert_eq!(
+            database_url(&None, Some(&PathBuf::from("/missing/database-url"))),
+            None
+        );
+        assert_eq!(
+            database_url(&Some("postgres:///foundry".into()), None),
+            Some("postgres:///foundry".into())
+        );
+    }
 }

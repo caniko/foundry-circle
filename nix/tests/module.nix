@@ -20,6 +20,14 @@
         listenAddress = "0.0.0.0";
         listenPort = 8032;
         database.createLocally = true;
+        foundryWorld = {
+          baseUrl = "https://vtt.example";
+          apiPasswordFile = "/run/agenix/foundry-circle-api-password";
+          worldId = "foundry-circle-canary";
+          foundryVersion = "13.351";
+          systemId = "daggerheart";
+          systemVersion = "1.6.4";
+        };
         oidc = {
           issuer = "https://identity.example/auth/v1/";
           clientId = "foundry-circle";
@@ -37,6 +45,8 @@ in
   assert enabled.config.systemd.services.foundry-circle.environment.FOUNDRY_CIRCLE_BIND == "0.0.0.0:8032";
   assert enabled.config.systemd.services.foundry-circle.environment.DIOXUS_PUBLIC_PATH == "${package}/share/foundry-circle/public";
   assert enabled.config.systemd.services.foundry-circle.serviceConfig.ExecStart == "${package}/bin/foundry-circle";
+  assert enabled.config.systemd.services.foundry-circle.environment.FOUNDRY_WORLD_ID == "foundry-circle-canary";
+  assert builtins.elem "api-password:/run/agenix/foundry-circle-api-password" enabled.config.systemd.services.foundry-circle.serviceConfig.LoadCredential;
   assert builtins.elem "foundry_circle" enabled.config.services.postgresql.ensureDatabases;
   assert pkgs.lib.any (user: user.name == "foundry-circle") enabled.config.services.postgresql.ensureUsers;
   assert !(builtins.hasAttr "foundry-circle" disabled.config.systemd.services);

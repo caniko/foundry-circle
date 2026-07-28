@@ -28,6 +28,8 @@ server = [
   "dep:oidc-app-auth",
   "dep:chrono",
   "dep:uuid",
+  "dep:chromiumoxide",
+  "dep:futures-util",
 ]
 devtools = ["dioxus/devtools", "tartan-ui-dioxus/devtools"]
 
@@ -42,6 +44,8 @@ thiserror.workspace = true
 oidc-app-auth = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
+chromiumoxide = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
 
 axum = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }

@@ -63,6 +63,7 @@ oidc-app-auth = { version = "0.1.0", git = "https://codeberg.org/caniko/oidc-app
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
+chromiumoxide = { version = "0.9", default-features = false }
 base64 = "0.22"
 fs2 = "0.4"
 hex = "0.4"

@@ -12,7 +12,8 @@ fn main() {
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use axum::{Router, middleware::from_fn_with_state, routing::get};
     use dioxus::server::{DioxusRouterExt, FullstackState, ServeConfig};
-    use foundry_circle::http::{AppState, api_router_with_state, auth};
+    use foundry_circle::driver::{DriverConfig, LiveFoundryDriver};
+    use foundry_circle::http::{AppState, DatabaseState, api_router_with_state, auth};
     use tower_http::compression::CompressionLayer;
     use tower_http::limit::RequestBodyLimitLayer;
     use tower_http::trace::TraceLayer;
@@ -24,31 +25,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         error
     })?;
 
-    let database_url = std::env::var("DATABASE_URL").ok().or_else(|| {
-        std::env::var("DATABASE_URL_FILE")
-            .ok()
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .map(|value| value.trim().to_owned())
-    });
-    let database = match database_url {
-        Some(url) => match sqlx::PgPool::connect(&url).await {
-            Ok(pool) => match sqlx::migrate!("./migrations").run(&pool).await {
-                Ok(()) => Some(pool),
-                Err(error) => {
-                    tracing::error!(%error, "PostgreSQL migrations failed");
-                    None
-                }
-            },
-            Err(error) => {
-                tracing::error!(%error, "PostgreSQL connection failed");
-                None
-            }
-        },
-        None => {
-            tracing::warn!("DATABASE_URL is unset; readiness will remain false");
-            None
-        }
-    };
+    let database = DatabaseState::new();
+    database.supervise(
+        std::env::var("DATABASE_URL").ok(),
+        std::env::var("DATABASE_URL_FILE").ok().map(Into::into),
+    );
+    let driver = LiveFoundryDriver::start(DriverConfig::from_env()?);
 
     let state = FullstackState::new(ServeConfig::new(), foundry_circle::App);
     let pages = Router::<FullstackState>::new()
@@ -58,9 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_state(state);
 
     let app_state = AppState {
-        driver: std::sync::Arc::new(foundry_circle::driver::FakeDriver::new(
-            foundry_circle::driver::WorldState::Starting,
-        )),
+        driver,
         database,
         auth: Some(oidc),
     };

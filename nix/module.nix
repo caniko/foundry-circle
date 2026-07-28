@@ -70,6 +70,37 @@ in {
         default = "foundry-circle-api";
         description = "Dedicated Foundry-world API user name, provisioned in the live world.";
       };
+      baseUrl = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Canonical Foundry origin used by the authenticated browser driver.";
+      };
+      apiPasswordFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "Runtime credential containing the dedicated Foundry API-user password.";
+      };
+      worldId = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+      };
+      foundryVersion = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+      };
+      systemId = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+      };
+      systemVersion = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+      };
+      chromiumPackage = lib.mkOption {
+        type = lib.types.package;
+        default = pkgs.chromium;
+        description = "Chromium executable used for the Foundry browser session.";
+      };
     };
 
     oidc = {
@@ -118,6 +149,17 @@ in {
           assertion = cfg.oidc.issuer != null && cfg.oidc.clientId != null && cfg.oidc.publicBaseUrl != null;
           message = "services.foundry-circle.oidc must define the Rauthy issuer, public clientId, and publicBaseUrl; Foundry Circle has no local password or OIDC client-secret fallback";
         }
+        {
+          assertion = lib.all (value: value != null) [
+            cfg.foundryWorld.baseUrl
+            cfg.foundryWorld.apiPasswordFile
+            cfg.foundryWorld.worldId
+            cfg.foundryWorld.foundryVersion
+            cfg.foundryWorld.systemId
+            cfg.foundryWorld.systemVersion
+          ];
+          message = "services.foundry-circle.foundryWorld must define baseUrl, apiPasswordFile, worldId, foundryVersion, systemId, and systemVersion";
+        }
       ];
 
       users.users.foundry-circle = {
@@ -134,6 +176,14 @@ in {
         environment =
           {
             FOUNDRY_WORLD_API_USER = cfg.foundryWorld.apiUser;
+            FOUNDRY_WORLD_BASE_URL = cfg.foundryWorld.baseUrl;
+            FOUNDRY_WORLD_API_PASSWORD_FILE = "/run/credentials/foundry-circle.service/api-password";
+            FOUNDRY_WORLD_ID = cfg.foundryWorld.worldId;
+            FOUNDRY_EXPECTED_FOUNDRY_VERSION = cfg.foundryWorld.foundryVersion;
+            FOUNDRY_EXPECTED_SYSTEM_ID = cfg.foundryWorld.systemId;
+            FOUNDRY_EXPECTED_SYSTEM_VERSION = cfg.foundryWorld.systemVersion;
+            FOUNDRY_CHROMIUM = "${cfg.foundryWorld.chromiumPackage}/bin/chromium";
+            FOUNDRY_BROWSER_PROFILE_DIR = "/run/foundry-circle/browser";
             FOUNDRY_CIRCLE_BIND = "${cfg.listenAddress}:${toString cfg.listenPort}";
             DIOXUS_PUBLIC_PATH = "${cfg.package}/${cfg.package.dioxus.publicDir or "share/foundry-circle/public"}";
           }
@@ -169,7 +219,8 @@ in {
           ProtectHome = true;
           ReadWritePaths = ["/run/foundry-circle" "/var/lib/foundry-circle"];
           LoadCredential =
-            lib.optional (cfg.database.urlFile != null)
+            ["api-password:${cfg.foundryWorld.apiPasswordFile}"]
+            ++ lib.optional (cfg.database.urlFile != null)
             "database-url:${cfg.database.urlFile}";
         };
         unitConfig = {

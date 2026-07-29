@@ -184,6 +184,7 @@ in {
             FOUNDRY_EXPECTED_SYSTEM_VERSION = cfg.foundryWorld.systemVersion;
             FOUNDRY_CHROMIUM = "${cfg.foundryWorld.chromiumPackage}/bin/chromium";
             FOUNDRY_BROWSER_PROFILE_DIR = "/run/foundry-circle/browser";
+            XDG_CONFIG_HOME = "/var/lib/foundry-circle/config";
             FOUNDRY_CIRCLE_BIND = "${cfg.listenAddress}:${toString cfg.listenPort}";
             DIOXUS_PUBLIC_PATH = "${cfg.package}/${cfg.package.dioxus.publicDir or "share/foundry-circle/public"}";
           }

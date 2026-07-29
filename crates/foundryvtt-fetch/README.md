@@ -32,10 +32,11 @@ mode `0700` cache with mode `0600` contents; the daemon's local-only cache is
 changed to mode `2750`/`0440` with the trusted `nixbld` group so Nix can read a
 validated archive without receiving account credentials.
 
-## Declarative package links
+## Declarative package seeds
 
 The `reconcile` subcommand consumes the Nix-generated desired manifest and
-maintains only recorded symlinks under `Data/modules` and `Data/systems`:
+initially copies package outputs into mutable directories under `Data/modules`
+and `Data/systems`:
 
 ```text
 foundryvtt-fetch reconcile \
@@ -44,7 +45,10 @@ foundryvtt-fetch reconcile \
   --state-file /var/lib/foundryvtt/.foundry-circle-packages.json
 ```
 
-Version changes replace a previously recorded link atomically. Deletion is an
-explicit `state = "absent"` tombstone; foreign directories and symlinks fail
-closed. The immutable package outputs are produced by
-`foundry-circle.lib.mkFoundryPackage` and are never modified in place.
+Initialization is recorded once. Existing directories, manual edits, omitted
+packages, and later target deletion are left alone; version changes do not
+overwrite them. An explicit `state = "absent"` clears the initialization
+marker without deleting the target. A legacy link to the recorded immutable
+output is materialized into a mutable copy once. The immutable package outputs
+are produced by `foundry-circle.lib.mkFoundryPackage` and are never modified
+in place.

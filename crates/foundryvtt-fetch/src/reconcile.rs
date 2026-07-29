@@ -1,10 +1,10 @@
-//! Fail-closed reconciliation of immutable Foundry module/system outputs.
+//! Fail-closed initial seeding of mutable Foundry module/system directories.
 
 use std::{
     collections::BTreeMap,
     fs::{self, File},
     io,
-    os::unix::fs as unix_fs,
+    os::unix::fs::{self as unix_fs, PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -25,10 +25,8 @@ pub enum ReconcileError {
     UnsafeId(String),
     #[error("package store path is not an absolute directory: {0}")]
     InvalidStorePath(String),
-    #[error("managed package target is occupied by an unmanaged path: {0}")]
-    ForeignPath(PathBuf),
-    #[error("managed package target is not the recorded symlink: {0}")]
-    StateMismatch(PathBuf),
+    #[error("package target is not a directory: {0}")]
+    InvalidTarget(PathBuf),
     #[error("reconciliation requires Unix symlink support")]
     UnsupportedPlatform,
     #[error("I/O error: {0}")]
@@ -82,8 +80,12 @@ pub fn reconcile_files(
     reconcile(desired, data_dir, state_path)
 }
 
-/// Reconcile only links below `Data/modules` and `Data/systems`. Foreign paths
-/// are never removed, and package data in the immutable store is untouched.
+/// Seed only missing package directories below `Data/modules` and
+/// `Data/systems`. The copied contents belong to Foundry and may be edited in
+/// place. The state file records that initialization happened once; later
+/// manifest changes, omissions, and target deletion do not reseed or remove
+/// the directory. `state = "absent"` explicitly clears that initialization
+/// marker without touching the target.
 pub fn reconcile(
     desired: DesiredManifest,
     data_dir: &Path,
@@ -114,8 +116,8 @@ fn reconcile_locked(
     state_path: &Path,
 ) -> Result<(), ReconcileError> {
     let mut declared = BTreeMap::new();
-    let mut map = BTreeMap::new();
-    let mut tombstones = BTreeMap::new();
+    let mut present = BTreeMap::new();
+    let mut absent = BTreeMap::new();
     for package in &desired.packages {
         validate_package(package)?;
         let key = key(&package.kind, &package.id);
@@ -123,52 +125,49 @@ fn reconcile_locked(
             return Err(ReconcileError::UnsafeId(format!("duplicate package {key}")));
         }
         if package.state == "present" {
-            map.insert(key, package);
+            present.insert(key, package);
         } else {
-            tombstones.insert(key, package);
+            absent.insert(key, package);
         }
     }
-    // Preflight every target so a foreign collision cannot partially update a version.
-    for package in map.values() {
-        check_desired(
-            &target(data_dir, package),
-            package,
-            previous.packages.get(&key(&package.kind, &package.id)),
-        )?;
-    }
-    for name in tombstones.keys() {
-        if let Some(previous_package) = previous.packages.get(name) {
-            check_remove(&target(data_dir, previous_package), previous_package)?;
+
+    // Preflight all targets and any legacy links before copying one package.
+    // This keeps a bad target from leaving a partially initialized set.
+    for package in present.values() {
+        let path = target(data_dir, package);
+        if let Some(previous_package) = previous.packages.get(&key(&package.kind, &package.id)) {
+            check_initialized_target(&path, &previous_package.store_path)?;
+        } else {
+            check_seed_target(&path, &package.store_path)?;
         }
     }
-    // Undeclared packages are intentionally preserved. Deletion is explicit
-    // through a state = "absent" tombstone.
-    for package in map.values() {
-        install_link(&target(data_dir, package), &package.store_path)?;
-    }
-    for name in tombstones.keys() {
-        if let Some(package) = previous.packages.get(name) {
-            let path = target(data_dir, package);
-            if path.symlink_metadata().is_ok() {
-                fs::remove_file(path)?;
-            }
-        }
-    }
+
     let mut packages = previous.packages.clone();
-    for name in tombstones.keys() {
+    for package in present.values() {
+        let name = key(&package.kind, &package.id);
+        let path = target(data_dir, package);
+        if let Some(previous_package) = previous.packages.get(&name) {
+            materialize_legacy_link(&path, &previous_package.store_path)?;
+        } else {
+            seed_if_missing(&path, &package.store_path)?;
+            packages.insert(
+                name,
+                ManagedPackage {
+                    kind: package.kind.clone(),
+                    id: package.id.clone(),
+                    version: package.version.clone(),
+                    store_path: package.store_path.clone(),
+                },
+            );
+        }
+    }
+    // Undeclared packages are intentionally preserved. An explicit absent
+    // entry resets only the ledger, so a later present entry may initialize a
+    // missing target again.
+    for name in absent.keys() {
         packages.remove(name);
     }
-    for (name, p) in map {
-        packages.insert(
-            name,
-            ManagedPackage {
-                kind: p.kind.clone(),
-                id: p.id.clone(),
-                version: p.version.clone(),
-                store_path: p.store_path.clone(),
-            },
-        );
-    }
+
     let state = ManagedState {
         schema_version: SCHEMA_VERSION,
         packages,
@@ -223,10 +222,14 @@ fn validate_package(package: &DesiredPackage) -> Result<(), ReconcileError> {
             package.id
         )));
     }
-    let metadata = fs::symlink_metadata(&package.store_path)
-        .map_err(|_| ReconcileError::InvalidStorePath(package.id.clone()))?;
-    if !metadata.file_type().is_dir() || package.store_path.is_relative() {
-        return Err(ReconcileError::InvalidStorePath(package.id.clone()));
+    validate_store_path(&package.store_path)
+}
+
+fn validate_store_path(path: &Path) -> Result<(), ReconcileError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| ReconcileError::InvalidStorePath(path.display().to_string()))?;
+    if !metadata.file_type().is_dir() || path.is_relative() {
+        return Err(ReconcileError::InvalidStorePath(path.display().to_string()));
     }
     Ok(())
 }
@@ -234,6 +237,7 @@ fn validate_package(package: &DesiredPackage) -> Result<(), ReconcileError> {
 fn key(kind: &str, id: &str) -> String {
     format!("{kind}/{id}")
 }
+
 fn target(data: &Path, package: &impl PackageLike) -> PathBuf {
     data.join("Data")
         .join(if package.kind() == "module" {
@@ -243,85 +247,175 @@ fn target(data: &Path, package: &impl PackageLike) -> PathBuf {
         })
         .join(package.id())
 }
+
 trait PackageLike {
     fn kind(&self) -> &str;
     fn id(&self) -> &str;
 }
+
 impl PackageLike for DesiredPackage {
     fn kind(&self) -> &str {
         &self.kind
     }
+
     fn id(&self) -> &str {
         &self.id
     }
 }
-impl PackageLike for ManagedPackage {
-    fn kind(&self) -> &str {
-        &self.kind
-    }
-    fn id(&self) -> &str {
-        &self.id
-    }
-}
+
 impl<T: PackageLike + ?Sized> PackageLike for &T {
     fn kind(&self) -> &str {
         (*self).kind()
     }
+
     fn id(&self) -> &str {
         (*self).id()
     }
 }
 
-fn check_desired(
-    path: &Path,
-    package: &DesiredPackage,
-    previous: Option<&ManagedPackage>,
-) -> Result<(), ReconcileError> {
+fn check_seed_target(path: &Path, source: &Path) -> Result<(), ReconcileError> {
     let metadata = match fs::symlink_metadata(path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
     };
-    if !metadata.file_type().is_symlink() {
-        return Err(ReconcileError::ForeignPath(path.to_path_buf()));
-    }
-    let link = fs::read_link(path)?;
-    if link == package.store_path || previous.is_some_and(|p| link == p.store_path) {
-        Ok(())
+    if metadata.file_type().is_symlink() && fs::read_link(path)? == source {
+        validate_store_path(source)?;
     } else {
-        Err(ReconcileError::ForeignPath(path.to_path_buf()))
-    }
-}
-
-fn check_remove(path: &Path, package: &ManagedPackage) -> Result<(), ReconcileError> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
-    };
-    if !metadata.file_type().is_symlink() || fs::read_link(path)? != package.store_path {
-        return Err(ReconcileError::StateMismatch(path.to_path_buf()));
+        validate_existing_target(path)?;
     }
     Ok(())
 }
 
-fn install_link(target: &Path, source: &Path) -> Result<(), ReconcileError> {
+fn check_initialized_target(path: &Path, source: &Path) -> Result<(), ReconcileError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() && fs::read_link(path)? == source {
+        validate_store_path(source)?;
+    } else {
+        validate_existing_target(path)?;
+    }
+    Ok(())
+}
+
+fn validate_existing_target(path: &Path) -> Result<(), ReconcileError> {
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) | Err(_) => Err(ReconcileError::InvalidTarget(path.to_path_buf())),
+    }
+}
+
+fn seed_if_missing(target: &Path, source: &Path) -> Result<(), ReconcileError> {
+    match fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.file_type().is_symlink() && fs::read_link(target)? == source => {
+            materialize_legacy_link(target, source)?;
+            return Ok(());
+        }
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     let parent = target
         .parent()
-        .ok_or_else(|| ReconcileError::ForeignPath(target.to_path_buf()))?;
+        .ok_or_else(|| ReconcileError::InvalidTarget(target.to_path_buf()))?;
     fs::create_dir_all(parent)?;
-    let temp = NamedTempFile::new_in(parent)?;
-    let temp_path = temp.into_temp_path();
-    fs::remove_file(&temp_path)?;
-    unix_fs::symlink(source, &temp_path).map_err(|e| {
-        if e.kind() == io::ErrorKind::Unsupported {
-            ReconcileError::UnsupportedPlatform
-        } else {
-            ReconcileError::Io(e)
-        }
-    })?;
-    fs::rename(&temp_path, target)?;
+    let temp = tempfile::tempdir_in(parent)?;
+    copy_tree(source, temp.path(), source)?;
+    // The reconciliation lock serializes normal writers. The preflight above
+    // also ensures we never intentionally replace an existing target.
+    if fs::symlink_metadata(target).is_ok() {
+        return Ok(());
+    }
+    fs::rename(temp.path(), target)?;
     Ok(())
+}
+
+fn materialize_legacy_link(target: &Path, source: &Path) -> Result<(), ReconcileError> {
+    let metadata = match fs::symlink_metadata(target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.file_type().is_symlink() || fs::read_link(target)? != source {
+        return Ok(());
+    }
+    let parent = target
+        .parent()
+        .ok_or_else(|| ReconcileError::InvalidTarget(target.to_path_buf()))?;
+    let temp = tempfile::tempdir_in(parent)?;
+    copy_tree(source, temp.path(), source)?;
+
+    let displaced = NamedTempFile::new_in(parent)?;
+    let displaced_path = displaced.into_temp_path();
+    fs::remove_file(&displaced_path)?;
+    fs::rename(target, &displaced_path)?;
+    if let Err(error) = fs::rename(temp.path(), target) {
+        let _ = fs::rename(&displaced_path, target);
+        return Err(error.into());
+    }
+    fs::remove_file(&displaced_path)?;
+    Ok(())
+}
+
+fn copy_tree(source_root: &Path, target_root: &Path, source: &Path) -> Result<(), ReconcileError> {
+    let metadata = fs::symlink_metadata(source)?;
+    if !metadata.file_type().is_dir() {
+        return Err(ReconcileError::InvalidStorePath(
+            source.display().to_string(),
+        ));
+    }
+    fs::create_dir_all(target_root)?;
+    make_mutable(target_root, metadata.permissions().mode())?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let target_path = target_root.join(entry.file_name());
+        let metadata = fs::symlink_metadata(&source_path)?;
+        if metadata.file_type().is_dir() {
+            copy_tree(source_root, &target_path, &source_path)?;
+        } else if metadata.file_type().is_file() {
+            fs::copy(&source_path, &target_path)?;
+            make_mutable(&target_path, metadata.permissions().mode())?;
+        } else if metadata.file_type().is_symlink() {
+            let relative = source_path
+                .strip_prefix(source_root)
+                .map_err(|_| ReconcileError::InvalidStorePath(source_root.display().to_string()))?;
+            let name = relative.to_str().ok_or_else(|| {
+                ReconcileError::InvalidStorePath(source_root.display().to_string())
+            })?;
+            let link = fs::read_link(&source_path)?;
+            let link_target = link.to_str().ok_or_else(|| {
+                ReconcileError::InvalidStorePath(source_root.display().to_string())
+            })?;
+            if !crate::safe_symlink_target(name, link_target) {
+                return Err(ReconcileError::InvalidStorePath(
+                    source_root.display().to_string(),
+                ));
+            }
+            unix_fs::symlink(&link, &target_path).map_err(map_symlink_error)?;
+        } else {
+            return Err(ReconcileError::InvalidStorePath(
+                source_root.display().to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn make_mutable(path: &Path, mode: u32) -> Result<(), ReconcileError> {
+    fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o200))?;
+    Ok(())
+}
+
+fn map_symlink_error(error: io::Error) -> ReconcileError {
+    if error.kind() == io::ErrorKind::Unsupported {
+        ReconcileError::UnsupportedPlatform
+    } else {
+        ReconcileError::Io(error)
+    }
 }
 
 fn write_state(path: &Path, state: &ManagedState) -> Result<(), ReconcileError> {
@@ -341,6 +435,7 @@ fn write_state(path: &Path, state: &ManagedState) -> Result<(), ReconcileError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     fn p(root: &Path, kind: &str, id: &str, version: &str) -> DesiredPackage {
         DesiredPackage {
             kind: kind.into(),
@@ -350,129 +445,158 @@ mod tests {
             store_path: root.join(version),
         }
     }
-    #[test]
-    fn add_version_delete_and_refuse_foreign_path() {
-        let temp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(temp.path().join("1")).unwrap();
-        fs::create_dir_all(temp.path().join("2")).unwrap();
-        let data = temp.path().join("data");
-        let state = temp.path().join("state.json");
-        let manifest = |packages| DesiredManifest {
+
+    fn manifest(packages: Vec<DesiredPackage>) -> DesiredManifest {
+        DesiredManifest {
             schema_version: SCHEMA_VERSION,
             packages,
+        }
+    }
+
+    #[test]
+    fn seeds_once_and_preserves_manual_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_one = temp.path().join("source-one");
+        let source_two = temp.path().join("source-two");
+        fs::create_dir_all(source_one.join("nested")).unwrap();
+        fs::write(source_one.join("content.txt"), b"v1").unwrap();
+        fs::write(source_one.join("nested/extra.txt"), b"extra").unwrap();
+        fs::create_dir_all(&source_two).unwrap();
+        fs::write(source_two.join("content.txt"), b"v2").unwrap();
+        let data = temp.path().join("data");
+        let state = temp.path().join("state.json");
+        let first = DesiredPackage {
+            store_path: source_one.clone(),
+            ..p(temp.path(), "module", "demo", "1")
         };
-        let world = data.join("Data/worlds/kept/world.json");
-        fs::create_dir_all(world.parent().unwrap()).unwrap();
-        fs::write(&world, b"foundry-owned").unwrap();
-        reconcile(
-            manifest(vec![p(temp.path(), "module", "demo", "1")]),
-            &data,
-            &state,
-        )
-        .unwrap();
-        assert_eq!(
-            fs::read_link(data.join("Data/modules/demo")).unwrap(),
-            temp.path().join("1")
+        let second = DesiredPackage {
+            store_path: source_two,
+            version: "2".into(),
+            ..p(temp.path(), "module", "demo", "2")
+        };
+        let target = data.join("Data/modules/demo");
+
+        reconcile(manifest(vec![first]), &data, &state).unwrap();
+        assert!(
+            !fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_symlink()
         );
-        reconcile(
-            manifest(vec![p(temp.path(), "module", "demo", "2")]),
-            &data,
-            &state,
-        )
-        .unwrap();
-        assert_eq!(
-            fs::read_link(data.join("Data/modules/demo")).unwrap(),
-            temp.path().join("2")
+        assert_eq!(fs::read(target.join("content.txt")).unwrap(), b"v1");
+        assert!(
+            fs::metadata(target.join("content.txt"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o200
+                != 0
         );
-        reconcile(
-            manifest(vec![p(temp.path(), "module", "demo", "1")]),
-            &data,
-            &state,
-        )
-        .unwrap();
-        assert_eq!(
-            fs::read_link(data.join("Data/modules/demo")).unwrap(),
-            temp.path().join("1")
-        );
-        // Omitting a package preserves it; deletion requires a tombstone.
+
+        fs::write(target.join("content.txt"), b"manual").unwrap();
+        reconcile(manifest(vec![second]), &data, &state).unwrap();
+        assert_eq!(fs::read(target.join("content.txt")).unwrap(), b"manual");
+
         reconcile(manifest(vec![]), &data, &state).unwrap();
-        assert!(data.join("Data/modules/demo").exists());
+        assert_eq!(fs::read(target.join("content.txt")).unwrap(), b"manual");
+    }
+
+    #[test]
+    fn accepts_existing_directories_and_absent_only_resets_the_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("content.txt"), b"seed").unwrap();
+        let data = temp.path().join("data");
+        let state = temp.path().join("state.json");
+        let package = DesiredPackage {
+            store_path: source.clone(),
+            ..p(temp.path(), "system", "rules", "1")
+        };
+        let target = data.join("Data/systems/rules");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("content.txt"), b"manual").unwrap();
+
+        reconcile(manifest(vec![package.clone()]), &data, &state).unwrap();
+        assert_eq!(fs::read(target.join("content.txt")).unwrap(), b"manual");
         reconcile(
             manifest(vec![DesiredPackage {
-                kind: "module".into(),
-                id: "demo".into(),
                 state: "absent".into(),
                 version: String::new(),
                 store_path: PathBuf::new(),
+                ..package.clone()
             }]),
             &data,
             &state,
         )
         .unwrap();
-        assert!(!data.join("Data/modules/demo").exists());
-        assert_eq!(fs::read(&world).unwrap(), b"foundry-owned");
-        fs::create_dir_all(data.join("Data/modules/demo")).unwrap();
-        assert!(matches!(
-            reconcile(
-                manifest(vec![p(temp.path(), "module", "demo", "1")]),
-                &data,
-                &state
-            ),
-            Err(ReconcileError::ForeignPath(_))
-        ));
+        assert!(fs::metadata(&target).unwrap().is_dir());
+        fs::remove_dir_all(&target).unwrap();
+        reconcile(manifest(vec![package]), &data, &state).unwrap();
+        assert_eq!(fs::read(target.join("content.txt")).unwrap(), b"seed");
     }
 
     #[test]
-    fn manages_systems_and_rejects_state_mismatch() {
+    fn materializes_legacy_recorded_symlinks() {
         let temp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(temp.path().join("1")).unwrap();
-        fs::create_dir_all(temp.path().join("foreign")).unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("content.txt"), b"seed").unwrap();
         let data = temp.path().join("data");
         let state = temp.path().join("state.json");
-        let manifest = |packages| DesiredManifest {
-            schema_version: SCHEMA_VERSION,
-            packages,
+        let package = DesiredPackage {
+            store_path: source.clone(),
+            ..p(temp.path(), "module", "demo", "1")
         };
-        reconcile(
-            manifest(vec![p(temp.path(), "system", "rules", "1")]),
-            &data,
+        let target = data.join("Data/modules/demo");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        unix_fs::symlink(&source, &target).unwrap();
+        fs::create_dir_all(state.parent().unwrap_or_else(|| Path::new("."))).unwrap();
+        fs::write(
             &state,
+            serde_json::to_vec(&ManagedState {
+                schema_version: SCHEMA_VERSION,
+                packages: BTreeMap::from([(
+                    "module/demo".into(),
+                    ManagedPackage {
+                        kind: "module".into(),
+                        id: "demo".into(),
+                        version: "1".into(),
+                        store_path: source.clone(),
+                    },
+                )]),
+            })
+            .unwrap(),
         )
         .unwrap();
-        let target = data.join("Data/systems/rules");
-        fs::remove_file(&target).unwrap();
-        unix_fs::symlink(temp.path().join("foreign"), &target).unwrap();
-        assert!(matches!(
-            reconcile(
-                manifest(vec![DesiredPackage {
-                    kind: "system".into(),
-                    id: "rules".into(),
-                    state: "absent".into(),
-                    version: String::new(),
-                    store_path: PathBuf::new(),
-                }]),
-                &data,
-                &state,
-            ),
-            Err(ReconcileError::StateMismatch(path)) if path == target
-        ));
+
+        reconcile(manifest(vec![package]), &data, &state).unwrap();
+        assert!(
+            !fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(target.join("content.txt")).unwrap(), b"seed");
+        fs::write(target.join("content.txt"), b"manual").unwrap();
+        assert_eq!(fs::read(source.join("content.txt")).unwrap(), b"seed");
     }
 
     #[test]
-    fn rejects_dot_path_components_and_duplicate_packages() {
+    fn rejects_invalid_ids_and_duplicate_packages() {
         let temp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(temp.path().join("1")).unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir_all(&source).unwrap();
         let data = temp.path().join("data");
         let state = temp.path().join("state.json");
-        let manifest = |packages| DesiredManifest {
-            schema_version: SCHEMA_VERSION,
-            packages,
-        };
+        let mut unsafe_package = p(temp.path(), "module", "..", "1");
+        unsafe_package.store_path = source.clone();
         assert!(matches!(
-            reconcile(manifest(vec![p(temp.path(), "module", "..", "1")]), &data, &state),
+            reconcile(manifest(vec![unsafe_package]), &data, &state),
             Err(ReconcileError::UnsafeId(id)) if id == ".."
         ));
-        let package = p(temp.path(), "module", "demo", "1");
+        let mut package = p(temp.path(), "module", "demo", "1");
+        package.store_path = source;
         assert!(matches!(
             reconcile(manifest(vec![package.clone(), package]), &data, &state),
             Err(ReconcileError::UnsafeId(message)) if message.contains("duplicate")

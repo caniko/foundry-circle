@@ -23,7 +23,7 @@
       state = lib.mkOption {
         type = lib.types.enum ["present" "absent"];
         default = "present";
-        description = "present installs or versions the package; absent removes the recorded link.";
+        description = "present seeds the package once and records initialization; absent clears that marker without changing the target.";
       };
       version = lib.mkOption {
         type = lib.types.str;
@@ -92,7 +92,7 @@ in {
     declarativePackages = lib.mkOption {
       type = lib.types.attrsOf packageEntry;
       default = {};
-      description = "Immutable Foundry modules and systems managed as Nix package outputs.";
+      description = "Foundry modules and systems initially seeded from immutable Nix package outputs; existing directories remain manually managed.";
     };
   };
   config = lib.mkIf cfg.enable (lib.mkMerge [

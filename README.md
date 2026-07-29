@@ -28,9 +28,10 @@ in the repository.
 
 Phase 02 also ships the standalone `foundryvtt-fetch` crate. It acquires
 licensed releases outside Nix evaluation, records SHA-256/Nix-SRI provenance,
-and reconciles immutable module/system outputs from
-`services.foundryvtt.declarativePackages`. Use `state = "absent"` for an
-explicit package deletion; worlds remain mutable Foundry-owned state.
+and initially seeds mutable module/system directories from
+`services.foundryvtt.declarativePackages`. Use `state = "absent"` to reset an
+initialization marker; worlds and package directories remain mutable
+Foundry-owned state.
 
 ## Boundaries
 

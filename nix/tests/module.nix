@@ -44,6 +44,7 @@
 in
   assert enabled.config.systemd.services.foundry-circle.environment.FOUNDRY_CIRCLE_BIND == "0.0.0.0:8032";
   assert enabled.config.systemd.services.foundry-circle.environment.DIOXUS_PUBLIC_PATH == "${package}/share/foundry-circle/public";
+  assert enabled.config.systemd.services.foundry-circle.environment.XDG_CONFIG_HOME == "/var/lib/foundry-circle/config";
   assert enabled.config.systemd.services.foundry-circle.serviceConfig.ExecStart == "${package}/bin/foundry-circle";
   assert enabled.config.systemd.services.foundry-circle.environment.FOUNDRY_WORLD_ID == "foundry-circle-canary";
   assert builtins.elem "api-password:/run/agenix/foundry-circle-api-password" enabled.config.systemd.services.foundry-circle.serviceConfig.LoadCredential;

@@ -1,6 +1,6 @@
 [ci]
 runtime = "nix"
-runner = "atlas"
+runner = "ubuntu-24.04"
 workspace = true
 with_nextest = true
 with_msrv = true
@@ -8,15 +8,18 @@ with_audit = true
 with_deny = true
 with_docs = true
 publish_crates = true
+provider = "actions"
+platform = "github"
 
 [release.signing]
 key = "818D507F1E62139F8A17EAA64623DEA06FDACFE1"
 
-[release.codeberg]
+[release.github]
 repo = "caniko/foundry-circle"
+target_branch = "trunk"
 
 [release.artifacts]
-runner = "atlas"
+runner = "ubuntu-24.04"
 build_commands = [
   "mkdir -p release",
   "nix build .#release-bundle --out-link release/foundry-circle.tar.gz",

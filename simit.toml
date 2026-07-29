@@ -20,8 +20,7 @@ target_branch = "trunk"
 
 [release.artifacts]
 runner = "ubuntu-24.04"
-build_commands = [
-  "mkdir -p release",
-  "nix build .#release-bundle --out-link release/foundry-circle.tar.gz",
-]
+nix_bundle_attrs = ["release-bundle"]
+version_attr = "foundry-circle"
+checksum_globs = ["*.tar.gz"]
 sign = false

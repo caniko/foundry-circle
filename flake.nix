@@ -48,6 +48,7 @@
         pname = "foundry-circle";
         strictDeps = true;
       };
+      foundryVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
       cargoArtifacts = toolchain.craneLib.buildDepsOnly commonArgs;
       cargoPackage = toolchain.craneLib.buildPackage (commonArgs
         // {
@@ -59,15 +60,16 @@
           pname = "foundryvtt-fetch";
           cargoExtraArgs = "-p foundryvtt-fetch --bin foundryvtt-fetch";
         });
-      releaseBundle =
-        pkgs.runCommand "foundry-circle-release-bundle" {
-          nativeBuildInputs = [pkgs.gnutar pkgs.gzip];
-        } ''
-          mkdir -p staging/bin
-          cp ${dioxusPackage}/bin/foundry-circle staging/bin/
-          cp ${fetchPackage}/bin/foundryvtt-fetch staging/bin/
-          tar -C staging -czf "$out" .
-        '';
+      portableRelease = rs-harbor.lib.mkPortableBinaryRelease {
+        inherit pkgs;
+        pname = "foundry-circle";
+        version = foundryVersion;
+        artifacts.x86_64-linux.entries = {
+          foundry-circle.package = dioxusPackage;
+          foundryvtt-fetch.package = fetchPackage;
+        };
+      };
+      releaseBundle = portableRelease.releaseBundle;
       dioxusPackage = rs-harbor.lib.mkDioxusFullstackPackage {
         inherit pkgs src;
         craneLib = toolchain.craneLib;
@@ -76,6 +78,7 @@
         pname = "foundry-circle";
         package = "foundry-circle";
         binary = "foundry-circle";
+        version = foundryVersion;
         serverInstallName = "foundry-circle";
         serverBinary = "foundry-circle";
         profile = "release";

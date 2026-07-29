@@ -62,11 +62,11 @@
     },
     "crane_5": {
       "locked": {
-        "lastModified": 1781825982,
-        "narHash": "sha256-SlXKwIRIhrOSAcTjCB3ftPLzJWZStQIPS7J1FlZPnKk=",
+        "lastModified": 1784248371,
+        "narHash": "sha256-0l0Y4D4wbZhp1Oi6h8OpbLtIm/4FN88oCf54MK2ZgiM=",
         "owner": "ipetkov",
         "repo": "crane",
-        "rev": "469fd08d0bcf6926321fa973c6777fbc87785dd7",
+        "rev": "f7d151ec0bf52cf9662e2f59d7bea28588c2f070",
         "type": "github"
       },
       "original": {
@@ -237,7 +237,7 @@
     },
     "flake-utils_8": {
       "inputs": {
-        "systems": "systems_8"
+        "systems": "systems_9"
       },
       "locked": {
         "lastModified": 1731533236,
@@ -255,7 +255,7 @@
     },
     "flake-utils_9": {
       "inputs": {
-        "systems": "systems_9"
+        "systems": "systems_10"
       },
       "locked": {
         "lastModified": 1731533236,
@@ -341,6 +341,28 @@
         "url": "https://codeberg.org/caniko/meta-harbor.git"
       }
     },
+    "nix-bundle": {
+      "inputs": {
+        "nixpkgs": [
+          "rs-harbor",
+          "nixpkgs"
+        ],
+        "utils": "utils"
+      },
+      "locked": {
+        "lastModified": 1756736056,
+        "narHash": "sha256-8YFhvulVX3iS4TYnKisA9zSImJeFN21G75HOUUFjzuE=",
+        "owner": "nix-community",
+        "repo": "nix-bundle",
+        "rev": "eff01593f62794d458ec714090091419194ab64d",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-community",
+        "repo": "nix-bundle",
+        "type": "github"
+      }
+    },
     "nix-foundryvtt": {
       "inputs": {
         "nixpkgs": "nixpkgs_2"
@@ -373,17 +395,18 @@
         ]
       },
       "locked": {
-        "lastModified": 1783251082,
-        "narHash": "sha256-XfHlECWS/u6FWjYAMOsGk6pcGx+z3HA8WWGWR7VvTSI=",
-        "ref": "refs/heads/trunk",
-        "rev": "a45718d96cdde0101ef8c20942fada0b188745f0",
-        "revCount": 1,
-        "type": "git",
-        "url": "ssh://git@codeberg.org/caniko/nix-opencode-lsp.git"
+        "lastModified": 1785298780,
+        "narHash": "sha256-hq+/QcdG+pOKugcglqt92n3AwDbZnJB/Z+FCgmM3nwg=",
+        "owner": "caniko",
+        "repo": "nix-opencode-lsp",
+        "rev": "38e7ce16c754947a257a00a77682adfe696b6718",
+        "type": "github"
       },
       "original": {
-        "type": "git",
-        "url": "ssh://git@codeberg.org/caniko/nix-opencode-lsp.git"
+        "owner": "caniko",
+        "repo": "nix-opencode-lsp",
+        "rev": "38e7ce16c754947a257a00a77682adfe696b6718",
+        "type": "github"
       }
     },
     "nix-opencode-lsp_2": {
@@ -395,17 +418,18 @@
         ]
       },
       "locked": {
-        "lastModified": 1783251082,
-        "narHash": "sha256-XfHlECWS/u6FWjYAMOsGk6pcGx+z3HA8WWGWR7VvTSI=",
-        "ref": "refs/heads/trunk",
-        "rev": "a45718d96cdde0101ef8c20942fada0b188745f0",
-        "revCount": 1,
-        "type": "git",
-        "url": "ssh://git@codeberg.org/caniko/nix-opencode-lsp.git"
+        "lastModified": 1785298780,
+        "narHash": "sha256-hq+/QcdG+pOKugcglqt92n3AwDbZnJB/Z+FCgmM3nwg=",
+        "owner": "caniko",
+        "repo": "nix-opencode-lsp",
+        "rev": "38e7ce16c754947a257a00a77682adfe696b6718",
+        "type": "github"
       },
       "original": {
-        "type": "git",
-        "url": "ssh://git@codeberg.org/caniko/nix-opencode-lsp.git"
+        "owner": "caniko",
+        "repo": "nix-opencode-lsp",
+        "rev": "38e7ce16c754947a257a00a77682adfe696b6718",
+        "type": "github"
       }
     },
     "nix-pklx": {
@@ -471,11 +495,12 @@
         "rev": "5ac4a08dc82b53e09c7c0f62c700316e74a48219",
         "revCount": 118,
         "type": "git",
-        "url": "ssh://git@codeberg.org/caniko/nix-provenance.git"
+        "url": "https://codeberg.org/caniko/nix-provenance.git"
       },
       "original": {
+        "rev": "5ac4a08dc82b53e09c7c0f62c700316e74a48219",
         "type": "git",
-        "url": "ssh://git@codeberg.org/caniko/nix-provenance.git"
+        "url": "https://codeberg.org/caniko/nix-provenance.git"
       }
     },
     "nixpkgs": {
@@ -861,6 +886,7 @@
         "crane": "crane_5",
         "flake-parts": "flake-parts",
         "meta-harbor": "meta-harbor_2",
+        "nix-bundle": "nix-bundle",
         "nix-opencode-lsp": "nix-opencode-lsp_2",
         "nixpkgs": [
           "nixpkgs"
@@ -871,18 +897,18 @@
         ]
       },
       "locked": {
-        "lastModified": 1784042745,
-        "narHash": "sha256-dmayBWHKYnA/yoa2euJfYILMbRMoyEk/6Te+Kl91TZ4=",
-        "ref": "trunk",
-        "rev": "91c9c7eb6a2bf473f5db98319264e11ed4696247",
-        "revCount": 121,
-        "type": "git",
-        "url": "https://codeberg.org/caniko/rs-harbor.git"
+        "lastModified": 1785297809,
+        "narHash": "sha256-ztPfmEQgoW1LBU3p91dkgjhqI8wrbczZ2hIWBaQyKoE=",
+        "owner": "caniko",
+        "repo": "rs-harbor",
+        "rev": "d4b24d5a103db35b6c90eb520a95a3f414cd04fb",
+        "type": "github"
       },
       "original": {
-        "ref": "trunk",
-        "type": "git",
-        "url": "https://codeberg.org/caniko/rs-harbor.git"
+        "owner": "caniko",
+        "ref": "0.1.0",
+        "repo": "rs-harbor",
+        "type": "github"
       }
     },
     "rust-overlay": {
@@ -996,6 +1022,21 @@
       }
     },
     "systems": {
+      "locked": {
+        "lastModified": 1681028828,
+        "narHash": "sha256-Vy1rq5AaRuLzOxct8nz4T6wlgyUR7zLU309k9mBC768=",
+        "owner": "nix-systems",
+        "repo": "default",
+        "rev": "da67096a3b9bf56a91d16901293e51ba5b49a27e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-systems",
+        "repo": "default",
+        "type": "github"
+      }
+    },
+    "systems_10": {
       "locked": {
         "lastModified": 1681028828,
         "narHash": "sha256-Vy1rq5AaRuLzOxct8nz4T6wlgyUR7zLU309k9mBC768=",
@@ -1145,6 +1186,24 @@
       "original": {
         "owner": "numtide",
         "repo": "treefmt-nix",
+        "type": "github"
+      }
+    },
+    "utils": {
+      "inputs": {
+        "systems": "systems_8"
+      },
+      "locked": {
+        "lastModified": 1731533236,
+        "narHash": "sha256-l0KFg5HjrsfsO/JpG+r7fRrqm12kzFHyUHqHCVpMMbI=",
+        "owner": "numtide",
+        "repo": "flake-utils",
+        "rev": "11707dc2f618dd54ca8739b309ec4fc024de578b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "numtide",
+        "repo": "flake-utils",
         "type": "github"
       }
     }

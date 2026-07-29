@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     rs-harbor = {
-      url = "git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk";
+      url = "github:caniko/rs-harbor/0.1.0";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.rust-overlay.follows = "rust-overlay";
     };
@@ -40,6 +40,7 @@
         inherit pkgs;
         channel = "stable";
         extensions = ["rustfmt" "clippy" "rust-src"];
+        cache.enable = false;
       };
       src = (toolchain.craneLib).cleanCargoSource ./.;
       commonArgs = {

@@ -101,6 +101,7 @@ pub mod driver {
 
         const POLL_INTERVAL: Duration = Duration::from_secs(2);
         const SESSION_TIMEOUT: Duration = Duration::from_secs(60);
+        const CHROMIUM_ARGS: [&str; 1] = ["disable-gpu"];
 
         #[derive(Debug, thiserror::Error)]
         pub enum ConfigError {
@@ -253,8 +254,7 @@ pub mod driver {
             let browser_config = BrowserConfig::builder()
                 .chrome_executable(&config.chromium)
                 .no_sandbox()
-                .arg("--disable-dev-shm-usage")
-                .arg("--disable-gpu")
+                .args(CHROMIUM_ARGS)
                 .user_data_dir(&profile)
                 .build()
                 .map_err(|_| Failure::Browser)?;
@@ -448,6 +448,11 @@ pub mod driver {
                     profile_dir: "/tmp/foundry".into(),
                 };
                 assert!(validate_state(&state, &config).is_err());
+            }
+
+            #[test]
+            fn chromiumoxide_args_are_switch_names_without_prefixes() {
+                assert!(CHROMIUM_ARGS.iter().all(|arg| !arg.starts_with("--")));
             }
         }
     }

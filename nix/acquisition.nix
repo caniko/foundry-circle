@@ -117,7 +117,6 @@ in {
     users.users.foundryvtt-acquire = {
       isSystemUser = true;
       group = "foundryvtt-acquire";
-      extraGroups = ["nixbld"];
     };
     users.groups.foundryvtt-acquire = {};
     systemd.tmpfiles.settings."10-foundryvtt-acquisition" = {

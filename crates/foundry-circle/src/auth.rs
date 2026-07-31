@@ -413,8 +413,51 @@ mod tests {
     }
 
     #[test]
+    fn non_admin_access_cannot_enter_admin_routes() {
+        let principal = Principal {
+            subject: "sub".into(),
+            issuer: "https://id.example/".into(),
+            display_name: None,
+            email: None,
+            groups: vec!["foundry-circle-users".into()],
+        };
+
+        assert!(!principal.is_admin("foundry-circle-admins"));
+        assert!(!principal.is_admin("foundry-circle-user"));
+    }
+
+    #[test]
+    fn cookie_parser_requires_the_exact_session_name() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            "other=value; foundry_circle_session=opaque"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(cookie(&headers, "foundry_circle_session"), Some("opaque"));
+
+        headers.insert(
+            header::COOKIE,
+            "foundry_circle_session_extra=attacker".parse().unwrap(),
+        );
+        assert_eq!(cookie(&headers, "foundry_circle_session"), None);
+    }
+
+    #[test]
     fn session_cookie_has_browser_security_flags() {
         let cookie = session_cookie("opaque", Duration::from_secs(60));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("Secure"));
+        assert!(cookie.contains("SameSite=Lax"));
+        assert!(cookie.contains("Path=/"));
+        assert!(cookie.contains("Max-Age=60"));
+    }
+
+    #[test]
+    fn logout_cookie_expires_the_session() {
+        let cookie = expired_session_cookie();
+        assert!(cookie.contains("Max-Age=0"));
         assert!(cookie.contains("HttpOnly"));
         assert!(cookie.contains("Secure"));
         assert!(cookie.contains("SameSite=Lax"));

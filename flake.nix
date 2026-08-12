@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     rs-harbor = {
-      url = "git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=b40cd4c4fdf6133962f67bd68a48bfd5d554d47f";
+      url = "git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=c26b735eede8078f795651c4a9cbf0be8733b221";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.rust-overlay.follows = "rust-overlay";
     };
@@ -38,7 +38,7 @@
       };
       toolchain = rs-harbor.lib.mkToolchain {
         inherit pkgs;
-        channel = "stable";
+        toolchainProfile = "nightly";
         extensions = ["rustfmt" "clippy" "rust-src"];
       };
       wasmToolchain = rs-harbor.lib.mkWasmToolchain {inherit pkgs;};

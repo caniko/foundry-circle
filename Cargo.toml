@@ -19,8 +19,8 @@ dioxus = { version = "=0.7.9", default-features = false, features = [
   "router",
 ] }
 dioxus-router = "=0.7.9"
-tartan-ui-core = { git = "https://codeberg.org/caniko/tartan-ui.git", rev = "a52223edf2f3119797d82d44b51b938b85f06639" }
-tartan-ui-dioxus = { git = "https://codeberg.org/caniko/tartan-ui.git", rev = "a52223edf2f3119797d82d44b51b938b85f06639", default-features = false }
+tartan-ui-core = { git = "https://github.com/caniko/tartan-ui.git", rev = "a52223edf2f3119797d82d44b51b938b85f06639" }
+tartan-ui-dioxus = { git = "https://github.com/caniko/tartan-ui.git", rev = "a52223edf2f3119797d82d44b51b938b85f06639", default-features = false }
 
 axum = { version = "0.8", features = ["macros"] }
 tokio = { version = "1", features = [

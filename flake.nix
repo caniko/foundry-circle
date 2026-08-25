@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     rs-harbor = {
-      url = "git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk";
+      url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.rust-overlay.follows = "rust-overlay";
     };
@@ -17,7 +17,7 @@
     # Consumed by the service-stack module in a later phase. Keeping these as
     # first-class inputs makes the provenance and package boundaries explicit.
     nix-foundryvtt.url = "github:nix-foundryvtt/nix-foundryvtt";
-    nix-provenance.url = "git+ssh://git@codeberg.org/caniko/nix-provenance.git";
+    nix-provenance.url = "git+ssh://git@github.com/caniko/nix-provenance.git";
   };
 
   outputs = inputs @ {

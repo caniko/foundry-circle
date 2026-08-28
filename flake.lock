@@ -744,7 +744,7 @@
         "lastModified": 1787224113,
         "narHash": "sha256-7Xz0gzc0Gg1DKamnT/eoytl6xUyGIfY1nZUTjQcaXjA=",
         "ref": "trunk",
-        "rev": "519bc9305b5ba78f37c3226a9d8427c8f635afb8",
+        "rev": "b1a2cf038f39b0d496baad5be7403fea0b15ac13",
         "revCount": 7,
         "type": "git",
         "url": "https://github.com/caniko/harbor-meta.git"
@@ -770,7 +770,7 @@
         "lastModified": 1787224113,
         "narHash": "sha256-7Xz0gzc0Gg1DKamnT/eoytl6xUyGIfY1nZUTjQcaXjA=",
         "ref": "trunk",
-        "rev": "519bc9305b5ba78f37c3226a9d8427c8f635afb8",
+        "rev": "b1a2cf038f39b0d496baad5be7403fea0b15ac13",
         "revCount": 7,
         "type": "git",
         "url": "https://github.com/caniko/meta-harbor.git"
@@ -796,7 +796,7 @@
         "lastModified": 1787224113,
         "narHash": "sha256-7Xz0gzc0Gg1DKamnT/eoytl6xUyGIfY1nZUTjQcaXjA=",
         "ref": "trunk",
-        "rev": "519bc9305b5ba78f37c3226a9d8427c8f635afb8",
+        "rev": "b1a2cf038f39b0d496baad5be7403fea0b15ac13",
         "revCount": 7,
         "type": "git",
         "url": "https://github.com/caniko/meta-harbor.git"
@@ -821,7 +821,7 @@
         "lastModified": 1787224113,
         "narHash": "sha256-7Xz0gzc0Gg1DKamnT/eoytl6xUyGIfY1nZUTjQcaXjA=",
         "ref": "trunk",
-        "rev": "519bc9305b5ba78f37c3226a9d8427c8f635afb8",
+        "rev": "b1a2cf038f39b0d496baad5be7403fea0b15ac13",
         "revCount": 7,
         "type": "git",
         "url": "https://github.com/caniko/meta-harbor.git"
@@ -845,7 +845,7 @@
         "lastModified": 1787224113,
         "narHash": "sha256-7Xz0gzc0Gg1DKamnT/eoytl6xUyGIfY1nZUTjQcaXjA=",
         "ref": "trunk",
-        "rev": "519bc9305b5ba78f37c3226a9d8427c8f635afb8",
+        "rev": "b1a2cf038f39b0d496baad5be7403fea0b15ac13",
         "revCount": 7,
         "type": "git",
         "url": "https://github.com/caniko/meta-harbor.git"
@@ -986,7 +986,7 @@
         "lastModified": 1787616319,
         "narHash": "sha256-dI/7TrVkvdeynos1Ck/zCNm/gcyJM1H0SEMq9FvhTpc=",
         "ref": "trunk",
-        "rev": "652d8efae1312c038368f5f0ca5046fb968a75b7",
+        "rev": "3039f46f286ad5988730553c3040b6a83530216f",
         "revCount": 76,
         "type": "git",
         "url": "https://github.com/caniko/nix-cache-pin.git"
@@ -1013,7 +1013,7 @@
         "lastModified": 1787616319,
         "narHash": "sha256-dI/7TrVkvdeynos1Ck/zCNm/gcyJM1H0SEMq9FvhTpc=",
         "ref": "trunk",
-        "rev": "652d8efae1312c038368f5f0ca5046fb968a75b7",
+        "rev": "3039f46f286ad5988730553c3040b6a83530216f",
         "revCount": 76,
         "type": "git",
         "url": "https://github.com/caniko/nix-cache-pin.git"
@@ -1264,7 +1264,7 @@
         "lastModified": 1787617224,
         "narHash": "sha256-ceV5K//MQqBo6FF+vsYwx/VE4+OVP85cTsz38bm7IO4=",
         "ref": "refs/heads/trunk",
-        "rev": "e6addcc2c072b0dcd736dffd9bd97d5fe4e06b7a",
+        "rev": "a45eda18fc72effcdd430e5063ff051841b27144",
         "revCount": 160,
         "type": "git",
         "url": "ssh://git@github.com/caniko/nix-provenance.git"

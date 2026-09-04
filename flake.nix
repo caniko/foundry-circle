@@ -3,13 +3,14 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    rs-harbor = {
-      url = "git+ssh://git@github.com/caniko/rs-harbor.git?ref=trunk&rev=05cc4f162b55fa904b687db1821e2463fa813e50";
+    harbor-rs = {
+      url = "git+ssh://git@github.com/caniko/harbor-rs.git?ref=trunk&rev=05cc4f162b55fa904b687db1821e2463fa813e50";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.rust-overlay.follows = "rust-overlay";
     };
+    rs-harbor.follows = "harbor-rs";
     rust-overlay.url = "github:oxalica/rust-overlay";
-    crane.follows = "rs-harbor/crane";
+    crane.follows = "harbor-rs/crane";
     flake-utils.url = "github:numtide/flake-utils";
     treefmt-nix.url = "github:numtide/treefmt-nix";
     git-hooks.url = "github:cachix/git-hooks.nix";
@@ -23,7 +24,7 @@
   outputs = inputs @ {
     self,
     nixpkgs,
-    rs-harbor,
+    harbor-rs,
     rust-overlay,
     flake-utils,
     treefmt-nix,
@@ -36,14 +37,14 @@
         inherit system;
         overlays = [(import rust-overlay)];
       };
-      toolchain = rs-harbor.lib.mkToolchain {
+      toolchain = harbor-rs.lib.mkToolchain {
         inherit pkgs;
         toolchainProfile = "nightly";
         extensions = ["rustfmt" "clippy" "rust-src"];
       };
-      wasmToolchain = rs-harbor.lib.mkWasmToolchain {inherit pkgs;};
-      sccachePackage = rs-harbor.packages.${system}.sccache;
-      buildCache = rs-harbor.lib.mkBuildCachePolicy {
+      wasmToolchain = harbor-rs.lib.mkWasmToolchain {inherit pkgs;};
+      sccachePackage = harbor-rs.packages.${system}.sccache;
+      buildCache = harbor-rs.lib.mkBuildCachePolicy {
         inherit pkgs sccachePackage;
         buildPackageSet = pkgs.buildPackages;
         # Use Atlas' shared Redis/Valkey transport; /tmp is private to each
@@ -82,7 +83,7 @@
           cp ${fetchPackage}/bin/foundryvtt-fetch-hook staging/bin/
           tar -C staging -czf "$out" .
         '';
-      dioxusPackage = cacheDioxus (rs-harbor.lib.mkDioxusFullstackPackage {
+      dioxusPackage = cacheDioxus (harbor-rs.lib.mkDioxusFullstackPackage {
         inherit pkgs src;
         craneLib = wasmToolchain.craneLib;
         rustToolchain = wasmToolchain.rustToolchain;

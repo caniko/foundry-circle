@@ -8,5 +8,5 @@ Foundry is the authority for world documents. PostgreSQL is control-plane state
 only. Production authentication trusts Rauthy through nix-provenance and does
 not accept direct Kanidm tokens, local passwords, or arbitrary JavaScript.
 
-Use Crane/rs-harbor for Rust builds and Dioxus/tartan-ui for the operator
+Use Crane/harbor-rs for Rust builds and Dioxus/tartan-ui for the operator
 console. Keep production asset and API paths below `/api`.

@@ -4,11 +4,10 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     harbor-rs = {
-      url = "git+ssh://git@github.com/caniko/harbor-rs.git?ref=trunk&rev=fac8049316846e0ef1c1e6acd92aed7a337b333a";
+      url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=fac8049316846e0ef1c1e6acd92aed7a337b333a";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.rust-overlay.follows = "rust-overlay";
     };
-    rs-harbor.follows = "harbor-rs";
     rust-overlay.url = "github:oxalica/rust-overlay";
     crane.follows = "harbor-rs/crane";
     flake-utils.url = "github:numtide/flake-utils";

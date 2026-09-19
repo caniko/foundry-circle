@@ -17,7 +17,7 @@
     # Consumed by the service-stack module in a later phase. Keeping these as
     # first-class inputs makes the provenance and package boundaries explicit.
     nix-foundryvtt.url = "github:nix-foundryvtt/nix-foundryvtt";
-    nix-provenance.url = "git+ssh://git@codeberg.org/caniko/nix-provenance.git";
+    nix-provenance.url = "git+https://github.com/caniko/nix-provenance.git";
   };
 
   outputs = inputs @ {

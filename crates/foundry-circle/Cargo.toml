@@ -11,6 +11,11 @@ publish = false
 [features]
 default = ["server"]
 web = ["dioxus/web", "tartan-ui-dioxus/web", "dep:wasm-bindgen"]
+web-split = [
+  "dioxus/wasm-split",
+  "dioxus-router/wasm-split",
+  "tartan-ui-dioxus/wasm-split",
+]
 server = [
   "dioxus/server",
   "tartan-ui-dioxus/server",
@@ -20,6 +25,11 @@ server = [
   "dep:tower-http",
   "dep:tracing",
   "dep:tracing-subscriber",
+  "dep:oidc-app-auth",
+  "dep:chrono",
+  "dep:uuid",
+  "dep:chromiumoxide",
+  "dep:futures-util",
 ]
 devtools = ["dioxus/devtools", "tartan-ui-dioxus/devtools"]
 
@@ -31,6 +41,11 @@ tartan-ui-dioxus.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+oidc-app-auth = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+chromiumoxide = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
 
 axum = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }

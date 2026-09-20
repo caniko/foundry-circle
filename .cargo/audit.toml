@@ -1,0 +1,6 @@
+[advisories]
+# RUSTSEC-2023-0071 affects rsa's Marvin Attack resistance. The dependency is
+# target-specific, transitive through sqlx-mysql, and this PostgreSQL-only
+# application neither enables MySQL nor performs RSA private-key operations.
+# There is no fixed rsa release to upgrade to as of this lock revision.
+ignore = ["RUSTSEC-2023-0071"]

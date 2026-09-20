@@ -304,8 +304,40 @@ async fn command(
 
 #[cfg(test)]
 mod tests {
-    use super::database_url;
-    use std::path::PathBuf;
+    use super::*;
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use std::{path::PathBuf, sync::Arc};
+    use tower::ServiceExt;
+
+    fn state(world_state: WorldState) -> AppState {
+        AppState {
+            driver: Arc::new(FakeDriver::new(world_state)),
+            database: DatabaseState::new(),
+            auth: None,
+        }
+    }
+
+    async fn text(response: axum::response::Response) -> String {
+        String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body")
+                .to_vec(),
+        )
+        .expect("UTF-8 response body")
+    }
+
+    async fn json(response: axum::response::Response) -> serde_json::Value {
+        serde_json::from_slice(
+            &to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body"),
+        )
+        .expect("JSON response body")
+    }
 
     #[test]
     fn database_url_ignores_empty_environment_and_missing_credential() {
@@ -318,5 +350,101 @@ mod tests {
             database_url(&Some("postgres:///foundry".into()), None),
             Some("postgres:///foundry".into())
         );
+    }
+
+    #[tokio::test]
+    async fn health_is_public_and_readiness_requires_world_and_database() {
+        let response = api_router_with_state(state(WorldState::Starting))
+            .oneshot(
+                Request::get("/api/v1/healthz")
+                    .body(Body::empty())
+                    .expect("health request"),
+            )
+            .await
+            .expect("health response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(text(response).await, "ok");
+
+        let response = api_router_with_state(state(WorldState::Ready))
+            .oneshot(
+                Request::get("/api/v1/readyz")
+                    .body(Body::empty())
+                    .expect("readiness request"),
+            )
+            .await
+            .expect("readiness response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            json(response).await,
+            serde_json::json!({
+                "state": "ready",
+                "database": false,
+                "ready": false
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn ready_world_response_matches_the_driver_snapshot() {
+        let snapshot = crate::driver::WorldSnapshot {
+            state: WorldState::Ready,
+            id: Some("canary".into()),
+            epoch: 7,
+            foundry_version: Some("13.351".into()),
+            system_id: Some("daggerheart".into()),
+            system_version: Some("1.6.4".into()),
+            is_gm: true,
+        };
+        let response = world(State(AppState {
+            driver: Arc::new(FakeDriver::from_snapshot(snapshot)),
+            database: DatabaseState::new(),
+            auth: None,
+        }))
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            json(response).await,
+            serde_json::json!({
+                "id": "canary",
+                "epoch": 7,
+                "state": "ready",
+                "foundryVersion": "13.351",
+                "systemId": "daggerheart",
+                "systemVersion": "1.6.4",
+                "isGm": true
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_world_routes_fail_closed_without_oidc() {
+        let requests = [
+            Request::get("/api/v1")
+                .body(Body::empty())
+                .expect("discovery request"),
+            Request::get("/api/v1/world")
+                .body(Body::empty())
+                .expect("world request"),
+            Request::get("/api/v1/world/documents/actors/example")
+                .body(Body::empty())
+                .expect("document request"),
+            Request::post("/api/v1/world/commands")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"command":"scene.activate","payload":{},"idempotencyKey":"test"}"#,
+                ))
+                .expect("command request"),
+        ];
+
+        for request in requests {
+            let response = api_router_with_state(state(WorldState::Ready))
+                .oneshot(request)
+                .await
+                .expect("protected response");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(text(response).await, "OIDC is not configured");
+        }
     }
 }

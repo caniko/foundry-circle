@@ -61,23 +61,26 @@ pub mod driver {
     }
 
     /// Deterministic driver used by unit tests and the initial VM test.
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug, Clone)]
     pub struct FakeDriver {
-        state: WorldState,
+        snapshot: WorldSnapshot,
     }
 
     impl FakeDriver {
-        pub const fn new(state: WorldState) -> Self {
-            Self { state }
+        pub fn new(state: WorldState) -> Self {
+            let mut snapshot = WorldSnapshot::starting();
+            snapshot.state = state;
+            Self { snapshot }
+        }
+
+        pub fn from_snapshot(snapshot: WorldSnapshot) -> Self {
+            Self { snapshot }
         }
     }
 
     impl FoundryDriver for FakeDriver {
         fn snapshot(&self) -> WorldSnapshot {
-            WorldSnapshot {
-                state: self.state,
-                ..WorldSnapshot::starting()
-            }
+            self.snapshot.clone()
         }
     }
 
@@ -448,6 +451,39 @@ pub mod driver {
                     profile_dir: "/tmp/foundry".into(),
                 };
                 assert!(validate_state(&state, &config).is_err());
+            }
+
+            #[test]
+            fn fake_and_live_ready_snapshots_share_the_same_contract() {
+                let state: GameState = serde_json::from_str(
+                    r#"{
+                        "ready": true,
+                        "world_id": "canary",
+                        "foundry_version": "13.351",
+                        "system_id": "daggerheart",
+                        "system_version": "1.6.4",
+                        "is_gm": true,
+                        "no_canvas": true,
+                        "no_world": false
+                    }"#,
+                )
+                .expect("adapter fixture is valid JSON");
+                let config = DriverConfig {
+                    base_url: "https://vtt.example".into(),
+                    api_user: "api".into(),
+                    password_file: "/run/credentials/password".into(),
+                    world_id: "canary".into(),
+                    foundry_version: "13.351".into(),
+                    system_id: "daggerheart".into(),
+                    system_version: "1.6.4".into(),
+                    chromium: "/bin/chromium".into(),
+                    profile_dir: "/tmp/foundry".into(),
+                };
+
+                let live = validate_state(&state, &config).expect("matching live fixture");
+                let fake = crate::driver::FakeDriver::from_snapshot(live.clone());
+
+                assert_eq!(fake.snapshot(), live);
             }
 
             #[test]

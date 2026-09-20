@@ -9,6 +9,10 @@ All notable changes to Foundry Circle are documented here.
 - Add fail-closed declarative module/system add, version, rollback, and tombstone reconciliation.
 - Add the Nix package and NixOS module interfaces consumed by Canix.
 
+## [0.1.0] - 2026-07-29
+
+- Initial GitHub-hosted release bundle for the Foundry Circle binaries.
+
 ## 0.1.0 - 2026-07-16
 
 - Bootstrap the PostgreSQL-backed Rust control plane and Dioxus/tartan-ui operator console.

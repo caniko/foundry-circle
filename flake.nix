@@ -40,6 +40,7 @@
         inherit pkgs;
         toolchainProfile = "nightly";
         extensions = ["rustfmt" "clippy" "rust-src"];
+        cache.enable = false;
       };
       wasmToolchain = harbor-rs.lib.mkWasmToolchain {inherit pkgs;};
       sccachePackage = harbor-rs.packages.${system}.sccache;
@@ -60,6 +61,7 @@
         pname = "foundry-circle";
         strictDeps = true;
       };
+      foundryVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
       cargoArtifacts = cacheRust (toolchain.craneLib.buildDepsOnly commonArgs);
       cargoPackage = cacheRust (toolchain.craneLib.buildPackage (commonArgs
         // {
@@ -71,17 +73,18 @@
           pname = "foundryvtt-fetch";
           cargoExtraArgs = "-p foundryvtt-fetch --bins";
         }));
-      releaseBundle =
-        pkgs.runCommand "foundry-circle-release-bundle" {
-          nativeBuildInputs = [pkgs.gnutar pkgs.gzip];
-        } ''
-          mkdir -p staging/bin
-          cp ${dioxusPackage}/bin/foundry-circle staging/bin/
-          cp ${fetchPackage}/bin/foundryvtt-fetch staging/bin/
-          cp ${fetchPackage}/bin/foundryvtt-fetchd staging/bin/
-          cp ${fetchPackage}/bin/foundryvtt-fetch-hook staging/bin/
-          tar -C staging -czf "$out" .
-        '';
+      portableRelease = harbor-rs.lib.mkPortableBinaryRelease {
+        inherit pkgs;
+        pname = "foundry-circle";
+        version = foundryVersion;
+        artifacts.x86_64-linux.entries = {
+          foundry-circle.package = dioxusPackage;
+          foundryvtt-fetch.package = fetchPackage;
+          foundryvtt-fetchd.package = fetchPackage;
+          foundryvtt-fetch-hook.package = fetchPackage;
+        };
+      };
+      releaseBundle = portableRelease.releaseBundle;
       dioxusPackage = cacheDioxus (harbor-rs.lib.mkDioxusFullstackPackage {
         inherit pkgs src;
         craneLib = wasmToolchain.craneLib;
@@ -90,6 +93,7 @@
         pname = "foundry-circle";
         package = "foundry-circle";
         binary = "foundry-circle";
+        version = foundryVersion;
         serverInstallName = "foundry-circle";
         # Dioxus fullstack emits the server artifact as `server`; the Cargo
         # binary remains foundry-circle and is selected above.

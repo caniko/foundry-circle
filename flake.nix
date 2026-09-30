@@ -133,6 +133,13 @@
 
       devShells = {
         default = devShell;
+        msrv = pkgs.mkShell {
+          inputsFrom = [(devShell.overrideAttrs (_: {shellHook = "";}))];
+          packages = [pkgs.rust-bin.stable."1.85.0".minimal];
+          RUSTFLAGS = "";
+          CARGO_ENCODED_RUSTFLAGS = "";
+          RUSTC_WRAPPER = "";
+        };
         # Simit's generated publish workflow uses this named shell for the
         # crate documentation gate.
         docs = devShell;

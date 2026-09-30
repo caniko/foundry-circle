@@ -135,7 +135,7 @@
         default = devShell;
         msrv = pkgs.mkShell {
           inputsFrom = [(devShell.overrideAttrs (_: {shellHook = "";}))];
-          packages = [pkgs.rust-bin.stable."1.85.0".minimal];
+          packages = [pkgs.rust-bin.stable."1.88.0".minimal];
           RUSTFLAGS = "";
           CARGO_ENCODED_RUSTFLAGS = "";
           RUSTC_WRAPPER = "";

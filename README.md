@@ -17,6 +17,8 @@ after the licensed Foundry archive and disposable v13.351 world are available.
 
 ## Development
 
+Rust 1.88 or newer is required to use the security-patched dependency graph.
+
 ```bash
 cargo check --all-targets --all-features
 cargo test --all-targets --all-features

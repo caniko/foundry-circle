@@ -188,3 +188,45 @@ async fn command(
         })),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn healthy_process_with_unconfigured_world_is_not_ready() {
+        assert_eq!(healthz().await.into_response().status(), StatusCode::OK);
+        let response = readyz(State(AppState::unconfigured()))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"state": "starting", "database": false, "ready": false})
+        );
+    }
+
+    #[tokio::test]
+    async fn ready_world_requires_a_control_plane_database() {
+        let state = AppState {
+            driver: Arc::new(FakeDriver::new(WorldState::Ready)),
+            database: None,
+        };
+        let response = readyz(State(state.clone())).await.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["state"], "ready");
+        assert_eq!(body["ready"], false);
+        assert_eq!(
+            world(State(state)).await.into_response().status(),
+            StatusCode::OK
+        );
+    }
+}

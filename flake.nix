@@ -124,6 +124,21 @@
           inherit src;
           pname = "foundry-circle";
         };
+        doctests = toolchain.craneLib.cargoTest (commonArgs
+          // {
+            inherit cargoArtifacts;
+            cargoTestExtraArgs = "--workspace --all-features --doc";
+            preBuild = ''
+              # The RSA advisory waiver is valid only while SQLx's MySQL
+              # backend is absent from every enabled target's compiled graph.
+              cargo tree --workspace --all-features --target all --locked \
+                --prefix none --edges normal,build,dev > compiled-dependencies.txt
+              if grep -Eq '^rsa v[0-9]' compiled-dependencies.txt; then
+                echo "RSA is now compiled: remove and re-review RUSTSEC-2023-0071 waiver" >&2
+                exit 1
+              fi
+            '';
+          });
         clippy = toolchain.craneLib.cargoClippy (commonArgs
           // {
             inherit cargoArtifacts;

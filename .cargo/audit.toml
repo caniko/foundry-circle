@@ -1,0 +1,7 @@
+[advisories]
+# Maintainer-approved on 2026-09-30. SQLx's optional MySQL backend leaves rsa
+# in Cargo.lock, but this PostgreSQL-only workspace does not compile it:
+# cargo tree --workspace --all-features --target all -i rsa
+# prints no dependency graph. Re-review this waiver whenever SQLx features or
+# database backends change, and remove it when the upstream advisory is fixed.
+ignore = ["RUSTSEC-2023-0071"]

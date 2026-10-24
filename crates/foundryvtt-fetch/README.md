@@ -29,7 +29,7 @@ The command emits JSON containing the archive path, SHA-256, Nix SRI hash,
 release, source kind, size, and acquisition timestamp. It never emits
 credentials or presigned URLs. Interactive caches are atomically copied into a
 mode `0700` cache with mode `0600` contents; the daemon's local-only cache is
-changed to mode `2750`/`0440` with the trusted `nixbld` group so Nix can read a
+changed to mode `2751`/`0440` with the trusted `nixbld` group so Nix can read a
 validated archive without receiving account credentials.
 
 ## Declarative package seeds

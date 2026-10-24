@@ -121,7 +121,7 @@ in {
     users.groups.foundryvtt-acquire = {};
     systemd.tmpfiles.settings."10-foundryvtt-acquisition" = {
       ${cfg.cacheDir}.d = {
-        mode = "2750";
+        mode = "2751";
         user = "foundryvtt-acquire";
         group = "nixbld";
       };

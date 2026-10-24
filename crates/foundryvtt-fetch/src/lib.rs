@@ -272,8 +272,12 @@ impl Cache {
 
     /// Make an already populated cache readable by the Nix build group while
     /// retaining a non-world-readable directory and files.
+    ///
+    /// Others may traverse but not list the directory: Nix resolves a hook's
+    /// `extra-sandbox-paths` source as root inside the build's user namespace,
+    /// where only the "other" permission bits of host files apply.
     pub fn prepare_shared_read_cache(&self) -> Result<(), FetchError> {
-        set_mode(&self.root, 0o2750)?;
+        set_mode(&self.root, 0o2751)?;
         for entry in fs::read_dir(&self.root)? {
             let path = entry?.path();
             if path.is_file() {
@@ -1067,6 +1071,19 @@ mod tests {
             }
         );
         assert!(ReleaseId::parse("13").is_err());
+    }
+
+    #[test]
+    fn shared_read_cache_is_traversable_but_not_listable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().join("cache")).unwrap();
+        let archive_path = cache.root().join("FoundryVTT-Linux-13.351.zip");
+        fs::write(&archive_path, b"zip").unwrap();
+        cache.prepare_shared_read_cache().unwrap();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode(cache.root()), 0o2751);
+        assert_eq!(mode(&archive_path), 0o440);
     }
 
     #[test]

@@ -91,10 +91,12 @@ in {
       systemId = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
+        description = "Expected world game system; null accepts the system chosen in Foundry's setup UI.";
       };
       systemVersion = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
+        description = "Expected game system version; null accepts whatever version the world runs.";
       };
       chromiumPackage = lib.mkOption {
         type = lib.types.package;
@@ -155,10 +157,8 @@ in {
             cfg.foundryWorld.apiPasswordFile
             cfg.foundryWorld.worldId
             cfg.foundryWorld.foundryVersion
-            cfg.foundryWorld.systemId
-            cfg.foundryWorld.systemVersion
           ];
-          message = "services.foundry-circle.foundryWorld must define baseUrl, apiPasswordFile, worldId, foundryVersion, systemId, and systemVersion";
+          message = "services.foundry-circle.foundryWorld must define baseUrl, apiPasswordFile, worldId, and foundryVersion";
         }
       ];
 

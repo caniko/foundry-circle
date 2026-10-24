@@ -118,8 +118,10 @@ pub mod driver {
             pub password_file: PathBuf,
             pub world_id: String,
             pub foundry_version: String,
-            pub system_id: String,
-            pub system_version: String,
+            /// The world's game system is chosen in Foundry's setup UI; when
+            /// unset, any system the live world reports is accepted.
+            pub system_id: Option<String>,
+            pub system_version: Option<String>,
             pub chromium: PathBuf,
             pub profile_dir: PathBuf,
         }
@@ -133,6 +135,7 @@ pub mod driver {
                     }
                     Ok(value)
                 };
+                let optional = |name| env::var(name).ok().filter(|value| !value.trim().is_empty());
                 Ok(Self {
                     base_url: required("FOUNDRY_WORLD_BASE_URL")?
                         .trim_end_matches('/')
@@ -141,8 +144,8 @@ pub mod driver {
                     password_file: required("FOUNDRY_WORLD_API_PASSWORD_FILE")?.into(),
                     world_id: required("FOUNDRY_WORLD_ID")?,
                     foundry_version: required("FOUNDRY_EXPECTED_FOUNDRY_VERSION")?,
-                    system_id: required("FOUNDRY_EXPECTED_SYSTEM_ID")?,
-                    system_version: required("FOUNDRY_EXPECTED_SYSTEM_VERSION")?,
+                    system_id: optional("FOUNDRY_EXPECTED_SYSTEM_ID"),
+                    system_version: optional("FOUNDRY_EXPECTED_SYSTEM_VERSION"),
                     chromium: required("FOUNDRY_CHROMIUM")?.into(),
                     profile_dir: env::var_os("FOUNDRY_BROWSER_PROFILE_DIR")
                         .map(PathBuf::from)
@@ -364,8 +367,11 @@ pub mod driver {
             if !state.is_gm
                 || state.world_id.as_deref() != Some(config.world_id.as_str())
                 || state.foundry_version.as_deref() != Some(config.foundry_version.as_str())
-                || state.system_id.as_deref() != Some(config.system_id.as_str())
-                || state.system_version.as_deref() != Some(config.system_version.as_str())
+                || !expected(config.system_id.as_ref(), state.system_id.as_ref())
+                || !expected(
+                    config.system_version.as_ref(),
+                    state.system_version.as_ref(),
+                )
             {
                 return Err(Failure::Contract);
             }
@@ -378,6 +384,11 @@ pub mod driver {
                 system_version: state.system_version.clone(),
                 is_gm: state.is_gm,
             })
+        }
+
+        /// An undeclared expectation accepts whatever the live world reports.
+        fn expected(declared: Option<&String>, live: Option<&String>) -> bool {
+            declared.is_none() || declared == live
         }
 
         async fn evaluate<T: serde::de::DeserializeOwned>(
@@ -442,12 +453,26 @@ pub mod driver {
                     password_file: "/run/credentials/password".into(),
                     world_id: "canary".into(),
                     foundry_version: "13.351".into(),
-                    system_id: "daggerheart".into(),
-                    system_version: "1.6.4".into(),
+                    system_id: Some("daggerheart".into()),
+                    system_version: Some("1.6.4".into()),
                     chromium: "/bin/chromium".into(),
                     profile_dir: "/tmp/foundry".into(),
                 };
                 assert!(validate_state(&state, &config).is_err());
+                let gm = GameState {
+                    is_gm: true,
+                    system_id: Some("pf2e".into()),
+                    system_version: Some("7.0.0".into()),
+                    ..state
+                };
+                assert!(validate_state(&gm, &config).is_err());
+                let gui_selected = DriverConfig {
+                    system_id: None,
+                    system_version: None,
+                    ..config
+                };
+                let snapshot = validate_state(&gm, &gui_selected).unwrap();
+                assert_eq!(snapshot.system_id.as_deref(), Some("pf2e"));
             }
 
             #[test]

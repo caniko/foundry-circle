@@ -110,10 +110,30 @@
         release-bundle = releaseBundle;
       };
 
-      apps.default = flake-utils.lib.mkApp {
-        drv = dioxusPackage;
-        exePath = "/bin/foundry-circle";
-      };
+      apps =
+        {
+          default = flake-utils.lib.mkApp {
+            drv = dioxusPackage;
+            exePath = "/bin/foundry-circle";
+          };
+        }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          # Simit prebuild publication on trunk (secret ATTIC_TOKEN). Linux
+          # outputs only: the packages canix consumes, pushed to the public
+          # canix cache.
+          push-flake-inputs = rs-harbor.lib.mkAtticPush {
+            inherit pkgs;
+            flake = ".";
+            paths = [dioxusPackage fetchPackage];
+            adapter = rs-harbor.lib.mkAdapter {
+              attic = {
+                endpoint = "https://attic.candee.baby";
+                cache = "canix";
+                tokenEnvVar = "ATTIC_TOKEN";
+              };
+            };
+          };
+        };
 
       formatter = treefmtEval.config.build.wrapper;
 

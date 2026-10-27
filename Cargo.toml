@@ -19,8 +19,8 @@ dioxus = { version = "=0.7.9", default-features = false, features = [
   "router",
 ] }
 dioxus-router = "=0.7.9"
-tartan-ui-core = { git = "https://github.com/caniko/tartan-ui.git", rev = "a52223edf2f3119797d82d44b51b938b85f06639" }
-tartan-ui-dioxus = { git = "https://github.com/caniko/tartan-ui.git", rev = "a52223edf2f3119797d82d44b51b938b85f06639", default-features = false }
+tartan-ui-core = { git = "https://github.com/caniko/tartan-ui.git", rev = "d8f994da26846b6785194e7969a5d31d9fc050f1" }
+tartan-ui-dioxus = { git = "https://github.com/caniko/tartan-ui.git", rev = "d8f994da26846b6785194e7969a5d31d9fc050f1", default-features = false }
 
 axum = { version = "0.8", features = ["macros"] }
 tokio = { version = "1", features = [
@@ -41,6 +41,7 @@ tower-http = { version = "0.6", features = [
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+chrono = { version = "0.4", features = ["serde", "clock"] }
 sqlx = { version = "0.8", default-features = false, features = [
   "chrono",
   "json",
@@ -54,12 +55,15 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["serde", "v4"] }
+# Keep the integration reproducible before the first crates.io publication.
+oidc-app-auth = { version = "0.1.0", git = "https://github.com/caniko/oidc-app-auth.git", rev = "e35ee2e72128c1b505bd4be2ed290299bfd58784" }
 
 # The downloader is deliberately independent of the Dioxus application so it
 # can be published and used by Nix/systemd without shipping the operator UI.
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
+chromiumoxide = { version = "0.9", default-features = false }
 base64 = "0.22"
 fs2 = "0.4"
 hex = "0.4"
@@ -73,7 +77,7 @@ sha2 = "0.10"
 tempfile = "3"
 time = { version = "0.3", features = ["formatting"] }
 zeroize = "1"
-zip = { version = "2", default-features = false, features = [
+zip = { version = "9", default-features = false, features = [
   "deflate",
   "bzip2",
   "xz",

@@ -10,10 +10,10 @@ Foundry Circle is a Rust/Axum broker for the active Foundry VTT world, with a
 Dioxus 0.7 operator console using tartan-ui. PostgreSQL stores control-plane
 state only; Foundry remains authoritative for world documents.
 
-The repository is intentionally bootstrapped with health, discovery, a typed
-driver seam, and a non-ready readiness contract. The live browser driver,
-OIDC, migrations, capability registry, and route integrations are added only
-after the licensed Foundry archive and disposable v13.351 world are available.
+The repository provides health, discovery, a typed driver seam, OIDC login,
+PostgreSQL-backed sessions, a capability registry, and a non-ready readiness
+contract. Foundry world documents remain behind the typed driver seam until a
+licensed archive and disposable v13.351 world certify the live browser driver.
 
 ## Development
 
@@ -30,14 +30,15 @@ in the repository.
 
 Phase 02 also ships the standalone `foundryvtt-fetch` crate. It acquires
 licensed releases outside Nix evaluation, records SHA-256/Nix-SRI provenance,
-and reconciles immutable module/system outputs from
-`services.foundryvtt.declarativePackages`. Use `state = "absent"` for an
-explicit package deletion; worlds remain mutable Foundry-owned state.
+and initially seeds mutable module/system directories from
+`services.foundryvtt.declarativePackages`. Use `state = "absent"` to reset an
+initialization marker; worlds and package directories remain mutable
+Foundry-owned state.
 
 ## Boundaries
 
-- Kanidm is the primary internal OIDC issuer; Rauthy remains the
-  nix-provenance-managed federation surface for outward identity flows.
+- Rauthy is the production OIDC issuer. Existing Kanidm identities reach it
+  through the nix-provenance-managed federation surface.
 - SQLite is not supported; PostgreSQL is the only database backend.
 - Arbitrary JavaScript/evaluate endpoints are not part of the production
   feature set.

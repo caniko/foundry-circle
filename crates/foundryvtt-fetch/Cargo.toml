@@ -20,6 +20,14 @@ path = "src/lib.rs"
 name = "foundryvtt-fetch"
 path = "src/main.rs"
 
+[[bin]]
+name = "foundryvtt-fetchd"
+path = "src/daemon.rs"
+
+[[bin]]
+name = "foundryvtt-fetch-hook"
+path = "src/hook.rs"
+
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true

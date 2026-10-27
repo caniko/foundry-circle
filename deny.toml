@@ -8,6 +8,7 @@ allow = [
   "BSD-2-Clause",
   "BSD-3-Clause",
   "BSL-1.0",
+  "bzip2-1.0.6",
   "CC0-1.0",
   "CDLA-Permissive-2.0",
   "ISC",
@@ -27,4 +28,7 @@ wildcards = "allow"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = ["https://github.com/caniko/tartan-ui.git"]
+allow-git = [
+  "https://github.com/caniko/tartan-ui.git",
+  "https://github.com/caniko/oidc-app-auth.git",
+]

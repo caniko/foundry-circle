@@ -1,28 +1,102 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Path, State},
     http::StatusCode,
+    middleware::from_fn_with_state,
     response::IntoResponse,
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use serde_json::json;
+use sqlx::{PgPool, postgres::PgPoolOptions};
+use tokio::{sync::RwLock, time::sleep};
 
 use crate::driver::{FakeDriver, FoundryDriver, WorldState};
+
+#[path = "auth.rs"]
+pub mod auth;
 
 #[derive(Clone)]
 pub struct AppState {
     pub driver: Arc<dyn FoundryDriver>,
-    pub database: Option<PgPool>,
+    pub database: DatabaseState,
+    pub auth: Option<auth::AuthState>,
+}
+
+#[derive(Clone, Default)]
+pub struct DatabaseState {
+    pool: Arc<RwLock<Option<PgPool>>>,
+}
+
+impl DatabaseState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn pool(&self) -> Option<PgPool> {
+        self.pool.read().await.clone()
+    }
+
+    pub async fn is_ready(&self) -> bool {
+        self.pool.read().await.is_some()
+    }
+
+    pub fn supervise(&self, url: Option<String>, url_file: Option<PathBuf>) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Some(pool) = state.pool().await {
+                    if sqlx::query("SELECT 1").execute(&pool).await.is_err() {
+                        *state.pool.write().await = None;
+                        pool.close().await;
+                        tracing::warn!("PostgreSQL connection lost; readiness is false");
+                    }
+                } else if let Some(database_url) = database_url(&url, url_file.as_ref()) {
+                    match PgPoolOptions::new()
+                        .max_connections(5)
+                        .connect(&database_url)
+                        .await
+                    {
+                        Ok(pool) => match sqlx::migrate!("./migrations").run(&pool).await {
+                            Ok(()) => {
+                                *state.pool.write().await = Some(pool);
+                                tracing::info!("PostgreSQL is ready");
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "PostgreSQL migrations are not ready");
+                                pool.close().await;
+                            }
+                        },
+                        Err(error) => tracing::warn!(%error, "PostgreSQL connection is not ready"),
+                    }
+                }
+                sleep(Duration::from_secs(5)).await;
+            }
+        });
+    }
+}
+
+fn database_url(url: &Option<String>, url_file: Option<&PathBuf>) -> Option<String> {
+    url.as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            url_file
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        })
 }
 
 impl AppState {
     pub fn unconfigured() -> Self {
         Self {
             driver: Arc::new(FakeDriver::new(WorldState::Starting)),
-            database: None,
+            database: DatabaseState::new(),
+            auth: None,
         }
     }
 }
@@ -34,6 +108,9 @@ pub struct WorldDescriptor {
     pub epoch: u64,
     pub state: WorldState,
     pub foundry_version: Option<String>,
+    pub system_id: Option<String>,
+    pub system_version: Option<String>,
+    pub is_gm: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -60,14 +137,22 @@ pub fn api_router() -> Router {
 }
 
 pub fn api_router_with_state(state: AppState) -> Router {
-    Router::new()
-        .route("/api/v1/healthz", get(healthz))
-        .route("/api/v1/readyz", get(readyz))
+    let protected = Router::new()
         .route("/api/v1", get(discovery))
+        .route("/api/v1/me", get(me))
         .route("/api/v1/world", get(world))
         .route("/api/v1/world/capabilities", get(capabilities))
         .route("/api/v1/world/documents/{collection}/{id}", get(document))
         .route("/api/v1/world/commands", post(command))
+        .layer(from_fn_with_state(state.clone(), auth::require_session));
+
+    Router::new()
+        .route("/api/v1/healthz", get(healthz))
+        .route("/api/v1/readyz", get(readyz))
+        .route("/api/auth/login", get(auth::login_start))
+        .route("/api/auth/oidc/callback", get(auth::oidc_callback))
+        .route("/api/auth/logout", post(auth::logout))
+        .merge(protected)
         .with_state(state)
 }
 
@@ -77,7 +162,8 @@ async fn healthz() -> impl IntoResponse {
 
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
     let world_state = state.driver.world_state();
-    let ready = world_state == WorldState::Ready && state.database.is_some();
+    let database = state.database.is_ready().await;
+    let ready = world_state == WorldState::Ready && database;
     let status = if ready {
         StatusCode::OK
     } else {
@@ -87,7 +173,7 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
         status,
         Json(serde_json::json!({
             "state": world_state,
-            "database": state.database.is_some(),
+            "database": database,
             "ready": ready,
         })),
     )
@@ -108,12 +194,26 @@ async fn discovery() -> impl IntoResponse {
     }))
 }
 
+async fn me(Extension(principal): Extension<auth::Principal>) -> impl IntoResponse {
+    Json(json!({
+        "subject": principal.subject,
+        "issuer": principal.issuer,
+        "displayName": principal.display_name,
+        "email": principal.email,
+        "groups": principal.groups,
+    }))
+}
+
 async fn world(State(state): State<AppState>) -> impl IntoResponse {
+    let snapshot = state.driver.snapshot();
     let descriptor = WorldDescriptor {
-        id: "active".to_string(),
-        epoch: 0,
-        state: state.driver.world_state(),
-        foundry_version: None,
+        id: snapshot.id.clone().unwrap_or_else(|| "active".to_string()),
+        epoch: snapshot.epoch,
+        state: snapshot.state,
+        foundry_version: snapshot.foundry_version.clone(),
+        system_id: snapshot.system_id.clone(),
+        system_version: snapshot.system_version.clone(),
+        is_gm: snapshot.is_gm,
     };
     if descriptor.state == WorldState::Ready {
         (StatusCode::OK, Json(serde_json::json!(descriptor)))
@@ -171,8 +271,21 @@ async fn document(
 
 async fn command(
     State(state): State<AppState>,
+    Extension(principal): Extension<auth::Principal>,
     Json(request): Json<CommandRequest>,
 ) -> impl IntoResponse {
+    let Some(auth) = state.auth.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "oidc_not_configured"})),
+        );
+    };
+    if !principal.is_admin(&auth.admin_group) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "admin_required"})),
+        );
+    }
     if state.driver.world_state() != WorldState::Ready {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -192,6 +305,19 @@ async fn command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn database_url_ignores_empty_environment_and_missing_credential() {
+        assert_eq!(database_url(&Some("  ".into()), None), None);
+        assert_eq!(
+            database_url(&None, Some(&PathBuf::from("/missing/database-url"))),
+            None
+        );
+        assert_eq!(
+            database_url(&Some("postgres:///foundry".into()), None),
+            Some("postgres:///foundry".into())
+        );
+    }
 
     #[tokio::test]
     async fn healthy_process_with_unconfigured_world_is_not_ready() {
@@ -214,7 +340,8 @@ mod tests {
     async fn ready_world_requires_a_control_plane_database() {
         let state = AppState {
             driver: Arc::new(FakeDriver::new(WorldState::Ready)),
-            database: None,
+            database: DatabaseState::new(),
+            auth: None,
         };
         let response = readyz(State(state.clone())).await.into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);

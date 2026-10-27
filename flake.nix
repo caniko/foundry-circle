@@ -137,6 +137,7 @@
           verified = "14";
         };
       };
+      publishedPackages = [dioxusPackage fetchPackage];
       devShell = toolchain.craneLib.devShell {
         checks = self.checks.${system};
         packages = with pkgs;
@@ -155,15 +156,48 @@
         release-bundle = releaseBundle;
       };
 
-      apps.default = flake-utils.lib.mkApp {
-        drv = dioxusPackage;
-        exePath = "/bin/foundry-circle";
-      };
+      apps =
+        {
+          default = flake-utils.lib.mkApp {
+            drv = dioxusPackage;
+            exePath = "/bin/foundry-circle";
+          };
+        }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          # Simit prebuild publication on trunk (secret ATTIC_TOKEN). Linux
+          # outputs only: the packages canix consumes, pushed to the public
+          # canix cache. Never add a path that reaches the licensed Foundry
+          # package (see checks.published-closure-unlicensed).
+          push-flake-inputs = rs-harbor.lib.mkAtticPush {
+            inherit pkgs;
+            flake = ".";
+            paths = publishedPackages;
+            adapter = rs-harbor.lib.mkAdapter {
+              attic = {
+                endpoint = "https://attic.candee.baby";
+                cache = "canix";
+                tokenEnvVar = "ATTIC_TOKEN";
+              };
+            };
+          };
+        };
 
       formatter = treefmtEval.config.build.wrapper;
 
       checks = {
         default = cargoPackage;
+        # The public cache must never receive licensed Foundry VTT content.
+        published-closure-unlicensed =
+          pkgs.runCommand "published-closure-unlicensed" {
+            closure = pkgs.closureInfo {rootPaths = publishedPackages;};
+          } ''
+            set -eu
+            if grep -iE 'foundryvtt-[0-9]|foundryvtt.*\.zip|FoundryVTT-.*\.zip|-foundryvtt$' "$closure/store-paths"; then
+              echo 'published closure reaches licensed Foundry VTT content' >&2
+              exit 1
+            fi
+            touch "$out"
+          '';
         formatting = treefmtEval.config.build.check self;
         fmt = toolchain.craneLib.cargoFmt {
           inherit src;

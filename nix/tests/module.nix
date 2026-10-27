@@ -19,6 +19,7 @@
         inherit package;
         listenAddress = "0.0.0.0";
         listenPort = 8032;
+        openFirewall = true;
         database.createLocally = true;
         foundryWorld = {
           baseUrl = "https://vtt.example";
@@ -50,5 +51,6 @@ in
   assert builtins.elem "api-password:/run/agenix/foundry-circle-api-password" enabled.config.systemd.services.foundry-circle.serviceConfig.LoadCredential;
   assert builtins.elem "foundry_circle" enabled.config.services.postgresql.ensureDatabases;
   assert pkgs.lib.any (user: user.name == "foundry-circle") enabled.config.services.postgresql.ensureUsers;
+  assert builtins.elem 8032 enabled.config.networking.firewall.allowedTCPPorts;
   assert !(builtins.hasAttr "foundry-circle" disabled.config.systemd.services);
     pkgs.runCommand "foundry-circle-module-shape" {} "touch $out"

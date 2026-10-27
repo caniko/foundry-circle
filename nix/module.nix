@@ -38,6 +38,12 @@ in {
       default = 8032;
     };
 
+    openFirewall = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Open `listenPort` in the firewall.";
+    };
+
     database = {
       createLocally = lib.mkOption {
         type = lib.types.bool;
@@ -161,6 +167,8 @@ in {
           message = "services.foundry-circle.foundryWorld must define baseUrl, apiPasswordFile, worldId, and foundryVersion";
         }
       ];
+
+      networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [cfg.listenPort];
 
       users.users.foundry-circle = {
         isSystemUser = true;

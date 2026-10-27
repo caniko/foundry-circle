@@ -56,7 +56,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 # Keep the integration reproducible before the first crates.io publication.
-oidc-app-auth = { version = "0.1.0", git = "https://github.com/caniko/oidc-app-auth.git", rev = "b6dec2a0453e465fa0e8549160ad8ff84a2a2a21" }
+oidc-app-auth = { version = "0.1.0", git = "https://github.com/caniko/oidc-app-auth.git", rev = "e35ee2e72128c1b505bd4be2ed290299bfd58784" }
 
 # The downloader is deliberately independent of the Dioxus application so it
 # can be published and used by Nix/systemd without shipping the operator UI.

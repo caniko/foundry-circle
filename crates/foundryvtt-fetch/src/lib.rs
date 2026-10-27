@@ -453,7 +453,10 @@ pub fn validate_archive(
         let mut entry = zip
             .by_index(index)
             .map_err(|e| FetchError::InvalidArchive(e.to_string()))?;
-        let name = entry.name().replace('\\', "/");
+        let name = entry
+            .name()
+            .map_err(|e| FetchError::InvalidArchive(e.to_string()))?
+            .replace('\\', "/");
         if !safe_zip_path(&name) {
             return Err(FetchError::InvalidArchive(format!(
                 "unsafe ZIP path {name:?}"
@@ -912,7 +915,7 @@ fn safe_zip_path(name: &str) -> bool {
         .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
 }
 
-fn is_symlink(entry: &zip::read::ZipFile<'_>) -> bool {
+fn is_symlink<R: Read>(entry: &zip::read::ZipFile<'_, R>) -> bool {
     entry
         .unix_mode()
         .is_some_and(|mode| mode & 0o170000 == 0o120000)

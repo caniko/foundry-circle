@@ -1077,6 +1077,12 @@ mod tests {
     fn shared_read_cache_is_traversable_but_not_listable() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
+        // The Nix build sandbox forbids chmod setgid (EPERM); nothing to test there.
+        let probe = dir.path().join("probe");
+        fs::create_dir(&probe).unwrap();
+        if fs::set_permissions(&probe, fs::Permissions::from_mode(0o2751)).is_err() {
+            return;
+        }
         let cache = Cache::new(dir.path().join("cache")).unwrap();
         let archive_path = cache.root().join("FoundryVTT-Linux-13.351.zip");
         fs::write(&archive_path, b"zip").unwrap();

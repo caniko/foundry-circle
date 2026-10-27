@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     rs-harbor = {
-      url = "git+ssh://git@github.com/caniko/rs-harbor.git?ref=trunk&rev=05cc4f162b55fa904b687db1821e2463fa813e50";
+      url = "git+https://github.com/caniko/rs-harbor.git?ref=trunk&rev=05cc4f162b55fa904b687db1821e2463fa813e50";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.rust-overlay.follows = "rust-overlay";
     };
@@ -17,10 +17,10 @@
     # Consumed by the service-stack module in a later phase. Keeping these as
     # first-class inputs makes the provenance and package boundaries explicit.
     nix-foundryvtt.url = "github:nix-foundryvtt/nix-foundryvtt";
-    nix-provenance.url = "git+ssh://git@codeberg.org/caniko/nix-provenance.git";
+    nix-provenance.url = "git+ssh://git@github.com/caniko/nix-provenance.git";
   };
 
-  outputs = inputs @ {
+  outputs = {
     self,
     nixpkgs,
     rs-harbor,
@@ -54,7 +54,7 @@
       };
       cacheRust = package: buildCache.withRustCache {inherit package;};
       cacheDioxus = package: buildCache.withDioxusCache {inherit package;};
-      src = (toolchain.craneLib).cleanCargoSource ./.;
+      src = toolchain.craneLib.cleanCargoSource ./.;
       commonArgs = {
         inherit src;
         pname = "foundry-circle";
@@ -84,8 +84,8 @@
         '';
       dioxusPackage = cacheDioxus (rs-harbor.lib.mkDioxusFullstackPackage {
         inherit pkgs src;
-        craneLib = wasmToolchain.craneLib;
-        rustToolchain = wasmToolchain.rustToolchain;
+        inherit (wasmToolchain) craneLib;
+        inherit (wasmToolchain) rustToolchain;
         cargoLock = ./Cargo.lock;
         pname = "foundry-circle";
         package = "foundry-circle";
@@ -108,7 +108,7 @@
         hooks = import ./nix/pre-commit.nix {
           inherit pkgs;
           treefmtWrapper = treefmtEval.config.build.wrapper;
-          rustToolchain = toolchain.rustToolchain;
+          inherit (toolchain) rustToolchain;
         };
       };
       packageFixtureSource = pkgs.runCommand "foundry-package-fixture-source" {} ''
@@ -119,7 +119,7 @@
         printf 'fixture\n' > "$out/module/content.txt"
       '';
       packageFixture = import ./nix/package-output.nix {
-        lib = nixpkgs.lib;
+        inherit (nixpkgs) lib;
         inherit pkgs;
         source = packageFixtureSource;
         kind = "module";
@@ -140,7 +140,7 @@
         packages = with pkgs;
           [cargo-deny cargo-nextest cargo-audit jq pre-commit rust-analyzer]
           ++ preCommit.enabledPackages;
-        shellHook = preCommit.shellHook;
+        inherit (preCommit) shellHook;
       };
     in {
       packages = {
@@ -167,6 +167,21 @@
           inherit src;
           pname = "foundry-circle";
         };
+        doctests = toolchain.craneLib.cargoTest (commonArgs
+          // {
+            inherit cargoArtifacts;
+            cargoTestExtraArgs = "--workspace --all-features --doc";
+            preBuild = ''
+              # The RSA advisory waiver is valid only while SQLx's MySQL
+              # backend is absent from every enabled target's compiled graph.
+              cargo tree --workspace --all-features --target all --locked \
+                --prefix none --edges normal,build,dev > compiled-dependencies.txt
+              if grep -Eq '^rsa v[0-9]' compiled-dependencies.txt; then
+                echo "RSA is now compiled: remove and re-review RUSTSEC-2023-0071 waiver" >&2
+                exit 1
+              fi
+            '';
+          });
         clippy = cacheRust (toolchain.craneLib.cargoClippy (commonArgs
           // {
             inherit cargoArtifacts;
@@ -184,6 +199,13 @@
 
       devShells = {
         default = devShell;
+        msrv = pkgs.mkShell {
+          inputsFrom = [(devShell.overrideAttrs (_: {shellHook = "";}))];
+          packages = [pkgs.rust-bin.stable."1.88.0".minimal];
+          RUSTFLAGS = "";
+          CARGO_ENCODED_RUSTFLAGS = "";
+          RUSTC_WRAPPER = "";
+        };
         # Simit's generated publish workflow uses this named shell for the
         # crate documentation gate.
         docs = devShell;
@@ -192,7 +214,7 @@
     // {
       lib.mkFoundryPackage = {pkgs, ...} @ args:
         import ./nix/package.nix {
-          lib = nixpkgs.lib;
+          inherit (nixpkgs) lib;
           inherit pkgs;
         } (builtins.removeAttrs args ["pkgs"]);
       nixosModules.default = import ./nix/module.nix;

@@ -12,7 +12,7 @@
       modules = [module] ++ modules;
     };
   enabled = system [
-    ({...}: {
+    (_: {
       system.stateVersion = "25.11";
       services.foundry-circle = {
         enable = true;
@@ -37,7 +37,7 @@
     })
   ];
   disabled = system [
-    ({...}: {
+    (_: {
       system.stateVersion = "25.11";
     })
   ];

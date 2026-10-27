@@ -28,6 +28,7 @@ pub struct AppState {
 #[derive(Clone, Default)]
 pub struct DatabaseState {
     pool: Arc<RwLock<Option<PgPool>>>,
+    last_error: Arc<RwLock<Option<String>>>,
 }
 
 impl DatabaseState {
@@ -41,6 +42,11 @@ impl DatabaseState {
 
     pub async fn is_ready(&self) -> bool {
         self.pool.read().await.is_some()
+    }
+
+    /// The last connect or migration failure, as a sanitized category.
+    pub async fn last_error(&self) -> Option<String> {
+        self.last_error.read().await.clone()
     }
 
     pub fn supervise(&self, url: Option<String>, url_file: Option<PathBuf>) {
@@ -62,19 +68,56 @@ impl DatabaseState {
                         Ok(pool) => match sqlx::migrate!("./migrations").run(&pool).await {
                             Ok(()) => {
                                 *state.pool.write().await = Some(pool);
+                                *state.last_error.write().await = None;
                                 tracing::info!("PostgreSQL is ready");
                             }
                             Err(error) => {
                                 tracing::warn!(%error, "PostgreSQL migrations are not ready");
+                                *state.last_error.write().await = Some(migrate_error_kind(&error));
                                 pool.close().await;
                             }
                         },
-                        Err(error) => tracing::warn!(%error, "PostgreSQL connection is not ready"),
+                        Err(error) => {
+                            tracing::warn!(%error, "PostgreSQL connection is not ready");
+                            *state.last_error.write().await = Some(sqlx_error_kind(&error));
+                        }
                     }
                 }
                 sleep(Duration::from_secs(5)).await;
             }
         });
+    }
+}
+
+/// Readiness is unauthenticated, so report only a fixed category (plus
+/// numeric migration versions and SQLSTATE codes), never the error text, which
+/// can embed the DATABASE_URL, user names or hostnames.
+fn sqlx_error_kind(error: &sqlx::Error) -> String {
+    match error {
+        sqlx::Error::Configuration(_) => "invalid database configuration".into(),
+        sqlx::Error::Io(io) => format!("connection failed ({:?})", io.kind()),
+        sqlx::Error::Tls(_) => "TLS error".into(),
+        sqlx::Error::Database(db) => match db.code() {
+            Some(code) => format!("database error (SQLSTATE {code})"),
+            None => "database error".into(),
+        },
+        sqlx::Error::PoolTimedOut => "connection timed out".into(),
+        _ => "database error".into(),
+    }
+}
+
+fn migrate_error_kind(error: &sqlx::migrate::MigrateError) -> String {
+    use sqlx::migrate::MigrateError as E;
+    match error {
+        E::Execute(e) => format!("migration failed: {}", sqlx_error_kind(e)),
+        E::ExecuteMigration(e, v) => format!("migration {v} failed: {}", sqlx_error_kind(e)),
+        E::VersionMismatch(v) => format!("migration {v} checksum mismatch"),
+        E::VersionMissing(v) => format!("migration {v} missing from source"),
+        E::VersionNotPresent(v) => format!("migration {v} not present in source"),
+        E::VersionTooOld(v, _) => format!("migration {v} older than latest applied"),
+        E::VersionTooNew(v, _) => format!("migration {v} newer than latest applied"),
+        E::Dirty(v) => format!("migration {v} partially applied"),
+        _ => "migration failed".into(),
     }
 }
 
@@ -164,19 +207,21 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
     let world_state = state.driver.world_state();
     let database = state.database.is_ready().await;
     let ready = world_state == WorldState::Ready && database;
+    let database_error = state.database.last_error().await;
     let status = if ready {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
-    (
-        status,
-        Json(serde_json::json!({
-            "state": world_state,
-            "database": database,
-            "ready": ready,
-        })),
-    )
+    let mut body = serde_json::json!({
+        "state": world_state,
+        "database": database,
+        "ready": ready,
+    });
+    if let Some(error) = database_error {
+        body["databaseError"] = error.into();
+    }
+    (status, Json(body))
 }
 
 async fn discovery() -> impl IntoResponse {
@@ -316,6 +361,62 @@ mod tests {
         assert_eq!(
             database_url(&Some("postgres:///foundry".into()), None),
             Some("postgres:///foundry".into())
+        );
+    }
+
+    #[test]
+    fn database_errors_never_carry_the_url_or_credentials() {
+        let url = "postgres://svc:hunter2@db.internal:5432/foundry";
+        let config = sqlx::Error::Configuration(format!("bad {url}").into());
+        let io = sqlx::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            format!("refused {url}"),
+        ));
+        for error in [config, io] {
+            let kind = sqlx_error_kind(&error);
+            assert!(
+                !kind.contains("hunter2") && !kind.contains("db.internal"),
+                "{kind}"
+            );
+        }
+        assert_eq!(
+            sqlx_error_kind(&sqlx::Error::Io(
+                std::io::ErrorKind::ConnectionRefused.into()
+            )),
+            "connection failed (ConnectionRefused)"
+        );
+        let migrate = sqlx::migrate::MigrateError::ExecuteMigration(
+            sqlx::Error::Configuration(url.into()),
+            2,
+        );
+        assert_eq!(
+            migrate_error_kind(&migrate),
+            "migration 2 failed: invalid database configuration"
+        );
+        assert_eq!(
+            migrate_error_kind(&sqlx::migrate::MigrateError::VersionMismatch(2)),
+            "migration 2 checksum mismatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn readyz_reports_database_error_only_when_present() {
+        let state = AppState::unconfigured();
+        *state.database.last_error.write().await = Some("migration 2 checksum mismatch".into());
+        let response = readyz(State(state)).await.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "state": "starting",
+                "database": false,
+                "ready": false,
+                "databaseError": "migration 2 checksum mismatch",
+            })
         );
     }
 

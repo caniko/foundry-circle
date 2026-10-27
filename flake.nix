@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     rs-harbor = {
-      url = "git+https://github.com/caniko/rs-harbor.git?ref=trunk&rev=05cc4f162b55fa904b687db1821e2463fa813e50";
+      url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=088186303fc68c839c047549c471874654e07bd4";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.rust-overlay.follows = "rust-overlay";
     };
@@ -49,6 +49,8 @@
         # Use Atlas' shared Redis/Valkey transport; /tmp is private to each
         # Nix sandbox and prevents cross-project compiler hits.
         cacheRoot = null;
+        # Hosted CI has no Atlas transport; use a private per-build cache there.
+        ephemeralFallback = true;
         namespaceScope = "canix-rust";
         namespaceGeneration = 5;
       };

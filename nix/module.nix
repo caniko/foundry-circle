@@ -186,6 +186,7 @@ in {
             FOUNDRY_BROWSER_PROFILE_DIR = "/run/foundry-circle/browser";
             XDG_CONFIG_HOME = "/var/lib/foundry-circle/config";
             FOUNDRY_CIRCLE_BIND = "${cfg.listenAddress}:${toString cfg.listenPort}";
+            RUST_LOG = lib.mkDefault "info";
             DIOXUS_PUBLIC_PATH = "${cfg.package}/${cfg.package.dioxus.publicDir or "share/foundry-circle/public"}";
           }
           // lib.optionalAttrs (cfg.database.url != null || cfg.database.createLocally) {

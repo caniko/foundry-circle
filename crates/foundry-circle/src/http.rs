@@ -54,10 +54,11 @@ impl DatabaseState {
         tokio::spawn(async move {
             loop {
                 if let Some(pool) = state.pool().await {
-                    if sqlx::query("SELECT 1").execute(&pool).await.is_err() {
+                    if let Err(error) = sqlx::query("SELECT 1").execute(&pool).await {
                         *state.pool.write().await = None;
+                        *state.last_error.write().await = Some(sqlx_error_kind(&error));
                         pool.close().await;
-                        tracing::warn!("PostgreSQL connection lost; readiness is false");
+                        tracing::warn!(%error, "PostgreSQL connection lost; readiness is false");
                     }
                 } else if let Some(database_url) = database_url(&url, url_file.as_ref()) {
                     match PgPoolOptions::new()

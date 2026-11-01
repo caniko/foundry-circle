@@ -13,7 +13,10 @@ use serde_json::json;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::{sync::RwLock, time::sleep};
 
-use crate::driver::{FakeDriver, FoundryDriver, WorldState};
+use crate::{
+    ConsoleData, ConsoleView, LiveGame, Role,
+    driver::{FakeDriver, FoundryDriver, WorldState},
+};
 
 #[path = "auth.rs"]
 pub mod auth;
@@ -23,6 +26,35 @@ pub struct AppState {
     pub driver: Arc<dyn FoundryDriver>,
     pub database: DatabaseState,
     pub auth: Option<auth::AuthState>,
+    pub console: ConsoleLinks,
+}
+
+/// Origins the lobby links to and polls; all optional so a partially
+/// configured service still renders.
+#[derive(Clone, Default)]
+pub struct ConsoleLinks {
+    /// Internal Foundry origin used for the public `/api/status` poll.
+    pub foundry_url: Option<String>,
+    /// Gameplay origin; the lobby links to `<play_url>/join`.
+    pub play_url: Option<String>,
+    /// Platform origin; GMs get `<platform_url>/setup`.
+    pub platform_url: Option<String>,
+}
+
+impl ConsoleLinks {
+    pub fn from_env(foundry_url: &str) -> Self {
+        let origin = |name| {
+            std::env::var(name)
+                .ok()
+                .map(|value| value.trim().trim_end_matches('/').to_owned())
+                .filter(|value| !value.is_empty())
+        };
+        Self {
+            foundry_url: Some(foundry_url.trim_end_matches('/').to_owned()),
+            play_url: origin("FOUNDRY_CIRCLE_PLAY_BASE_URL"),
+            platform_url: origin("FOUNDRY_CIRCLE_OIDC_PUBLIC_BASE_URL"),
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -141,6 +173,7 @@ impl AppState {
             driver: Arc::new(FakeDriver::new(WorldState::Starting)),
             database: DatabaseState::new(),
             auth: None,
+            console: ConsoleLinks::default(),
         }
     }
 }
@@ -207,7 +240,9 @@ async fn healthz() -> impl IntoResponse {
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
     let world_state = state.driver.world_state();
     let database = state.database.is_ready().await;
-    let ready = world_state == WorldState::Ready && database;
+    // Ready means the process can serve the console: the database is up. A
+    // stopped or not-yet-launched world is reported in `state`, not as an outage.
+    let ready = database;
     let database_error = state.database.last_error().await;
     let status = if ready {
         StatusCode::OK
@@ -223,6 +258,68 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
         body["databaseError"] = error.into();
     }
     (status, Json(body))
+}
+
+/// Poll Foundry's public `/api/status`; any failure is a state, never an error.
+async fn live_game(foundry_url: Option<&str>) -> LiveGame {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let Some(url) = foundry_url else {
+        return LiveGame::Unreachable;
+    };
+    let client = CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap_or_default()
+    });
+    let response = client.get(format!("{url}/api/status")).send().await;
+    match response {
+        Ok(response) if response.status().is_success() => match response.json().await {
+            Ok(status) => LiveGame::from_status(status),
+            Err(_) => LiveGame::Unreachable,
+        },
+        _ => LiveGame::Unreachable,
+    }
+}
+
+/// Resolve what the signed-in (or not) caller of the console should see.
+pub async fn console_view() -> ConsoleView {
+    use dioxus::fullstack::FullstackContext;
+    let Some(context) = FullstackContext::current() else {
+        return ConsoleView::SignedOut;
+    };
+    let (Some(state), Some(principal)) = (
+        context.extension::<AppState>(),
+        context.extension::<auth::Principal>(),
+    ) else {
+        return ConsoleView::SignedOut;
+    };
+    let name = principal
+        .display_name
+        .clone()
+        .or_else(|| principal.email.clone())
+        .unwrap_or_else(|| principal.subject.clone());
+    let Some(auth) = state.auth.as_ref() else {
+        return ConsoleView::SignedOut;
+    };
+    if !principal.groups.contains(&auth.access_group) {
+        return ConsoleView::Denied { name };
+    }
+    let role = principal.role(&auth.admin_group, auth.gm_group.as_deref());
+    let links = &state.console;
+    let join = |origin: &Option<String>, path: &str| origin.as_ref().map(|o| format!("{o}{path}"));
+    ConsoleView::Console(Box::new(ConsoleData {
+        name,
+        email: principal.email.clone(),
+        role,
+        game: live_game(links.foundry_url.as_deref()).await,
+        join_url: join(&links.play_url, "/join"),
+        setup_url: (role != Role::Player)
+            .then(|| join(&links.platform_url, "/setup"))
+            .flatten(),
+        world_state: state.driver.world_state(),
+        database: state.database.is_ready().await,
+    }))
 }
 
 async fn discovery() -> impl IntoResponse {
@@ -422,7 +519,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn healthy_process_with_unconfigured_world_is_not_ready() {
+    async fn unconfigured_database_is_not_ready() {
         assert_eq!(healthz().await.into_response().status(), StatusCode::OK);
         let response = readyz(State(AppState::unconfigured()))
             .await
@@ -444,6 +541,7 @@ mod tests {
             driver: Arc::new(FakeDriver::new(WorldState::Ready)),
             database: DatabaseState::new(),
             auth: None,
+            console: ConsoleLinks::default(),
         };
         let response = readyz(State(state.clone())).await.into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -457,5 +555,62 @@ mod tests {
             world(State(state)).await.into_response().status(),
             StatusCode::OK
         );
+    }
+
+    #[tokio::test]
+    async fn healthy_database_is_ready_without_a_launched_world() {
+        let state = AppState {
+            driver: Arc::new(FakeDriver::new(WorldState::WorldStopped)),
+            ..AppState::unconfigured()
+        };
+        *state.database.pool.write().await = Some(
+            PgPoolOptions::new()
+                .connect_lazy("postgresql:///foundry_circle?host=/run/postgresql&user=fc")
+                .unwrap(),
+        );
+        let response = readyz(State(state)).await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"state": "world-stopped", "database": true, "ready": true})
+        );
+    }
+
+    #[test]
+    fn database_url_with_empty_host_authority_is_rejected() {
+        use sqlx::postgres::PgConnectOptions;
+        use std::str::FromStr;
+        let options = PgConnectOptions::from_str(
+            "postgresql:///foundry_circle?host=/run/postgresql&user=foundry-circle",
+        )
+        .unwrap();
+        assert_eq!(options.get_username(), "foundry-circle");
+        assert_eq!(options.get_database(), Some("foundry_circle"));
+        assert!(
+            PgConnectOptions::from_str(
+                "postgresql://foundry-circle@/foundry_circle?host=/run/postgresql"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn foundry_status_maps_to_a_live_game_or_none() {
+        let live = r#"{"active":true,"version":"13.351","world":"canary","system":"daggerheart","systemVersion":"1.6.4","users":4,"usersActive":2}"#;
+        let LiveGame::Live(game) = LiveGame::from_status(serde_json::from_str(live).unwrap())
+        else {
+            panic!("active world is live");
+        };
+        assert_eq!(game.world.as_deref(), Some("canary"));
+        assert_eq!(game.users_active, Some(2));
+        let idle = r#"{"active":false,"version":"13.351"}"#;
+        assert!(matches!(
+            LiveGame::from_status(serde_json::from_str(idle).unwrap()),
+            LiveGame::None
+        ));
     }
 }

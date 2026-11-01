@@ -20,6 +20,7 @@ server = [
   "dioxus/server",
   "tartan-ui-dioxus/server",
   "dep:axum",
+  "dep:reqwest",
   "dep:sqlx",
   "dep:tokio",
   "dep:tower-http",
@@ -48,6 +49,7 @@ chromiumoxide = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 
 axum = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 tower-http = { workspace = true, optional = true }

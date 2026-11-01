@@ -13,7 +13,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use axum::{Router, middleware::from_fn_with_state, routing::get};
     use dioxus::server::{DioxusRouterExt, FullstackState, ServeConfig};
     use foundry_circle::driver::{DriverConfig, LiveFoundryDriver};
-    use foundry_circle::http::{AppState, DatabaseState, api_router_with_state, auth};
+    use foundry_circle::http::{
+        AppState, ConsoleLinks, DatabaseState, api_router_with_state, auth,
+    };
     use tower_http::compression::CompressionLayer;
     use tower_http::limit::RequestBodyLimitLayer;
     use tower_http::trace::TraceLayer;
@@ -30,7 +32,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         std::env::var("DATABASE_URL").ok(),
         std::env::var("DATABASE_URL_FILE").ok().map(Into::into),
     );
-    let driver = LiveFoundryDriver::start(DriverConfig::from_env()?);
+    let driver_config = DriverConfig::from_env()?;
+    let console = ConsoleLinks::from_env(&driver_config.base_url);
+    let driver = LiveFoundryDriver::start(driver_config);
 
     let state = FullstackState::new(ServeConfig::new(), foundry_circle::App);
     let pages = Router::<FullstackState>::new()
@@ -43,9 +47,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         driver,
         database,
         auth: Some(oidc),
+        console,
     };
     let app: Router = api_router_with_state(app_state.clone())
-        .merge(pages.layer(from_fn_with_state(app_state.clone(), auth::require_session)))
+        .merge(pages.layer(from_fn_with_state(
+            app_state.clone(),
+            auth::optional_session,
+        )))
         .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http());

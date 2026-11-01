@@ -16,13 +16,14 @@ use serde_json::json;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
-use crate::http::AppState;
+use crate::{Role, http::AppState};
 
 #[derive(Clone)]
 pub struct AuthState {
     pub client: Arc<OidcClient>,
     pub access_group: String,
     pub admin_group: String,
+    pub gm_group: Option<String>,
     pub session_ttl: Duration,
 }
 
@@ -38,6 +39,17 @@ pub struct Principal {
 impl Principal {
     pub fn is_admin(&self, admin_group: &str) -> bool {
         self.groups.iter().any(|group| group == admin_group)
+    }
+
+    /// Admin outranks GM; any other member of the access group is a player.
+    pub fn role(&self, admin_group: &str, gm_group: Option<&str>) -> Role {
+        if self.is_admin(admin_group) {
+            Role::Admin
+        } else if gm_group.is_some_and(|gm| self.groups.iter().any(|group| group == gm)) {
+            Role::Gm
+        } else {
+            Role::Player
+        }
     }
 }
 
@@ -59,6 +71,9 @@ pub async fn from_env() -> Result<AuthState, AuthError> {
         .unwrap_or_else(|_| "foundry-circle-users".into());
     let admin_group = std::env::var("FOUNDRY_CIRCLE_OIDC_ADMIN_GROUP")
         .unwrap_or_else(|_| "foundry-circle-admins".into());
+    let gm_group = std::env::var("FOUNDRY_CIRCLE_OIDC_GM_GROUP")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
     let session_ttl = std::env::var("FOUNDRY_CIRCLE_SESSION_TTL_SECONDS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
@@ -75,6 +90,7 @@ pub async fn from_env() -> Result<AuthState, AuthError> {
         client: Arc::new(client),
         access_group,
         admin_group,
+        gm_group,
         session_ttl: Duration::from_secs(session_ttl),
     })
 }
@@ -237,6 +253,30 @@ pub async fn require_session(
             .into_response();
     }
     request.extensions_mut().insert(principal);
+    next.run(request).await
+}
+
+/// Page-route variant of `require_session`: attaches the principal when a
+/// valid session exists and lets the console render its signed-out and
+/// access-denied states itself instead of redirecting or returning bare text.
+pub async fn optional_session(
+    State(state): State<AppState>,
+    mut request: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    request.extensions_mut().insert(state.clone());
+    if let (Some(pool), Some(token)) = (
+        state.database.pool().await,
+        cookie(request.headers(), "foundry_circle_session"),
+    ) {
+        match session_principal(&pool, &SessionToken::hash_value(token)).await {
+            Ok(Some(principal)) => {
+                request.extensions_mut().insert(principal);
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "failed to resolve Foundry Circle session"),
+        }
+    }
     next.run(request).await
 }
 
@@ -404,6 +444,19 @@ mod tests {
             ],
         };
         assert!(principal.is_admin("foundry-circle-admins"));
+        assert_eq!(
+            principal.role("foundry-circle-admins", Some("foundry-circle-gms")),
+            Role::Admin
+        );
+        let gm = Principal {
+            groups: vec!["foundry-circle-users".into(), "foundry-circle-gms".into()],
+            ..principal.clone()
+        };
+        assert_eq!(
+            gm.role("foundry-circle-admins", Some("foundry-circle-gms")),
+            Role::Gm
+        );
+        assert_eq!(gm.role("foundry-circle-admins", None), Role::Player);
         assert!(
             principal
                 .groups

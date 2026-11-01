@@ -104,6 +104,11 @@ in {
         default = null;
         description = "Expected game system version; null accepts whatever version the world runs.";
       };
+      playBaseUrl = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Public origin players join the live game from; the lobby links to `<playBaseUrl>/join`.";
+      };
       chromiumPackage = lib.mkOption {
         type = lib.types.package;
         default = pkgs.chromium;
@@ -137,6 +142,11 @@ in {
       adminGroup = lib.mkOption {
         type = lib.types.str;
         default = "foundry-circle-admins";
+      };
+      gmGroup = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Group whose members get the GM lobby (Foundry setup link, invite helper). Admins outrank GMs; everyone else in `accessGroup` is a player.";
       };
       sessionTtlSeconds = lib.mkOption {
         type = lib.types.ints.positive;
@@ -190,6 +200,7 @@ in {
             FOUNDRY_EXPECTED_FOUNDRY_VERSION = cfg.foundryWorld.foundryVersion;
             FOUNDRY_EXPECTED_SYSTEM_ID = cfg.foundryWorld.systemId;
             FOUNDRY_EXPECTED_SYSTEM_VERSION = cfg.foundryWorld.systemVersion;
+            FOUNDRY_CIRCLE_PLAY_BASE_URL = cfg.foundryWorld.playBaseUrl;
             FOUNDRY_CHROMIUM = "${cfg.foundryWorld.chromiumPackage}/bin/chromium";
             FOUNDRY_BROWSER_PROFILE_DIR = "/run/foundry-circle/browser";
             XDG_CONFIG_HOME = "/var/lib/foundry-circle/config";
@@ -201,7 +212,7 @@ in {
             DATABASE_URL =
               if cfg.database.url != null
               then cfg.database.url
-              else "postgresql://${cfg.database.user}@/${cfg.database.name}?host=/run/postgresql";
+              else "postgresql:///${cfg.database.name}?host=/run/postgresql&user=${cfg.database.user}";
           }
           // lib.optionalAttrs (cfg.database.urlFile != null) {
             DATABASE_URL_FILE = "/run/credentials/foundry-circle.service/database-url";
@@ -213,6 +224,7 @@ in {
             FOUNDRY_CIRCLE_OIDC_SCOPES = lib.concatStringsSep " " cfg.oidc.scopes;
             FOUNDRY_CIRCLE_OIDC_ACCESS_GROUP = cfg.oidc.accessGroup;
             FOUNDRY_CIRCLE_OIDC_ADMIN_GROUP = cfg.oidc.adminGroup;
+            FOUNDRY_CIRCLE_OIDC_GM_GROUP = cfg.oidc.gmGroup;
             FOUNDRY_CIRCLE_SESSION_TTL_SECONDS = toString cfg.oidc.sessionTtlSeconds;
           };
         serviceConfig = {

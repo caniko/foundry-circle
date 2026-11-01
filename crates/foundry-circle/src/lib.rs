@@ -5,8 +5,11 @@
 //! crate owns transport, readiness, authorization, and the typed driver seam.
 
 use dioxus::prelude::*;
-use tartan_ui_core::Identity;
-use tartan_ui_dioxus::{AppShell, DashboardHeader, EmptyState, MetricStrip};
+use serde::{Deserialize, Serialize};
+use tartan_ui_core::{Feedback, FeedbackKind, Identity, Metric};
+use tartan_ui_dioxus::{
+    AppShell, CardGrid, DashboardHeader, EmptyState, FeedbackBanner, MetricStrip, TagList,
+};
 
 #[cfg(feature = "server")]
 pub mod http;
@@ -486,25 +489,248 @@ pub mod driver {
     pub use live::{ConfigError, DriverConfig, LiveFoundryDriver};
 }
 
-/// Dioxus operator console root.  Product-specific world views will be added
-/// behind the same application/service boundary as `/api/v1`.
+/// What the signed-in account may do in the console.  Resolved from the OIDC
+/// groups claim: admin outranks GM, and any other access-group member plays.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Role {
+    Admin,
+    Gm,
+    Player,
+}
+
+/// Foundry's public `GET /api/status` payload; every field is optional
+/// because the shape varies with the Foundry version and world state.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GameStatus {
+    pub active: bool,
+    pub version: Option<String>,
+    pub world: Option<String>,
+    pub system: Option<String>,
+    pub system_version: Option<String>,
+    pub users: Option<u64>,
+    pub users_active: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub enum LiveGame {
+    Live(GameStatus),
+    /// Foundry answered but no world is launched.
+    None,
+    /// Foundry did not answer within the poll timeout.
+    Unreachable,
+}
+
+impl LiveGame {
+    pub fn from_status(status: GameStatus) -> Self {
+        if status.active {
+            Self::Live(status)
+        } else {
+            Self::None
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ConsoleData {
+    pub name: String,
+    pub email: Option<String>,
+    pub role: Role,
+    pub game: LiveGame,
+    /// `<playBaseUrl>/join`, when configured.
+    pub join_url: Option<String>,
+    /// `<platformBaseUrl>/setup`; only resolved for GMs and admins.
+    pub setup_url: Option<String>,
+    pub world_state: driver::WorldState,
+    pub database: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub enum ConsoleView {
+    SignedOut,
+    /// Authenticated but not in the access group.
+    Denied {
+        name: String,
+    },
+    Console(Box<ConsoleData>),
+}
+
+#[server]
+async fn console_view() -> Result<ConsoleView, ServerFnError> {
+    Ok(http::console_view().await)
+}
+
+/// Dioxus console root.  The server resolves the caller's role and the live
+/// game; this only renders what it was told, so nothing here is authorization.
 #[component]
 pub fn App() -> Element {
-    // The browser identity is supplied by the authenticated `/api/v1/me`
-    // response.  Never render a fabricated human identity in the shell.
-    let identity: Option<Identity> = None;
-
-    rsx! {
-        AppShell { title: "Foundry Circle".to_string(), identity,
-            DashboardHeader {
-                eyebrow: "Foundry Circle".to_string(),
-                heading: "World operator console".to_string(),
-                description: "A typed broker for the active Foundry world.".to_string(),
+    let view = use_server_future(console_view)?;
+    let view = match &*view.read() {
+        Some(Ok(view)) => view.clone(),
+        _ => ConsoleView::SignedOut,
+    };
+    match view {
+        ConsoleView::SignedOut => rsx! {
+            AppShell { title: "Foundry Circle".to_string(), identity: None,
+                DashboardHeader {
+                    eyebrow: "Foundry Circle".to_string(),
+                    heading: "Sign in to play".to_string(),
+                    description: "Use your Rauthy account to see the live game.".to_string(),
+                }
+                a { class: "tartan-button", href: "/api/auth/login", "Sign in" }
             }
-            MetricStrip { metrics: vec![] }
-            EmptyState {
-                heading: "World contract pending".to_string(),
-                message: "Connect a certified Foundry world to enable document and command views.".to_string(),
+        },
+        ConsoleView::Denied { name } => rsx! {
+            AppShell {
+                title: "Foundry Circle".to_string(),
+                identity: Some(Identity { display_name: name.clone(), email: None, account_url: None }),
+                FeedbackBanner {
+                    feedback: Feedback {
+                        kind: FeedbackKind::Error,
+                        message: format!("Signed in as {name}, but this account has no Foundry Circle access."),
+                    },
+                }
+                EmptyState {
+                    heading: "Access not provisioned".to_string(),
+                    message: "Ask your GM to add you to the foundry-circle-users group, then sign in again.".to_string(),
+                }
+            }
+        },
+        ConsoleView::Console(data) => {
+            let identity = Identity {
+                display_name: data.name.clone(),
+                email: data.email.clone(),
+                account_url: None,
+            };
+            let (eyebrow, heading, description) = match data.role {
+                Role::Admin => (
+                    "Admin console",
+                    "World operator console",
+                    "A typed broker for the active Foundry world.",
+                ),
+                Role::Gm => (
+                    "GM lobby",
+                    "Run the table",
+                    "Create worlds in Foundry setup, then invite your players.",
+                ),
+                Role::Player => (
+                    "Player lobby",
+                    "Tonight at the table",
+                    "Join the live game when you are ready.",
+                ),
+            };
+            rsx! {
+                AppShell { title: "Foundry Circle".to_string(), identity: Some(identity),
+                    DashboardHeader {
+                        eyebrow: eyebrow.to_string(),
+                        heading: heading.to_string(),
+                        description: description.to_string(),
+                    }
+                    if data.role == Role::Admin {
+                        MetricStrip {
+                            metrics: vec![
+                                Metric { label: "Broker state".into(), value: format!("{:?}", data.world_state), description: None },
+                                Metric { label: "Database".into(), value: if data.database { "Ready" } else { "Down" }.into(), description: None },
+                                Metric { label: "Your role".into(), value: "Admin".into(), description: None },
+                            ],
+                        }
+                    }
+                    CardGrid {
+                        GameCard { data: (*data).clone() }
+                        if data.role != Role::Player {
+                            InviteCard { join_url: data.join_url.clone() }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn GameCard(data: ConsoleData) -> Element {
+    match data.game {
+        LiveGame::Live(game) => {
+            let title = game
+                .world
+                .clone()
+                .unwrap_or_else(|| "Untitled world".into());
+            let subtitle = [game.system.clone(), game.system_version.clone()]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut tags = Vec::new();
+            tags.extend(game.system.clone());
+            tags.extend(game.version.as_ref().map(|v| format!("v{v}")));
+            let mut metrics = Vec::new();
+            if let Some(active) = game.users_active {
+                metrics.push(Metric {
+                    label: "Online now".into(),
+                    value: active.to_string(),
+                    description: None,
+                });
+            }
+            if let Some(users) = game.users {
+                metrics.push(Metric {
+                    label: "Players".into(),
+                    value: users.to_string(),
+                    description: None,
+                });
+            }
+            rsx! {
+                article { class: "tartan-card tartan-resource-card",
+                    div { class: "tartan-resource-card__body",
+                        p { class: "tartan-eyebrow", "Live now" }
+                        h2 { {title} }
+                        p { class: "tartan-muted", {subtitle} }
+                        TagList { tags }
+                        if !metrics.is_empty() {
+                            MetricStrip { metrics }
+                        }
+                    }
+                    div { class: "tartan-metrics",
+                        if let Some(join) = data.join_url {
+                            a { class: "tartan-button", href: join, "Join game" }
+                        }
+                        if let Some(setup) = data.setup_url {
+                            a { class: "tartan-button", href: setup, "Open Setup" }
+                        }
+                    }
+                }
+            }
+        }
+        other => {
+            let message = if other == LiveGame::Unreachable {
+                "Foundry is not answering. Check back in a moment."
+            } else {
+                "Your GM has not launched a world yet. Check back soon."
+            };
+            rsx! {
+                div {
+                    EmptyState { heading: "No game is live right now".to_string(), message: message.to_string() }
+                    if let Some(setup) = data.setup_url {
+                        a { class: "tartan-button", href: setup, "Open Setup" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn InviteCard(join_url: Option<String>) -> Element {
+    rsx! {
+        article { class: "tartan-card",
+            p { class: "tartan-eyebrow", "Invite players" }
+            h2 { "Share the join link" }
+            if let Some(url) = join_url {
+                // ponytail: select-all on click, no clipboard JS; add a Copy button if the shared UI grows one.
+                p { class: "tartan-tag", style: "user-select: all", {url} }
+            }
+            p { class: "tartan-muted",
+                "Create each player's Foundry user inside your world before they join. Their Foundry user is separate from their sign-in."
             }
         }
     }

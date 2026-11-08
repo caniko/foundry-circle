@@ -580,6 +580,80 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn ready_world_response_matches_the_driver_snapshot() {
+        struct SnapshotDriver(crate::driver::WorldSnapshot);
+        impl FoundryDriver for SnapshotDriver {
+            fn snapshot(&self) -> crate::driver::WorldSnapshot {
+                self.0.clone()
+            }
+        }
+
+        let state = AppState {
+            driver: Arc::new(SnapshotDriver(crate::driver::WorldSnapshot {
+                state: WorldState::Ready,
+                id: Some("canary".into()),
+                epoch: 7,
+                foundry_version: Some("13.351".into()),
+                system_id: Some("daggerheart".into()),
+                system_version: Some("1.6.4".into()),
+                is_gm: true,
+            })),
+            ..AppState::unconfigured()
+        };
+        let response = world(State(state)).await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "id": "canary",
+                "epoch": 7,
+                "state": "ready",
+                "foundryVersion": "13.351",
+                "systemId": "daggerheart",
+                "systemVersion": "1.6.4",
+                "isGm": true
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_world_routes_fail_closed_without_oidc() {
+        use axum::{body::Body, http::Request};
+        use tower::ServiceExt;
+
+        let requests = [
+            Request::get("/api/v1").body(Body::empty()),
+            Request::get("/api/v1/me").body(Body::empty()),
+            Request::get("/api/v1/world").body(Body::empty()),
+            Request::get("/api/v1/world/capabilities").body(Body::empty()),
+            Request::get("/api/v1/world/documents/actors/example").body(Body::empty()),
+            Request::post("/api/v1/world/commands")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"command":"scene.activate","payload":{},"idempotencyKey":"test"}"#,
+                )),
+        ];
+        for request in requests {
+            let request = request.unwrap();
+            let path = request.uri().path().to_owned();
+            let state = AppState {
+                driver: Arc::new(FakeDriver::new(WorldState::Ready)),
+                ..AppState::unconfigured()
+            };
+            let response = api_router_with_state(state).oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+            let body = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            assert_eq!(&body[..], b"OIDC is not configured", "{path}");
+        }
+    }
+
     #[test]
     fn database_url_with_empty_host_authority_is_rejected() {
         use sqlx::postgres::PgConnectOptions;

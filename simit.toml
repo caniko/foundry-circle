@@ -15,15 +15,21 @@ publish_strategy = "members"
 [release.signing]
 key = "818D507F1E62139F8A17EAA64623DEA06FDACFE1"
 
-[release.codeberg]
+[release.github]
 repo = "caniko/foundry-circle"
+target_branch = "trunk"
 
 # Versioned harbor-rs bundle assets (including the cargo-binstall archive)
 # replace the former hand-made unversioned `release/foundry-circle.tar.gz`.
 [release.artifacts]
-runner = "atlas-nix-trusted"
+runner = "ubuntu-24.04"
 prebuild_binaries = true
 sign = false
+substituters = ["https://attic.candee.baby/canix", "https://cache.nixos.org"]
+trusted_public_keys = [
+  "canix:lPzPzKrmYqW5Rxa5r0uQWvCqD3S5nx0h2eCy7XD5JM8=",
+  "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=",
+]
 
 # Linux closures consumed by canix, published to the public canix cache on
 # trunk pushes only (secret ATTIC_TOKEN). Pull requests build but never push.

@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     rs-harbor = {
-      url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=088186303fc68c839c047549c471874654e07bd4";
+      url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=6055d7d2b3a05d7d91d50938c7fb6f862a5eec85";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.rust-overlay.follows = "rust-overlay";
     };
@@ -62,6 +62,7 @@
         pname = "foundry-circle";
         strictDeps = true;
       };
+      foundryVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
       cargoArtifacts = cacheRust (toolchain.craneLib.buildDepsOnly commonArgs);
       cargoPackage = cacheRust (toolchain.craneLib.buildPackage (commonArgs
         // {
@@ -73,17 +74,24 @@
           pname = "foundryvtt-fetch";
           cargoExtraArgs = "-p foundryvtt-fetch --bins";
         }));
-      releaseBundle =
-        pkgs.runCommand "foundry-circle-release-bundle" {
-          nativeBuildInputs = [pkgs.gnutar pkgs.gzip];
-        } ''
-          mkdir -p staging/bin
-          cp ${dioxusPackage}/bin/foundry-circle staging/bin/
-          cp ${fetchPackage}/bin/foundryvtt-fetch staging/bin/
-          cp ${fetchPackage}/bin/foundryvtt-fetchd staging/bin/
-          cp ${fetchPackage}/bin/foundryvtt-fetch-hook staging/bin/
-          tar -C staging -czf "$out" .
-        '';
+      # The release ships one portable archive for the Dioxus server and the
+      # three fetch binaries. The server is not a static ELF (it carries the
+      # web assets and its runtime), so nix-bundle backs the release contract.
+      portableRelease =
+        if system == "x86_64-linux"
+        then
+          rs-harbor.lib.mkPortableBinaryRelease {
+            inherit pkgs;
+            pname = "foundry-circle";
+            version = foundryVersion;
+            artifacts.x86_64-linux.entries = {
+              foundry-circle.package = dioxusPackage;
+              foundryvtt-fetch.package = fetchPackage;
+              foundryvtt-fetchd.package = fetchPackage;
+              foundryvtt-fetch-hook.package = fetchPackage;
+            };
+          }
+        else null;
       dioxusPackage = cacheDioxus (rs-harbor.lib.mkDioxusFullstackPackage {
         inherit pkgs src;
         inherit (wasmToolchain) craneLib;
@@ -146,15 +154,18 @@
         inherit (preCommit) shellHook;
       };
     in {
-      packages = {
-        default = dioxusPackage;
-        foundry-circle = dioxusPackage;
-        foundry-circle-cli = cargoPackage;
-        foundryvtt-fetch = fetchPackage;
-        foundryvtt-fetchd = fetchPackage;
-        foundryvtt-fetch-hook = fetchPackage;
-        release-bundle = releaseBundle;
-      };
+      packages =
+        {
+          default = dioxusPackage;
+          foundry-circle = dioxusPackage;
+          foundry-circle-cli = cargoPackage;
+          foundryvtt-fetch = fetchPackage;
+          foundryvtt-fetchd = fetchPackage;
+          foundryvtt-fetch-hook = fetchPackage;
+        }
+        // pkgs.lib.optionalAttrs (portableRelease != null) {
+          release-bundle = portableRelease.releaseBundle;
+        };
 
       apps =
         {
@@ -184,54 +195,64 @@
 
       formatter = treefmtEval.config.build.wrapper;
 
-      checks = {
-        default = cargoPackage;
-        # The public cache must never receive licensed Foundry VTT content.
-        published-closure-unlicensed =
-          pkgs.runCommand "published-closure-unlicensed" {
-            closure = pkgs.closureInfo {rootPaths = publishedPackages;};
-          } ''
-            set -eu
-            if grep -iE 'foundryvtt-[0-9]|foundryvtt.*\.zip|FoundryVTT-.*\.zip|-foundryvtt$' "$closure/store-paths"; then
-              echo 'published closure reaches licensed Foundry VTT content' >&2
-              exit 1
-            fi
-            touch "$out"
-          '';
-        formatting = treefmtEval.config.build.check self;
-        fmt = toolchain.craneLib.cargoFmt {
-          inherit src;
-          pname = "foundry-circle";
-        };
-        doctests = toolchain.craneLib.cargoTest (commonArgs
-          // {
-            inherit cargoArtifacts;
-            cargoTestExtraArgs = "--workspace --all-features --doc";
-            preBuild = ''
-              # The RSA advisory waiver is valid only while SQLx's MySQL
-              # backend is absent from every enabled target's compiled graph.
-              cargo tree --workspace --all-features --target all --locked \
-                --prefix none --edges normal,build,dev > compiled-dependencies.txt
-              if grep -Eq '^rsa v[0-9]' compiled-dependencies.txt; then
-                echo "RSA is now compiled: remove and re-review RUSTSEC-2023-0071 waiver" >&2
+      checks =
+        {
+          default = cargoPackage;
+          # The public cache must never receive licensed Foundry VTT content.
+          published-closure-unlicensed =
+            pkgs.runCommand "published-closure-unlicensed" {
+              closure = pkgs.closureInfo {rootPaths = publishedPackages;};
+            } ''
+              set -eu
+              if grep -iE 'foundryvtt-[0-9]|foundryvtt.*\.zip|FoundryVTT-.*\.zip|-foundryvtt$' "$closure/store-paths"; then
+                echo 'published closure reaches licensed Foundry VTT content' >&2
                 exit 1
               fi
+              touch "$out"
             '';
-          });
-        clippy = cacheRust (toolchain.craneLib.cargoClippy (commonArgs
-          // {
-            inherit cargoArtifacts;
-            cargoClippyExtraArgs = "--workspace --all-targets --all-features -- --deny warnings";
-          }));
-        foundry-package-fixture = packageFixture;
-        foundry-module = import ./nix/tests/module.nix {
-          inherit nixpkgs pkgs;
+          formatting = treefmtEval.config.build.check self;
+          fmt = toolchain.craneLib.cargoFmt {
+            inherit src;
+            pname = "foundry-circle";
+          };
+          doctests = toolchain.craneLib.cargoTest (commonArgs
+            // {
+              inherit cargoArtifacts;
+              cargoTestExtraArgs = "--workspace --all-features --doc";
+              preBuild = ''
+                # The RSA advisory waiver is valid only while SQLx's MySQL
+                # backend is absent from every enabled target's compiled graph.
+                cargo tree --workspace --all-features --target all --locked \
+                  --prefix none --edges normal,build,dev > compiled-dependencies.txt
+                if grep -Eq '^rsa v[0-9]' compiled-dependencies.txt; then
+                  echo "RSA is now compiled: remove and re-review RUSTSEC-2023-0071 waiver" >&2
+                  exit 1
+                fi
+              '';
+            });
+          clippy = cacheRust (toolchain.craneLib.cargoClippy (commonArgs
+            // {
+              inherit cargoArtifacts;
+              cargoClippyExtraArgs = "--workspace --all-targets --all-features -- --deny warnings";
+            }));
+          foundry-package-fixture = packageFixture;
+          foundry-module = import ./nix/tests/module.nix {
+            inherit nixpkgs pkgs;
+          };
+          foundry-reconcile-vm = import ./nix/tests/reconcile.nix {
+            inherit pkgs;
+            foundryvttFetch = fetchPackage;
+          };
+        }
+        // pkgs.lib.optionalAttrs (portableRelease != null) {
+          # Fails until the publishable crate carries the bundle's exact
+          # [package.metadata.binstall] block and every archive ships its bins.
+          binstall-metadata = rs-harbor.lib.mkBinstallCheck {
+            inherit pkgs;
+            bundle = portableRelease.releaseBundle;
+            cargoToml = ./crates/foundryvtt-fetch/Cargo.toml;
+          };
         };
-        foundry-reconcile-vm = import ./nix/tests/reconcile.nix {
-          inherit pkgs;
-          foundryvttFetch = fetchPackage;
-        };
-      };
 
       devShells = {
         default = devShell;

@@ -45,6 +45,11 @@ jobs:
 
       - name: Install Nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            substituters = https://attic.candee.baby/canix https://cache.nixos.org
+            trusted-public-keys = canix:lPzPzKrmYqW5Rxa5r0uQWvCqD3S5nx0h2eCy7XD5JM8= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
 
       - name: Configure GitHub input transport
         run: |
@@ -111,9 +116,14 @@ jobs:
       - name: Publish flake inputs to Attic
         if: ${{ (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || (inputs.release && github.event_name != 'pull_request') }}
         env:
-          ATTIC_TOKEN: ${{ inputs.release && secrets.attic_token || secrets.ATTIC_TOKEN }}
+          ATTIC_TOKEN: ${{ secrets.attic_token || secrets.ATTIC_TOKEN }}
           HARBOR_ATTIC_MANIFEST: attic-paths.txt
-        run: nix run '.#push-flake-inputs'
+        run: |
+          for attempt in 1 2 3; do
+            nix run '.#push-flake-inputs' && exit 0
+            test "$attempt" = 3 || sleep $((attempt * 30))
+          done
+          exit 1
       - name: Upload flake input manifest
         if: ${{ (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || (inputs.release && github.event_name != 'pull_request') }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

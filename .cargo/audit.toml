@@ -4,4 +4,9 @@
 # cargo tree --workspace --all-features --target all -i rsa
 # prints no dependency graph. Re-review this waiver whenever SQLx features or
 # database backends change, and remove it when the upstream advisory is fixed.
-ignore = ["RUSTSEC-2023-0071"]
+#
+# RUSTSEC-2026-0459 (C SQLite CVE in libsqlite3-sys 0.30.1), added 2026-11-09 on
+# the same grounds: SQLx's optional SQLite backend leaves it in Cargo.lock and
+# cargo tree --workspace --all-features --target all -i libsqlite3-sys
+# prints nothing. Remove it with the SQLx upgrade that moves to >=0.39.
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0459"]

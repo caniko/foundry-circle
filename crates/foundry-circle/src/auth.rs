@@ -114,13 +114,28 @@ pub async fn login_start(
         tracing::error!(%error, "failed to save OIDC login transaction");
         return (StatusCode::INTERNAL_SERVER_ERROR, "login transaction error").into_response();
     }
-    Redirect::to(&request.url).into_response()
+    (
+        AppendHeaders([(
+            header::SET_COOKIE,
+            login_cookie(&request.transaction.csrf_state, 600),
+        )]),
+        Redirect::to(&request.url),
+    )
+        .into_response()
 }
 
 pub async fn oidc_callback(
     State(state): State<AppState>,
     Query(callback): Query<Callback>,
+    headers: HeaderMap,
 ) -> Response {
+    let Some(state_value) = callback.state.as_deref().filter(|value| !value.is_empty()) else {
+        return (StatusCode::BAD_REQUEST, "missing OIDC state").into_response();
+    };
+    // Check the host-only browser binding before consuming the one-time transaction.
+    if cookie(&headers, "__Host-foundry_circle_login") != Some(state_value) {
+        return (StatusCode::BAD_REQUEST, "invalid login browser binding").into_response();
+    }
     let Some(auth) = state.auth.as_ref() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "OIDC is not configured").into_response();
     };
@@ -130,9 +145,6 @@ pub async fn oidc_callback(
             "database is not configured",
         )
             .into_response();
-    };
-    let Some(state_value) = callback.state.as_deref() else {
-        return (StatusCode::BAD_REQUEST, "missing OIDC state").into_response();
     };
     let transaction = match take_transaction(&pool, state_value).await {
         Ok(Some(transaction)) => transaction,
@@ -167,10 +179,13 @@ pub async fn oidc_callback(
         return (StatusCode::INTERNAL_SERVER_ERROR, "session error").into_response();
     }
     (
-        AppendHeaders([(
-            header::SET_COOKIE,
-            session_cookie(token.as_str(), auth.session_ttl),
-        )]),
+        AppendHeaders([
+            (header::SET_COOKIE, login_cookie("", 0)),
+            (
+                header::SET_COOKIE,
+                session_cookie(token.as_str(), auth.session_ttl),
+            ),
+        ]),
         Redirect::to(&return_to),
     )
         .into_response()
@@ -372,6 +387,12 @@ fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
         })
 }
 
+fn login_cookie(state: &str, max_age: u64) -> String {
+    format!(
+        "__Host-foundry_circle_login={state}; Path=/; Max-Age={max_age}; HttpOnly; Secure; SameSite=Lax"
+    )
+}
+
 fn session_cookie(token: &str, ttl: Duration) -> String {
     format!(
         "foundry_circle_session={token}; Path=/; Max-Age={}; HttpOnly; Secure; SameSite=Lax",
@@ -442,6 +463,17 @@ mod tests {
             "foundry_circle_session_extra=attacker".parse().unwrap(),
         );
         assert_eq!(cookie(&headers, "foundry_circle_session"), None);
+    }
+
+    #[test]
+    fn login_cookie_is_host_only_and_bounded() {
+        let cookie = login_cookie("state", 600);
+        assert!(cookie.starts_with("__Host-foundry_circle_login=state;"));
+        assert!(cookie.contains("Path=/;"));
+        assert!(cookie.contains("Max-Age=600;"));
+        assert!(cookie.contains("HttpOnly; Secure; SameSite=Lax"));
+        assert!(!cookie.contains("Domain="));
+        assert!(login_cookie("", 0).contains("Max-Age=0;"));
     }
 
     #[test]

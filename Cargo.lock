@@ -1963,6 +1963,7 @@ dependencies = [
  "chrono",
  "dioxus",
  "dioxus-router",
+ "dioxus-ssr",
  "futures-util",
  "oidc-app-auth",
  "serde",
@@ -1970,6 +1971,7 @@ dependencies = [
  "sqlx",
  "tartan-ui-core",
  "tartan-ui-dioxus",
+ "theme-broker",
  "thiserror 2.0.18",
  "tokio",
  "tower",
@@ -4758,6 +4760,15 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "theme-broker"
+version = "0.1.0"
+source = "git+https://github.com/caniko/nix-theme-broker.git?rev=483595220b0c5c07fe2010ec596020d0b73d13a1#483595220b0c5c07fe2010ec596020d0b73d13a1"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -38,6 +38,7 @@ dioxus.workspace = true
 dioxus-router.workspace = true
 tartan-ui-core.workspace = true
 tartan-ui-dioxus.workspace = true
+theme-broker.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -56,6 +57,7 @@ tracing-subscriber = { workspace = true, optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 
 [dev-dependencies]
+dioxus-ssr = "=0.7.9"
 tower = { version = "0.5", features = ["util"] }
 
 [[bin]]

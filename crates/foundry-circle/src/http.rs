@@ -230,16 +230,10 @@ async fn world(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn capabilities() -> impl IntoResponse {
     Json(Capabilities {
-        collections: vec!["actors", "scenes", "messages", "playlists", "tables"],
-        commands: vec![
-            "chat.create",
-            "dice.roll",
-            "scene.activate",
-            "combat.update",
-            "playlist.control",
-        ],
-        supports_events: true,
-        supports_json_patch: true,
+        collections: vec![],
+        commands: vec![],
+        supports_events: false,
+        supports_json_patch: false,
     })
 }
 
@@ -350,6 +344,46 @@ mod tests {
             database_url(&Some("postgres:///foundry".into()), None),
             Some("postgres:///foundry".into())
         );
+    }
+
+    #[tokio::test]
+    async fn capabilities_only_advertise_implemented_operations() {
+        assert_eq!(
+            json(capabilities().await.into_response()).await,
+            serde_json::json!({
+                "collections": [],
+                "commands": [],
+                "supports_events": false,
+                "supports_json_patch": false,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn callback_requires_the_initiating_browser_before_accessing_state() {
+        for browser_cookie in [None, Some("__Host-foundry_circle_login=other")] {
+            let mut request = Request::get("/api/auth/oidc/callback?state=flow&code=code");
+            if let Some(cookie) = browser_cookie {
+                request = request.header("cookie", cookie);
+            }
+            let response = api_router_with_state(state(WorldState::Starting))
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+
+        // A matching browser binding passes the gate, but never bypasses OIDC.
+        let response = api_router_with_state(state(WorldState::Starting))
+            .oneshot(
+                Request::get("/api/auth/oidc/callback?state=flow&code=code")
+                    .header("cookie", "__Host-foundry_circle_login=flow")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

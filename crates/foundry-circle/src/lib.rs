@@ -4,9 +4,9 @@
 //! being certified.  Foundry remains the authority for world documents; this
 //! crate owns transport, readiness, authorization, and the typed driver seam.
 
-use dioxus::prelude::*;
-use tartan_ui_core::Identity;
-use tartan_ui_dioxus::{AppShell, DashboardHeader, EmptyState, MetricStrip};
+pub mod console;
+
+pub use console::App;
 
 #[cfg(feature = "server")]
 pub mod http;
@@ -495,28 +495,4 @@ pub mod driver {
 
     #[cfg(feature = "server")]
     pub use live::{ConfigError, DriverConfig, LiveFoundryDriver};
-}
-
-/// Dioxus operator console root.  Product-specific world views will be added
-/// behind the same application/service boundary as `/api/v1`.
-#[component]
-pub fn App() -> Element {
-    // The browser identity is supplied by the authenticated `/api/v1/me`
-    // response.  Never render a fabricated human identity in the shell.
-    let identity: Option<Identity> = None;
-
-    rsx! {
-        AppShell { title: "Foundry Circle".to_string(), identity,
-            DashboardHeader {
-                eyebrow: "Foundry Circle".to_string(),
-                heading: "World operator console".to_string(),
-                description: "A typed broker for the active Foundry world.".to_string(),
-            }
-            MetricStrip { metrics: vec![] }
-            EmptyState {
-                heading: "World contract pending".to_string(),
-                message: "Connect a certified Foundry world to enable document and command views.".to_string(),
-            }
-        }
-    }
 }

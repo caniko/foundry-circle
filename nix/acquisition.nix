@@ -13,7 +13,7 @@
     else throw "Foundry Circle: ${cfg.version} is not present in the pinned nix-foundryvtt versions.json";
   licensedSource = pkgs.stdenvNoCC.mkDerivation {
     pname = "foundryvtt-licensed-source";
-    version = cfg.version;
+    inherit (cfg) version;
     name = "FoundryVTT-Linux-${cfg.version}.zip";
     outputHashMode = "flat";
     outputHash = registryEntry.hash;
@@ -36,7 +36,7 @@
     requireFile = _: licensedSource;
   };
   licensedPackage = upstreamPackage.overrideAttrs (_: {
-    version = cfg.version;
+    inherit (cfg) version;
   });
   hook = "${cfg.fetchPackage}/bin/foundryvtt-fetch-hook";
   daemon = "${cfg.fetchPackage}/bin/foundryvtt-fetchd";

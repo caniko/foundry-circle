@@ -6,10 +6,10 @@
 
 name: release
 
-'on':
+on:
   push:
     tags:
-      - '[0-9]*'
+      - "[0-9]*"
   workflow_dispatch:
 
 concurrency:
@@ -48,6 +48,7 @@ jobs:
           }
           trap cleanup_validation EXIT
           git worktree add --detach "$tag_worktree" "$VERSION"
+          test "$(nix eval --raw "$tag_worktree#foundry-circle.version")" = "$VERSION"
           test -s "$tag_worktree/keys/maintainers.gpg"
           if ! grep -q "^## \[$VERSION\] - [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]" "$tag_worktree/CHANGELOG.md"; then
             echo "CHANGELOG.md missing section for $VERSION" >&2
@@ -85,8 +86,30 @@ jobs:
           . ./release-env
           export VERSION IS_PRERELEASE
           mkdir -p release
-          mkdir -p release
-          nix build .#release-bundle --out-link release/foundry-circle.tar.gz
+          df -h /
+          free_kib="$(df -Pk / | awk 'NR == 2 { print $4 }')"
+          test "$free_kib" -ge 8388608 || { echo "GitHub runner has less than 8 GiB free before Nix realization" >&2; exit 1; }
+          mkdir -p target
+          echo 'disk before bundle release-bundle'
+          df -h /
+          nix build '.#release-bundle' --out-link 'target/simit-release-bundle-0'
+          test -d 'target/simit-release-bundle-0'
+          while IFS= read -r file; do
+            name="$(basename "$file")"
+            test ! -e "release/$name" || { echo "release bundle asset collision: $name" >&2; exit 1; }
+            cp -L "$file" "release/$name"
+          done < <(find -L 'target/simit-release-bundle-0' -mindepth 1 -maxdepth 1 -type f -print | LC_ALL=C sort)
+          echo 'disk after bundle release-bundle'
+          df -h /
+          shopt -s nullglob
+          manifests=(release/*-release-manifest.json)
+          test "${#manifests[@]}" -eq 1 || { echo "expected exactly one release manifest from Nix bundles" >&2; exit 1; }
+          jq -e --arg version "$VERSION" '(.schemaVersion == 2) and (.version == $version) and (.artifacts | length > 0)' "${manifests[0]}" >/dev/null
+          rm -f target/simit-release-bundle-*
+          nix store gc
+          df -h /
+          free_kib="$(df -Pk / | awk 'NR == 2 { print $4 }')"
+          test "$free_kib" -ge 2097152 || { echo "GitHub runner has less than 2 GiB free before release publication" >&2; exit 1; }
       - name: Generate release checksums
         run: |
           set -euo pipefail
@@ -94,7 +117,7 @@ jobs:
           shopt -s nullglob
           files=()
           add_matches() { local pattern="$1" match; while IFS= read -r match; do files+=("$match"); done < <(compgen -G "$pattern" || true); }
-          add_matches '*'
+          add_matches '*.tar.gz'
           : > SHA256SUMS.txt
           count=0
           while IFS= read -r file; do
@@ -139,11 +162,6 @@ jobs:
           add_matches 'release/*.cosign.bundle'
           add_matches 'release/*.intoto.bundle'
           add_matches 'release/*.tar.gz'
-          add_matches 'release/*.zip'
-          add_matches 'release/*.AppImage'
-          add_matches 'release/*.deb'
-          add_matches 'release/*.src.rpm'
-          add_matches 'release/*.exe'
           while IFS= read -r file; do
             [ -f "$file" ] || continue
             name=$(basename "$file")

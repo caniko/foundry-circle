@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "run_id": "2026-11-06-blackbox-orange",
+  "contract_version": 1,
+  "scope": "design_plus_implementation",
+  "brief_path": "design/runs/2026-11-06-blackbox-orange/brief.md",
+  "critical_tasks": ["understand_availability", "find_setup_guidance", "inspect_diagnostics", "navigate_accessibly"],
+  "subagents": {
+    "model_definition_source": "host harness subagent definitions; user-requested coding/scout override",
+    "implementer": {"definition": "general", "agent": "general"},
+    "reviewer": {"definition": "visual", "agent": "visual", "fresh_context_per_review": true, "read_only": true},
+    "distinct": true
+  },
+  "openpencil": {
+    "project": "open-pencil/open-pencil",
+    "connection_mode": "live MCP; CLI v0.15.1 available",
+    "observed_version": null,
+    "document_id": null,
+    "page_ids": [],
+    "frame_ids": [],
+    "saved_document_path": "design/foundry-circle.fig"
+  },
+  "evidence": {
+    "baseline_id": "77b420ec9437ac69e2e5baa64e3b2d88e3c52935-plus-preexisting-work",
+    "best_candidate_id": null,
+    "current_candidate_id": null,
+    "manifest_path": "design/runs/2026-11-06-blackbox-orange/evidence.json",
+    "capture_recipe_path": "design/runs/2026-11-06-blackbox-orange/brief.md",
+    "surface_state_matrix": ["1440x1000", "1024x900", "390x844", "320x800", "keyboard", "expanded_help", "zoom_200_percent", "reduced_motion"],
+    "fixed_reference_ids": ["existing-console", "canonical-theme-broker-tartan-ui"],
+    "required_runtime_checks": ["real_App_render", "keyboard_focus", "disclosure", "diagnostic_links", "responsive_overflow", "contrast"],
+    "required_design_checks": ["editable_saved_document", "design_export_inspected", "implementation_parity"],
+    "predeclared_exclusions": ["production_access", "database_mutation", "human_testing", "screen_reader_user_testing", "unimplemented_world_workflows", "benchmark_superiority"]
+  },
+  "acceptance": {
+    "minimum_per_category_per_final_reviewer": 9,
+    "independent_final_reviews": 2,
+    "blocking_severities": ["P0", "P1", "P2"],
+    "require_no_material_regressions": true,
+    "benchmark_claims": [],
+    "withhold_targets_from_reviewers": true
+  },
+  "budget": {"maximum_revision_rounds": 12, "maximum_minutes": 120, "maximum_cost": null, "cost_currency": null, "consecutive_non_improving_rounds_before_diagnosis": 3},
+  "progress": {
+    "status": "partial_access_blocked",
+    "revision_rounds_used": 1,
+    "elapsed_minutes": null,
+    "journal_path": "design/runs/2026-11-06-blackbox-orange/journal.md",
+    "checkpoint_path": "design/runs/2026-11-06-blackbox-orange/checkpoint.md",
+    "unresolved_finding_ids": ["O-01", "O-02", "O-03", "P-02", "P-05", "P-06", "P-07"],
+    "next_action": "Collect preservation result; restore stable execution/OpenPencil access, then implement adjudicated corrections and review the new frozen candidate. Do not repeat completed baseline/build work.",
+    "stop_reason": "Repeated location shutdowns cancel local commands; OpenPencil live app disconnected; preview restart outcome unknown. Saved source/design/evidence preserved; acceptance not established."
+  }
+}

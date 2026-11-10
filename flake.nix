@@ -20,7 +20,7 @@
     nix-provenance.url = "git+https://github.com/caniko/nix-provenance.git";
   };
 
-  outputs = inputs @ {
+  outputs = {
     self,
     nixpkgs,
     harbor-rs,
@@ -55,13 +55,21 @@
       };
       cacheRust = package: buildCache.withRustCache {inherit package;};
       cacheDioxus = package: buildCache.withDioxusCache {inherit package;};
-      src = (toolchain.craneLib).cleanCargoSource ./.;
+      src = toolchain.craneLib.cleanCargoSource ./.;
       commonArgs = {
         inherit src;
         pname = "foundry-circle";
         strictDeps = true;
       };
       foundryVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
+      msrv = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.rust-version;
+      msrvCrane =
+        toolchain.craneLib.overrideToolchain
+        pkgs.rust-bin.stable.${
+          if builtins.length (nixpkgs.lib.splitString "." msrv) == 2
+          then "${msrv}.0"
+          else msrv
+        }.minimal;
       cargoArtifacts = cacheRust (toolchain.craneLib.buildDepsOnly commonArgs);
       cargoPackage = cacheRust (toolchain.craneLib.buildPackage (commonArgs
         // {
@@ -84,11 +92,11 @@
           foundryvtt-fetch-hook.package = fetchPackage;
         };
       };
-      releaseBundle = portableRelease.releaseBundle;
+      inherit (portableRelease) releaseBundle;
       dioxusPackage = cacheDioxus (harbor-rs.lib.mkDioxusFullstackPackage {
         inherit pkgs src;
-        craneLib = wasmToolchain.craneLib;
-        rustToolchain = wasmToolchain.rustToolchain;
+        inherit (wasmToolchain) craneLib;
+        inherit (wasmToolchain) rustToolchain;
         cargoLock = ./Cargo.lock;
         pname = "foundry-circle";
         package = "foundry-circle";
@@ -112,7 +120,7 @@
         hooks = import ./nix/pre-commit.nix {
           inherit pkgs;
           treefmtWrapper = treefmtEval.config.build.wrapper;
-          rustToolchain = toolchain.rustToolchain;
+          inherit (toolchain) rustToolchain;
         };
       };
       packageFixtureSource = pkgs.runCommand "foundry-package-fixture-source" {} ''
@@ -123,7 +131,7 @@
         printf 'fixture\n' > "$out/module/content.txt"
       '';
       packageFixture = import ./nix/package-output.nix {
-        lib = nixpkgs.lib;
+        inherit (nixpkgs) lib;
         inherit pkgs;
         source = packageFixtureSource;
         kind = "module";
@@ -144,7 +152,7 @@
         packages = with pkgs;
           [cargo-deny cargo-nextest cargo-audit jq pre-commit rust-analyzer]
           ++ preCommit.enabledPackages;
-        shellHook = preCommit.shellHook;
+        inherit (preCommit) shellHook;
       };
     in {
       packages = {
@@ -166,6 +174,13 @@
 
       checks = {
         default = cargoPackage;
+        msrv = msrvCrane.mkCargoDerivation (commonArgs
+          // {
+            pnameSuffix = "-msrv";
+            cargoArtifacts = null;
+            doInstallCargoArtifacts = false;
+            buildPhaseCargoCommand = "cargo check --workspace --all-targets --locked";
+          });
         formatting = treefmtEval.config.build.check self;
         fmt = toolchain.craneLib.cargoFmt {
           inherit src;
@@ -196,7 +211,7 @@
     // {
       lib.mkFoundryPackage = {pkgs, ...} @ args:
         import ./nix/package.nix {
-          lib = nixpkgs.lib;
+          inherit (nixpkgs) lib;
           inherit pkgs;
         } (builtins.removeAttrs args ["pkgs"]);
       nixosModules.default = import ./nix/module.nix;

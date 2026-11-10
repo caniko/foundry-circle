@@ -723,62 +723,73 @@ async fn command(
         Ok(op) => op,
         Err((status, body)) => return (status, body).into_response(),
     };
-    let pool = state.database.pool().await;
-    let mut idempotency = None;
-    if let (Some(key), Some(pool)) = (request.idempotency_key.as_deref(), pool.as_ref()) {
-        match claim_idempotency(
-            pool,
-            &principal.subject,
-            key,
-            &request.command,
-            &request.payload,
+    // Commands mutate the world, so each one needs a claimed idempotency key;
+    // a missing key or an unavailable database fails closed.
+    let key = request.idempotency_key.as_deref().unwrap_or_default();
+    if !(1..=128).contains(&key.len()) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": "validation_failed", "message": "idempotencyKey must be 1..=128 bytes"})),
         )
-        .await
-        {
-            Ok(Claim::Replay(response)) => return (StatusCode::OK, Json(response)).into_response(),
-            Ok(Claim::Conflict) => return idempotency_conflict(),
-            Ok(Claim::Execute) => idempotency = Some((pool.clone(), key.to_owned())),
-            Err(error) => {
-                tracing::warn!(%error, "failed to claim Foundry Circle idempotency key");
-            }
+            .into_response();
+    }
+    let unavailable = || {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "database_unavailable"})),
+        )
+            .into_response()
+    };
+    let Some(pool) = state.database.pool().await else {
+        return unavailable();
+    };
+    let subject = principal.subject;
+    let claim = claim_idempotency(&pool, &subject, key, &request.command, &request.payload).await;
+    match claim {
+        Ok(Claim::Execute) => {}
+        Ok(Claim::Replay(response)) => return (StatusCode::OK, Json(response)).into_response(),
+        Ok(Claim::Conflict) => return idempotency_conflict(),
+        Err(error) => {
+            tracing::warn!(%error, "failed to claim Foundry Circle idempotency key");
+            return unavailable();
         }
     }
-    let outcome = state.driver.call(op).await;
-    audit_command(&state, &principal.subject, &request.command, &outcome).await;
-    match outcome {
-        Ok(value) => {
-            let body = json!({"command": request.command, "result": value});
-            if let Some((pool, key)) = idempotency {
-                if let Err(error) = sqlx::query(
+    // An owned task: the command, its audit row and the key's final state must
+    // not be dropped when the HTTP client disconnects mid-request.
+    let key = key.to_owned();
+    let command = request.command;
+    let task = tokio::spawn(async move {
+        let outcome = state.driver.call(op).await;
+        audit_command(&state, &subject, &command, &outcome).await;
+        let finalize = match &outcome {
+            Ok(value) => Some(
+                sqlx::query(
                     "UPDATE idempotency_keys SET response = $3 WHERE subject = $1 AND key = $2",
                 )
-                .bind(&principal.subject)
+                .bind(&subject)
                 .bind(&key)
-                .bind(body.clone())
-                .execute(&pool)
-                .await
-                {
-                    tracing::warn!(%error, "failed to store Foundry Circle idempotent response");
-                }
+                .bind(json!({"command": command, "result": value})),
+            ),
+            // The browser may already have applied these; keep the key claimed.
+            Err(WorldError::Timeout | WorldError::Browser) => None,
+            // Rejected before running: release the key so the caller can retry.
+            Err(_) => Some(
+                sqlx::query("DELETE FROM idempotency_keys WHERE subject = $1 AND key = $2")
+                    .bind(&subject)
+                    .bind(&key),
+            ),
+        };
+        if let Some(query) = finalize {
+            if let Err(error) = query.execute(&pool).await {
+                tracing::warn!(%error, "failed to finalize Foundry Circle idempotency key");
             }
-            (StatusCode::OK, Json(body)).into_response()
         }
-        Err(error) => {
-            // Release the claim so the caller can retry a failed command. A
-            // timeout may still have run in Foundry, so that key stays claimed.
-            if let (Some((pool, key)), false) = (idempotency, error == WorldError::Timeout) {
-                if let Err(error) =
-                    sqlx::query("DELETE FROM idempotency_keys WHERE subject = $1 AND key = $2")
-                        .bind(&principal.subject)
-                        .bind(&key)
-                        .execute(&pool)
-                        .await
-                {
-                    tracing::warn!(%error, "failed to release Foundry Circle idempotency key");
-                }
-            }
-            world_error_response(error)
-        }
+        outcome.map(|value| json!({"command": command, "result": value}))
+    });
+    match task.await {
+        Ok(Ok(body)) => (StatusCode::OK, Json(body)).into_response(),
+        Ok(Err(error)) => world_error_response(error),
+        Err(_) => world_error_response(WorldError::Browser),
     }
 }
 

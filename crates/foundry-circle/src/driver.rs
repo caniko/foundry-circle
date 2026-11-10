@@ -609,9 +609,11 @@ mod live {
                 }
                 op = ops.recv() => {
                     let Some((op, reply)) = op else { return Ok(()); };
-                    let result = match tokio::time::timeout(OPERATION_TIMEOUT, evaluate_op(page, op)).await {
-                        Ok(result) => result,
-                        Err(_) => Err(WorldError::Timeout),
+                    let Ok(result) = tokio::time::timeout(OPERATION_TIMEOUT, evaluate_op(page, op)).await else {
+                        // The script may still be running in the page; drop the
+                        // session so nothing else runs beside it.
+                        let _ = reply.send(Err(WorldError::Timeout));
+                        return Err(Failure::Browser);
                     };
                     let _ = reply.send(result);
                 }
@@ -821,7 +823,10 @@ mod live {
 
     const COMBAT_UPDATE: &str = r#"async function() {
         const args = __ARGS__;
-        const combat = game.combat;
+        // game.combat follows the viewed scene, which a canvas-less session
+        // does not have; resolve the active encounter from the collection.
+        const scene = game.scenes?.active?.id ?? null;
+        const combat = game.combats?.contents.find(c => c.active && (!c.scene || c.scene.id === scene));
         if (!combat) return { error: "not_found", message: "no active combat" };
         const actions = {
             start: () => combat.startCombat(),
@@ -834,7 +839,7 @@ mod live {
         const action = actions[args.action];
         if (!action) return { error: "invalid", message: "invalid combat action" };
         await action();
-        return { ok: { action: args.action, active: !!game.combat } };
+        return { ok: { action: args.action } };
     }"#;
 
     const PLAYLIST_CONTROL: &str = r#"async function() {

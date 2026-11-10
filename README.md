@@ -16,7 +16,8 @@ contract. World documents are readable at `GET /api/v1/world/documents/{collecti
 and `GET /api/v1/world/documents/{collection}/{id}` for the `actors`, `scenes`,
 `messages`, `playlists` and `tables` collections; GMs and admins may read them.
 Admins can call `POST /api/v1/world/commands` with `chat.create`, `dice.roll`,
-`scene.activate`, `combat.update` and `playlist.control`. Events and JSON-patch
+`scene.activate`, `combat.update` and `playlist.control`; every command needs an
+`idempotencyKey`. Events and JSON-patch
 mutations are not implemented.
 
 ## Development

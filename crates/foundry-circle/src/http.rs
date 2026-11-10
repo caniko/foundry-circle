@@ -779,10 +779,10 @@ async fn command(
                     .bind(&key),
             ),
         };
-        if let Some(query) = finalize {
-            if let Err(error) = query.execute(&pool).await {
-                tracing::warn!(%error, "failed to finalize Foundry Circle idempotency key");
-            }
+        if let Some(query) = finalize
+            && let Err(error) = query.execute(&pool).await
+        {
+            tracing::warn!(%error, "failed to finalize Foundry Circle idempotency key");
         }
         outcome.map(|value| json!({"command": command, "result": value}))
     });

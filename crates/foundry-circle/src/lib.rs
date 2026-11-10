@@ -473,7 +473,8 @@ fn InviteCard(join_url: Option<String>) -> Element {
     }
 }
 
-#[cfg(test)]
+// The SSR renderer ships with the server feature only.
+#[cfg(all(test, feature = "server"))]
 mod tests {
     use super::*;
 

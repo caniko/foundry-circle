@@ -12,8 +12,12 @@ state only; Foundry remains authoritative for world documents.
 
 The repository provides health, discovery, a typed driver seam, OIDC login,
 PostgreSQL-backed sessions, a capability registry, and a non-ready readiness
-contract. Foundry world documents remain behind the typed driver seam until a
-licensed archive and disposable v13.351 world certify the live browser driver.
+contract. World documents are readable at `GET /api/v1/world/documents/{collection}`
+and `GET /api/v1/world/documents/{collection}/{id}` for the `actors`, `scenes`,
+`messages`, `playlists` and `tables` collections; GMs and admins may read them.
+Admins can call `POST /api/v1/world/commands` with `chat.create`, `dice.roll`,
+`scene.activate`, `combat.update` and `playlist.control`. Events and JSON-patch
+mutations are not implemented.
 
 ## Development
 

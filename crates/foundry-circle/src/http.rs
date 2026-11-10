@@ -2,20 +2,21 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{
     Extension, Json, Router,
-    extract::{Path, State},
-    http::StatusCode,
+    extract::{Path, Query, State},
+    http::{HeaderValue, StatusCode, header},
     middleware::from_fn_with_state,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 use tokio::{sync::RwLock, time::sleep};
 
 use crate::{
     ConsoleData, ConsoleView, LiveGame, Role,
-    driver::{FakeDriver, FoundryDriver, WorldState},
+    driver::{FakeDriver, FoundryDriver, WorldError, WorldOp, WorldState},
 };
 
 #[path = "auth.rs"]
@@ -207,6 +208,38 @@ pub struct CommandRequest {
     pub idempotency_key: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct DocumentQuery {
+    pub limit: Option<u32>,
+    pub after: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatCreatePayload {
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiceRollPayload {
+    formula: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct IdPayload {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CombatUpdatePayload {
+    action: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlaylistControlPayload {
+    id: String,
+    action: String,
+}
+
 /// Build the non-Dioxus HTTP surface.  The routes are deliberately separate
 /// from the browser renderer so API readiness can be tested without a browser.
 pub fn api_router() -> Router {
@@ -219,6 +252,7 @@ pub fn api_router_with_state(state: AppState) -> Router {
         .route("/api/v1/me", get(me))
         .route("/api/v1/world", get(world))
         .route("/api/v1/world/capabilities", get(capabilities))
+        .route("/api/v1/world/documents/{collection}", get(documents))
         .route("/api/v1/world/documents/{collection}/{id}", get(document))
         .route("/api/v1/world/commands", post(command))
         .layer(from_fn_with_state(state.clone(), auth::require_session));
@@ -381,68 +415,371 @@ async fn capabilities() -> impl IntoResponse {
             "combat.update",
             "playlist.control",
         ],
-        supports_events: true,
-        supports_json_patch: true,
+        supports_events: false,
+        supports_json_patch: false,
     })
+}
+
+fn oidc_not_configured() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": "oidc_not_configured"})),
+    )
+        .into_response()
+}
+
+/// Players share the access group with the GM browser session, so document
+/// reads must not fall through to what that session can see.
+fn require_reader(
+    principal: &auth::Principal,
+    admin_group: &str,
+    gm_group: Option<&str>,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if principal.role(admin_group, gm_group) == Role::Player {
+        Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "permission_denied"})),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+async fn documents(
+    State(state): State<AppState>,
+    Extension(principal): Extension<auth::Principal>,
+    Path(collection): Path<String>,
+    Query(query): Query<DocumentQuery>,
+) -> Response {
+    let Some(auth) = state.auth.as_ref() else {
+        return oidc_not_configured();
+    };
+    if let Err((status, body)) =
+        require_reader(&principal, &auth.admin_group, auth.gm_group.as_deref())
+    {
+        return (status, body).into_response();
+    }
+    read_documents(
+        state.driver.as_ref(),
+        &collection,
+        query.limit.unwrap_or(50),
+        query.after,
+    )
+    .await
 }
 
 async fn document(
     State(state): State<AppState>,
+    Extension(principal): Extension<auth::Principal>,
     Path((collection, id)): Path<(String, String)>,
-) -> impl IntoResponse {
-    if state.driver.world_state() != WorldState::Ready {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "error": "world_not_ready",
-                "collection": collection,
-                "id": id,
-            })),
-        );
+) -> Response {
+    let Some(auth) = state.auth.as_ref() else {
+        return oidc_not_configured();
+    };
+    if let Err((status, body)) =
+        require_reader(&principal, &auth.admin_group, auth.gm_group.as_deref())
+    {
+        return (status, body).into_response();
     }
-    // Foundry remains authoritative; this handler will call the typed browser
-    // driver once a live fixture certifies the collection contract.
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(serde_json::json!({
-            "error": "driver_contract_pending",
-            "collection": collection,
-            "id": id,
-        })),
+    read_document(state.driver.as_ref(), &collection, &id).await
+}
+
+async fn read_documents(
+    driver: &dyn FoundryDriver,
+    collection: &str,
+    limit: u32,
+    after: Option<String>,
+) -> Response {
+    let epoch = driver.snapshot().epoch;
+    let op = WorldOp::ListDocuments {
+        collection: collection.to_owned(),
+        limit,
+        after,
+    };
+    match driver.call(op).await {
+        Ok(mut page) => {
+            if let Some(items) = page.get_mut("items").and_then(Value::as_array_mut) {
+                for item in items {
+                    document_envelope(item, epoch);
+                }
+            }
+            if let Some(object) = page.as_object_mut() {
+                object.insert("worldEpoch".into(), Value::from(epoch));
+            }
+            (StatusCode::OK, Json(page)).into_response()
+        }
+        Err(error) => world_error_response(error),
+    }
+}
+
+async fn read_document(driver: &dyn FoundryDriver, collection: &str, id: &str) -> Response {
+    let epoch = driver.snapshot().epoch;
+    let op = WorldOp::GetDocument {
+        collection: collection.to_owned(),
+        id: id.to_owned(),
+    };
+    match driver.call(op).await {
+        Ok(mut document) => {
+            let etag = document_envelope(&mut document, epoch);
+            let mut response = (StatusCode::OK, Json(document)).into_response();
+            if let Ok(value) = HeaderValue::from_str(&etag) {
+                response.headers_mut().insert(header::ETAG, value);
+            }
+            response
+        }
+        Err(error) => world_error_response(error),
+    }
+}
+
+/// Adds the read envelope; returns the computed etag.
+fn document_envelope(document: &mut Value, epoch: u64) -> String {
+    // ponytail: serde_json sorted keys, not full RFC 8785; switch to a JCS crate if clients need cross-language etags
+    let source = document.get("source").cloned().unwrap_or(Value::Null);
+    let bytes = serde_json::to_vec(&source).unwrap_or_default();
+    let etag = format!("sha256-{}", hex::encode(Sha256::digest(bytes)));
+    if let Some(object) = document.as_object_mut() {
+        object.insert("etag".into(), Value::String(etag.clone()));
+        object.insert("worldEpoch".into(), Value::from(epoch));
+    }
+    etag
+}
+
+fn error_code(error: &WorldError) -> &'static str {
+    match error {
+        WorldError::NotReady => "world_not_ready",
+        WorldError::Unsupported(_) => "capability_unsupported",
+        WorldError::NotFound => "document_not_found",
+        WorldError::Invalid(_) => "validation_failed",
+        WorldError::Timeout => "browser_timeout",
+        WorldError::Browser => "browser_error",
+    }
+}
+
+fn world_error_parts(error: WorldError) -> (StatusCode, Json<Value>) {
+    let status = match &error {
+        WorldError::NotReady => StatusCode::SERVICE_UNAVAILABLE,
+        WorldError::Unsupported(_) | WorldError::NotFound => StatusCode::NOT_FOUND,
+        WorldError::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        WorldError::Timeout => StatusCode::GATEWAY_TIMEOUT,
+        WorldError::Browser => StatusCode::BAD_GATEWAY,
+    };
+    let mut body = json!({"error": error_code(&error)});
+    match error {
+        WorldError::Unsupported(message) | WorldError::Invalid(message) => {
+            body["message"] = message.into();
+        }
+        _ => {}
+    }
+    (status, Json(body))
+}
+
+fn world_error_response(error: WorldError) -> Response {
+    world_error_parts(error).into_response()
+}
+
+fn parse_command(command: &str, payload: &Value) -> Result<WorldOp, (StatusCode, Json<Value>)> {
+    let op = match command {
+        "chat.create" => {
+            from_payload::<ChatCreatePayload>(payload).map(|payload| WorldOp::ChatCreate {
+                content: payload.content,
+            })
+        }
+        "dice.roll" => from_payload::<DiceRollPayload>(payload).map(|payload| WorldOp::DiceRoll {
+            formula: payload.formula,
+        }),
+        "scene.activate" => from_payload::<IdPayload>(payload)
+            .map(|payload| WorldOp::SceneActivate { id: payload.id }),
+        "combat.update" => {
+            from_payload::<CombatUpdatePayload>(payload).map(|payload| WorldOp::CombatUpdate {
+                action: payload.action,
+            })
+        }
+        "playlist.control" => from_payload::<PlaylistControlPayload>(payload).map(|payload| {
+            WorldOp::PlaylistControl {
+                id: payload.id,
+                action: payload.action,
+            }
+        }),
+        _ => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "capability_unsupported"})),
+            ));
+        }
+    };
+    let op = op.map_err(|message| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": "validation_failed", "message": message})),
+        )
+    })?;
+    crate::driver::validate_op(&op).map_err(world_error_parts)?;
+    Ok(op)
+}
+
+fn from_payload<T: serde::de::DeserializeOwned>(payload: &Value) -> Result<T, String> {
+    serde_json::from_value(payload.clone()).map_err(|error| error.to_string())
+}
+
+enum Claim {
+    Execute,
+    Conflict,
+    Replay(Value),
+}
+
+fn request_hash(command: &str, payload: &Value) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(command.as_bytes());
+    hasher.update(serde_json::to_vec(payload).unwrap_or_default());
+    hasher.finalize().to_vec()
+}
+
+async fn claim_idempotency(
+    pool: &PgPool,
+    subject: &str,
+    key: &str,
+    command: &str,
+    payload: &Value,
+) -> Result<Claim, sqlx::Error> {
+    let hash = request_hash(command, payload);
+    let inserted = sqlx::query(
+        "INSERT INTO idempotency_keys (subject, key, request_hash) VALUES ($1, $2, $3) ON CONFLICT (subject, key) DO NOTHING",
     )
+    .bind(subject)
+    .bind(key)
+    .bind(hash.as_slice())
+    .execute(pool)
+    .await?
+    .rows_affected()
+        > 0;
+    if inserted {
+        return Ok(Claim::Execute);
+    }
+    let row = sqlx::query(
+        "SELECT request_hash, response FROM idempotency_keys WHERE subject = $1 AND key = $2",
+    )
+    .bind(subject)
+    .bind(key)
+    .fetch_one(pool)
+    .await?;
+    let stored: Vec<u8> = row.try_get("request_hash")?;
+    if stored != hash {
+        return Ok(Claim::Conflict);
+    }
+    let response: Option<Value> = row.try_get("response")?;
+    Ok(response.map_or(Claim::Conflict, Claim::Replay))
+}
+
+fn idempotency_conflict() -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({"error": "idempotency_conflict"})),
+    )
+        .into_response()
+}
+
+async fn audit_command(
+    state: &AppState,
+    subject: &str,
+    command: &str,
+    outcome: &Result<Value, WorldError>,
+) {
+    let Some(pool) = state.database.pool().await else {
+        return;
+    };
+    let outcome = match outcome {
+        Ok(_) => "ok",
+        Err(error) => error_code(error),
+    };
+    if let Err(error) = sqlx::query(
+        "INSERT INTO audit_log (subject, action, resource, outcome, details) VALUES ($1, $2, 'world', $3, '{}'::jsonb)",
+    )
+    .bind(subject)
+    .bind(command)
+    .bind(outcome)
+    .execute(&pool)
+    .await
+    {
+        tracing::warn!(%error, "failed to write Foundry Circle audit entry");
+    }
 }
 
 async fn command(
     State(state): State<AppState>,
     Extension(principal): Extension<auth::Principal>,
     Json(request): Json<CommandRequest>,
-) -> impl IntoResponse {
+) -> Response {
     let Some(auth) = state.auth.as_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "oidc_not_configured"})),
-        );
+        return oidc_not_configured();
     };
     if !principal.is_admin(&auth.admin_group) {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"error": "admin_required"})),
-        );
+        )
+            .into_response();
     }
-    if state.driver.world_state() != WorldState::Ready {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "world_not_ready"})),
-        );
+    let op = match parse_command(&request.command, &request.payload) {
+        Ok(op) => op,
+        Err((status, body)) => return (status, body).into_response(),
+    };
+    let pool = state.database.pool().await;
+    let mut idempotency = None;
+    if let (Some(key), Some(pool)) = (request.idempotency_key.as_deref(), pool.as_ref()) {
+        match claim_idempotency(
+            pool,
+            &principal.subject,
+            key,
+            &request.command,
+            &request.payload,
+        )
+        .await
+        {
+            Ok(Claim::Replay(response)) => return (StatusCode::OK, Json(response)).into_response(),
+            Ok(Claim::Conflict) => return idempotency_conflict(),
+            Ok(Claim::Execute) => idempotency = Some((pool.clone(), key.to_owned())),
+            Err(error) => {
+                tracing::warn!(%error, "failed to claim Foundry Circle idempotency key");
+            }
+        }
     }
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(serde_json::json!({
-            "error": "driver_contract_pending",
-            "command": request.command,
-            "accepted": false,
-        })),
-    )
+    let outcome = state.driver.call(op).await;
+    audit_command(&state, &principal.subject, &request.command, &outcome).await;
+    match outcome {
+        Ok(value) => {
+            let body = json!({"command": request.command, "result": value});
+            if let Some((pool, key)) = idempotency {
+                if let Err(error) = sqlx::query(
+                    "UPDATE idempotency_keys SET response = $3 WHERE subject = $1 AND key = $2",
+                )
+                .bind(&principal.subject)
+                .bind(&key)
+                .bind(body.clone())
+                .execute(&pool)
+                .await
+                {
+                    tracing::warn!(%error, "failed to store Foundry Circle idempotent response");
+                }
+            }
+            (StatusCode::OK, Json(body)).into_response()
+        }
+        Err(error) => {
+            // Release the claim so the caller can retry a failed command. A
+            // timeout may still have run in Foundry, so that key stays claimed.
+            if let (Some((pool, key)), false) = (idempotency, error == WorldError::Timeout) {
+                if let Err(error) =
+                    sqlx::query("DELETE FROM idempotency_keys WHERE subject = $1 AND key = $2")
+                        .bind(&principal.subject)
+                        .bind(&key)
+                        .execute(&pool)
+                        .await
+                {
+                    tracing::warn!(%error, "failed to release Foundry Circle idempotency key");
+                }
+            }
+            world_error_response(error)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -631,6 +968,7 @@ mod tests {
             Request::get("/api/v1/me").body(Body::empty()),
             Request::get("/api/v1/world").body(Body::empty()),
             Request::get("/api/v1/world/capabilities").body(Body::empty()),
+            Request::get("/api/v1/world/documents/actors").body(Body::empty()),
             Request::get("/api/v1/world/documents/actors/example").body(Body::empty()),
             Request::post("/api/v1/world/commands")
                 .header("content-type", "application/json")
@@ -652,6 +990,96 @@ mod tests {
                 .unwrap();
             assert_eq!(&body[..], b"OIDC is not configured", "{path}");
         }
+    }
+
+    fn principal(groups: &[&str]) -> auth::Principal {
+        auth::Principal {
+            subject: "subject".into(),
+            issuer: "https://id.example".into(),
+            display_name: None,
+            email: None,
+            groups: groups.iter().map(|group| (*group).to_owned()).collect(),
+        }
+    }
+
+    async fn body(response: Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn players_cannot_read_world_documents() {
+        let player = principal(&["foundry-circle-users"]);
+        let (status, Json(body)) =
+            require_reader(&player, "foundry-circle-admins", Some("foundry-circle-gms"))
+                .unwrap_err();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"], "permission_denied");
+    }
+
+    #[tokio::test]
+    async fn gms_read_fixture_documents_with_a_stable_etag() {
+        let gm = principal(&["foundry-circle-users", "foundry-circle-gms"]);
+        assert!(require_reader(&gm, "foundry-circle-admins", Some("foundry-circle-gms")).is_ok());
+
+        let driver = FakeDriver::new(WorldState::Ready);
+        let first = read_document(&driver, "actors", "a1").await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let header_etag = first.headers()[header::ETAG].to_str().unwrap().to_owned();
+        let first = body(first).await;
+        assert_eq!(first["id"], "a1");
+        assert_eq!(first["source"]["_id"], "a1");
+        assert_eq!(first["etag"], header_etag);
+        assert!(header_etag.starts_with("sha256-"));
+
+        let second = body(read_document(&driver, "actors", "a1").await).await;
+        assert_eq!(second["etag"], first["etag"]);
+    }
+
+    #[tokio::test]
+    async fn unknown_collections_are_reported_as_unsupported() {
+        let response = read_documents(&FakeDriver::new(WorldState::Ready), "items", 50, None).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body(response).await["error"], "capability_unsupported");
+    }
+
+    #[tokio::test]
+    async fn document_reads_require_a_ready_world() {
+        let response = read_document(&FakeDriver::new(WorldState::Starting), "actors", "a1").await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body(response).await["error"], "world_not_ready");
+    }
+
+    #[tokio::test]
+    async fn oversized_chat_commands_fail_validation() {
+        let payload = json!({"content": "x".repeat(4001)});
+        let (status, Json(body)) = parse_command("chat.create", &payload).unwrap_err();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"], "validation_failed");
+        assert!(body["message"].as_str().unwrap().contains("4000"));
+    }
+
+    #[tokio::test]
+    async fn capabilities_only_advertise_implemented_surfaces() {
+        let body = body(capabilities().await.into_response()).await;
+        assert_eq!(body["supportsEvents"], false);
+        assert_eq!(body["supportsJsonPatch"], false);
+        assert_eq!(
+            body["collections"],
+            json!(["actors", "scenes", "messages", "playlists", "tables"])
+        );
+        assert_eq!(
+            body["commands"],
+            json!([
+                "chat.create",
+                "dice.roll",
+                "scene.activate",
+                "combat.update",
+                "playlist.control"
+            ])
+        );
     }
 
     #[test]

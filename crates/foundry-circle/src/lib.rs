@@ -368,7 +368,7 @@ fn Lobby(view: ConsoleView) -> Element {
                     a { class: "lobby-brand", href: "/api/console", "Foundry Circle" }
                     div { class: "lobby-account",
                         if let Some(name) = account {
-                            span { class: "lobby-account__name", "{name}" }
+                            span { class: "lobby-account__name", {name} }
                             form { class: "lobby-signout", method: "post", action: "/api/auth/logout",
                                 button { r#type: "submit", class: "tartan-button", "Sign out" }
                             }

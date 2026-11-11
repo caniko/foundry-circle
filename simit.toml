@@ -10,6 +10,7 @@ with_docs = true
 publish_crates = true
 provider = "actions"
 platform = "github"
+push_branches = ["trunk"]
 publish_strategy = "members"
 
 [release.signing]
@@ -34,6 +35,7 @@ trusted_public_keys = [
 # Linux closures consumed by canix, published to the public canix cache on
 # trunk pushes only (secret ATTIC_TOKEN). Pull requests build but never push.
 [prebuild]
+push_branches = ["trunk"]
 publish_attic = true
 attic_app = ".#push-flake-inputs"
 system_runners = { x86_64-linux = "ubuntu-24.04" }

@@ -130,13 +130,32 @@ pub async fn login_start(
         tracing::error!(%error, "failed to save OIDC login transaction");
         return (StatusCode::INTERNAL_SERVER_ERROR, "login transaction error").into_response();
     }
-    Redirect::to(&request.url).into_response()
+    (
+        AppendHeaders([(
+            header::SET_COOKIE,
+            login_binding_cookie(&request.transaction.csrf_state),
+        )]),
+        Redirect::to(&request.url),
+    )
+        .into_response()
 }
 
 pub async fn oidc_callback(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(callback): Query<Callback>,
 ) -> Response {
+    let mut response = complete_login(state, &headers, callback).await;
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        header::HeaderValue::from_static(EXPIRED_LOGIN_BINDING_COOKIE),
+    );
+    response
+}
+
+/// Binds the callback to the browser that started the login: the server-side
+/// transaction alone does not prove the flow belongs to this cookie jar.
+async fn complete_login(state: AppState, headers: &HeaderMap, callback: Callback) -> Response {
     let Some(auth) = state.auth.as_ref() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "OIDC is not configured").into_response();
     };
@@ -150,6 +169,13 @@ pub async fn oidc_callback(
     let Some(state_value) = callback.state.as_deref() else {
         return (StatusCode::BAD_REQUEST, "missing OIDC state").into_response();
     };
+    if !login_binding_matches(headers, state_value) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "login flow is not bound to this browser",
+        )
+            .into_response();
+    }
     let transaction = match take_transaction(&pool, state_value).await {
         Ok(Some(transaction)) => transaction,
         Ok(None) => {
@@ -423,6 +449,23 @@ fn expired_session_cookie() -> String {
     "foundry_circle_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax".into()
 }
 
+const LOGIN_BINDING_COOKIE: &str = "foundry_circle_login";
+
+/// SameSite=Lax is enough for the binding cookie because the IdP returns the
+/// callback as a top-level GET redirect; it is not a bearer credential.
+fn login_binding_cookie(state: &str) -> String {
+    format!(
+        "{LOGIN_BINDING_COOKIE}={state}; Path=/api/auth; Max-Age=600; HttpOnly; Secure; SameSite=Lax"
+    )
+}
+
+const EXPIRED_LOGIN_BINDING_COOKIE: &str =
+    "foundry_circle_login=; Path=/api/auth; Max-Age=0; HttpOnly; Secure; SameSite=Lax";
+
+fn login_binding_matches(headers: &HeaderMap, state: &str) -> bool {
+    cookie(headers, LOGIN_BINDING_COOKIE) == Some(state)
+}
+
 fn unix_timestamp(value: DateTime<Utc>) -> u64 {
     value.timestamp().max(0) as u64
 }
@@ -514,5 +557,50 @@ mod tests {
         assert!(cookie.contains("HttpOnly"));
         assert!(cookie.contains("Secure"));
         assert!(cookie.contains("SameSite=Lax"));
+    }
+
+    fn headers_with_cookie(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::COOKIE, value.parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn login_binding_requires_the_matching_cookie_value() {
+        let headers = headers_with_cookie("other=value; foundry_circle_login=state-1");
+        assert!(login_binding_matches(&headers, "state-1"));
+        assert!(!login_binding_matches(&headers, "state-2"));
+    }
+
+    #[test]
+    fn login_binding_rejects_a_missing_cookie() {
+        assert!(!login_binding_matches(&HeaderMap::new(), "state-1"));
+    }
+
+    #[test]
+    fn login_binding_rejects_a_similar_cookie_name() {
+        let headers = headers_with_cookie("foundry_circle_login_x=state-1");
+        assert!(!login_binding_matches(&headers, "state-1"));
+    }
+
+    #[test]
+    fn login_binding_cookie_is_scoped_to_the_auth_routes() {
+        let cookie = login_binding_cookie("state-1");
+        assert!(cookie.starts_with("foundry_circle_login=state-1;"));
+        assert!(cookie.contains("Path=/api/auth"));
+        assert!(cookie.contains("Max-Age=600"));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("Secure"));
+        assert!(cookie.contains("SameSite=Lax"));
+    }
+
+    #[test]
+    fn expired_login_binding_cookie_clears_the_flow() {
+        assert!(EXPIRED_LOGIN_BINDING_COOKIE.starts_with("foundry_circle_login=;"));
+        assert!(EXPIRED_LOGIN_BINDING_COOKIE.contains("Path=/api/auth"));
+        assert!(EXPIRED_LOGIN_BINDING_COOKIE.contains("Max-Age=0"));
+        assert!(EXPIRED_LOGIN_BINDING_COOKIE.contains("HttpOnly"));
+        assert!(EXPIRED_LOGIN_BINDING_COOKIE.contains("Secure"));
+        assert!(EXPIRED_LOGIN_BINDING_COOKIE.contains("SameSite=Lax"));
     }
 }

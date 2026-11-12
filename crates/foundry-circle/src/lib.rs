@@ -90,6 +90,19 @@ pub struct SessionHolder {
     pub name: String,
 }
 
+/// One principal with live sessions, as the admin's revocation list shows
+/// them. Identity only: a session token never leaves the database.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionUser {
+    /// The OIDC subject the revoke call names; not rendered.
+    pub subject: String,
+    pub name: String,
+    pub email: Option<String>,
+    /// The hosts holding a session: `platform`, `play`.
+    pub kinds: Vec<String>,
+}
+
 /// One open lease, as the JSON API and the lobby report it.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -126,6 +139,8 @@ pub struct ConsoleData {
     /// The running world has not been adopted yet, so only the holder and
     /// admins can reach Foundry.
     pub adoption_pending: bool,
+    /// Admins only: principals with live sessions, each revocable (D5).
+    pub session_users: Vec<SessionUser>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -158,6 +173,12 @@ async fn return_to_setup(id: String) -> Result<Option<String>, ServerFnError> {
 #[server]
 async fn end_session(id: String) -> Result<Option<String>, ServerFnError> {
     Ok(http::console_stop(&id).await)
+}
+
+/// Admin-only: revoke every session a principal holds on both hosts (D5).
+#[server]
+async fn revoke_sessions(subject: String) -> Result<Option<String>, ServerFnError> {
+    Ok(http::console_revoke(&subject).await)
 }
 
 /// Dioxus console root.  The server resolves the caller's role and the live
@@ -329,6 +350,21 @@ pub const STYLES: &str = r##"
   overflow-wrap: anywhere;
 }
 
+.lobby-sessions {
+  display: grid;
+  gap: .5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lobby-session {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .5rem .75rem;
+}
+
 .lobby-main {
   width: min(100% - 1.5rem, 76rem);
   margin: 0 auto;
@@ -426,6 +462,9 @@ fn Lobby(view: ConsoleView, refresh: EventHandler<()>) -> Element {
                 CardGrid {
                     GameCard { data: data.as_ref().clone() }
                     SessionCard { data: data.as_ref().clone(), refresh }
+                    if data.role == Role::Admin && !data.session_users.is_empty() {
+                        SessionsCard { users: data.session_users.clone(), refresh }
+                    }
                     if data.role != Role::Player {
                         InviteCard { join_url: data.join_url.clone() }
                     }
@@ -648,6 +687,55 @@ fn apply(call: SessionCall, error: Signal<Option<String>>, refresh: EventHandler
     });
 }
 
+/// Admin-only list of principals with live sessions and a revoke control per
+/// principal (D5, G6).
+#[component]
+fn SessionsCard(users: Vec<SessionUser>, refresh: EventHandler<()>) -> Element {
+    let error = use_signal(|| None::<String>);
+    rsx! {
+        article { class: "tartan-card",
+            p { class: "tartan-eyebrow", "Active sessions" }
+            h2 { "Revoke sessions" }
+            if let Some(message) = error() {
+                FeedbackBanner { feedback: Feedback { kind: FeedbackKind::Error, message } }
+            }
+            ul { class: "lobby-sessions",
+                for user in users {
+                    li { class: "lobby-session",
+                        span { class: "lobby-account__name", {user.name} }
+                        if let Some(email) = user.email {
+                            span { class: "tartan-muted", {email} }
+                        }
+                        span { class: "tartan-tag", {user.kinds.join(", ")} }
+                        button {
+                            class: "tartan-button",
+                            r#type: "button",
+                            onclick: {
+                                let subject = user.subject.clone();
+                                move |_| revoke(subject.clone(), error, refresh)
+                            },
+                            "Revoke sessions"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One revoke button: run the server function, then reload the view or say why
+/// it was refused.
+fn revoke(subject: String, error: Signal<Option<String>>, refresh: EventHandler<()>) {
+    let mut error = error;
+    spawn(async move {
+        match revoke_sessions(subject).await {
+            Ok(None) => refresh.call(()),
+            Ok(Some(code)) => error.set(Some(session_error_message(&code).to_owned())),
+            Err(_) => error.set(Some("unavailable".into())),
+        }
+    });
+}
+
 fn phase_label(phase: SessionPhase) -> &'static str {
     match phase {
         SessionPhase::Setup => "The GM is in Foundry Setup.",
@@ -667,6 +755,7 @@ fn session_error_message(code: &str) -> &'static str {
         "session_phase_conflict" => "The session is not in a state that allows that.",
         "foundry_unavailable" => "Foundry did not answer; try again in a moment.",
         "lease_not_configured" => "Session controls are not configured on this server.",
+        "not_signed_in" => "Sign in again to continue.",
         _ => "That did not work; try again in a moment.",
     }
 }
@@ -708,6 +797,7 @@ mod tests {
             can_start_session: role != Role::Player,
             unmanaged_world: false,
             adoption_pending: false,
+            session_users: Vec::new(),
         }
     }
 
@@ -937,5 +1027,33 @@ mod tests {
         ))));
         assert!(html.contains("Session held by Piotr"));
         assert!(!html.contains("End session"));
+    }
+
+    fn session_user() -> SessionUser {
+        SessionUser {
+            subject: "subject".into(),
+            name: "Robin".into(),
+            email: Some("robin@example.test".into()),
+            kinds: vec!["platform".into(), "play".into()],
+        }
+    }
+
+    #[test]
+    fn only_an_admin_sees_the_revoke_list() {
+        let mut admin = data(Role::Admin, LiveGame::None);
+        admin.session_users = vec![session_user()];
+        let html = render(ConsoleView::Console(Box::new(admin)));
+        assert!(html.contains("Revoke sessions"));
+        assert!(html.contains("Robin"));
+        assert!(html.contains("robin@example.test"));
+        // Both hosts are named; the token itself never is.
+        assert!(html.contains("platform, play"));
+
+        // The view never fills the list for a player, and the card is
+        // admin-only even if it did.
+        let mut player = data(Role::Player, LiveGame::None);
+        player.session_users = vec![session_user()];
+        let html = render(ConsoleView::Console(Box::new(player)));
+        assert!(!html.contains("Revoke sessions"));
     }
 }

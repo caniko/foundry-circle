@@ -184,12 +184,43 @@ pub async fn gate(State(state): State<AppState>, headers: HeaderMap) -> Response
         )
             .into_response();
     };
-    let principal = match play_principal(&pool, &headers).await {
-        Ok(principal) => principal,
+    let row = match play_row(&pool, &headers).await {
+        Ok(row) => row,
         Err(error) => {
             tracing::warn!(%error, "failed to resolve a play-host session");
             return (StatusCode::INTERNAL_SERVER_ERROR, "session lookup error").into_response();
         }
+    };
+    // D5: identity is revalidated inside the gate, and only identity is cached
+    // (5 s in the row's `validated_at`).
+    let principal = match row.as_ref() {
+        None => None,
+        Some(row) => match auth::revalidate(auth, &pool, row).await {
+            auth::Revalidated::Valid(principal) => Some(principal),
+            auth::Revalidated::Revoked => {
+                if let Err(error) = auth::revoke_subject(
+                    &state,
+                    &row.principal.subject,
+                    auth::RevokeReason::Revoked,
+                )
+                .await
+                {
+                    tracing::warn!(error = %error, "failed to revoke a rejected play session");
+                    return (StatusCode::SERVICE_UNAVAILABLE, "session revocation failed")
+                        .into_response();
+                }
+                return lobby_redirect(platform, Denial::NoAccess);
+            }
+            auth::Revalidated::Stale => {
+                auth::invalidate_session(&pool, &row.token_hash).await;
+                return lobby_redirect(platform, Denial::SignedOut);
+            }
+            auth::Revalidated::Unavailable => {
+                // D6: refuse new requests while Rauthy cannot answer. The
+                // stream_reauth probe lets an open socket be.
+                return (StatusCode::SERVICE_UNAVAILABLE, "Rauthy is unavailable").into_response();
+            }
+        },
     };
     // ponytail: every gated request reads the lease from PostgreSQL; cache the
     // open lease in memory and update it on each transition if the added
@@ -263,17 +294,12 @@ pub async fn setup(State(state): State<AppState>, headers: HeaderMap) -> Respons
         )
             .into_response();
     };
-    let principal = match play_principal(&pool, &headers).await {
-        Ok(principal) => principal,
-        Err(error) => {
-            tracing::warn!(%error, "failed to resolve a play-host session");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "session lookup error").into_response();
-        }
-    };
-    let Some(principal) = principal else {
-        // A holder arriving from the lobby has only a platform session: log
-        // in on this host first, then come straight back here.
-        return play_login_redirect(SETUP_ROUTE);
+    let principal = match play_principal(&state, auth, &pool, &headers, platform).await {
+        Ok(Some(principal)) => principal,
+        // A holder arriving from the lobby has only a platform session:
+        // log in on this host first, then come straight back here.
+        Ok(None) => return play_login_redirect(SETUP_ROUTE),
+        Err(response) => return response,
     };
     if !principal.groups.contains(&auth.access_group) {
         return lobby_redirect(platform, Denial::NoAccess);
@@ -351,15 +377,10 @@ pub async fn enter(State(state): State<AppState>, headers: HeaderMap) -> Respons
         )
             .into_response();
     };
-    let principal = match play_principal(&pool, &headers).await {
-        Ok(principal) => principal,
-        Err(error) => {
-            tracing::warn!(%error, "failed to resolve a play-host session");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "session lookup error").into_response();
-        }
-    };
-    let Some(principal) = principal else {
-        return play_login_redirect(ENTER_ROUTE);
+    let principal = match play_principal(&state, auth, &pool, &headers, platform).await {
+        Ok(Some(principal)) => principal,
+        Ok(None) => return play_login_redirect(ENTER_ROUTE),
+        Err(response) => return response,
     };
     if !principal.groups.contains(&auth.access_group) {
         return lobby_redirect(platform, Denial::NoAccess);
@@ -464,16 +485,93 @@ fn forwarded<'a>(headers: &'a HeaderMap, name: &'static str) -> Option<&'a str> 
     headers.get(name).and_then(|value| value.to_str().ok())
 }
 
-/// The play-host session behind this request, if any.
-async fn play_principal(
+/// The play-host session row behind this request, if any.
+async fn play_row(
     pool: &PgPool,
     headers: &HeaderMap,
-) -> Result<Option<Principal>, sqlx::Error> {
+) -> Result<Option<auth::SessionRow>, sqlx::Error> {
     let Some(token) = auth::cookie(headers, PLAY_SESSION_COOKIE) else {
         return Ok(None);
     };
     let hash = SessionToken::hash_value(token);
-    auth::session_principal(pool, &hash, LoginHost::Play.kind()).await
+    auth::session_row(pool, &hash, LoginHost::Play.kind()).await
+}
+
+/// What `/_circle/setup` and `/_circle/enter` do with one revalidation answer.
+/// It is the gate's table, except that a browser without a usable session logs
+/// in on this host instead of being sent to the lobby signed out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaySession {
+    /// The identity is valid: the route may continue.
+    Valid,
+    /// No usable session (none, or a legacy row invalidated here): log in.
+    Login,
+    /// The identity is gone: revoke the subject and send it to the lobby.
+    Revoke,
+    /// Rauthy cannot answer: refuse this request for now.
+    Unavailable,
+}
+
+fn play_session(outcome: auth::Revalidation) -> PlaySession {
+    match outcome {
+        auth::Revalidation::Valid => PlaySession::Valid,
+        auth::Revalidation::Revoked => PlaySession::Revoke,
+        auth::Revalidation::Stale => PlaySession::Login,
+        auth::Revalidation::Unavailable => PlaySession::Unavailable,
+    }
+}
+
+/// The revalidated play-host principal behind this request (D5). Setup and
+/// enter hand out Foundry credentials, so a removed or disabled identity must
+/// not reach either: they share this check with the gate's revalidation, never
+/// trusting the stored row on its own. `Ok(None)` is a signed-out request the
+/// caller sends to this host's login; `Err` is a response it must return as-is.
+#[allow(
+    clippy::result_large_err,
+    reason = "the error is the axum response returned as-is; boxing it only adds noise"
+)]
+async fn play_principal(
+    state: &AppState,
+    auth: &auth::AuthState,
+    pool: &PgPool,
+    headers: &HeaderMap,
+    platform: &str,
+) -> Result<Option<Principal>, Response> {
+    let row = match play_row(pool, headers).await {
+        Ok(row) => row,
+        Err(error) => {
+            tracing::warn!(%error, "failed to resolve a play-host session");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "session lookup error").into_response());
+        }
+    };
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let outcome = auth::revalidate(auth, pool, &row).await;
+    match play_session(outcome.outcome()) {
+        PlaySession::Valid => Ok(outcome.principal()),
+        PlaySession::Login => {
+            // A row from before tokens were stored cannot be revalidated: sign
+            // this browser out and let it log in again.
+            auth::invalidate_session(pool, &row.token_hash).await;
+            Ok(None)
+        }
+        PlaySession::Revoke => {
+            if let Err(error) =
+                auth::revoke_subject(state, &row.principal.subject, auth::RevokeReason::Revoked)
+                    .await
+            {
+                tracing::warn!(error = %error, "failed to revoke a rejected play session");
+                return Err(
+                    (StatusCode::SERVICE_UNAVAILABLE, "session revocation failed").into_response(),
+                );
+            }
+            Err(lobby_redirect(platform, Denial::NoAccess))
+        }
+        PlaySession::Unavailable => {
+            Err((StatusCode::SERVICE_UNAVAILABLE, "Rauthy is unavailable").into_response())
+        }
+    }
 }
 
 /// The holder's way into Foundry Setup on the play host.
@@ -802,6 +900,24 @@ mod tests {
         admin.adopted = false;
         admin.is_admin = true;
         assert!(allowed(&admin));
+    }
+
+    #[test]
+    fn setup_and_enter_follow_the_revalidation_table() {
+        // Both routes hand out Foundry credentials, so they apply the gate's
+        // revalidation answer before reading the lease: a removed identity is
+        // revoked and sent to the lobby, an outage is refused, a legacy row is
+        // signed out, and only a valid identity proceeds.
+        assert_eq!(play_session(auth::Revalidation::Valid), PlaySession::Valid);
+        assert_eq!(
+            play_session(auth::Revalidation::Revoked),
+            PlaySession::Revoke
+        );
+        assert_eq!(play_session(auth::Revalidation::Stale), PlaySession::Login);
+        assert_eq!(
+            play_session(auth::Revalidation::Unavailable),
+            PlaySession::Unavailable
+        );
     }
 
     #[test]

@@ -16,7 +16,10 @@ use serde_json::json;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
-use crate::{Role, http::AppState};
+use crate::{
+    Role,
+    http::{AppState, session},
+};
 
 #[derive(Clone)]
 pub struct AuthState {
@@ -278,6 +281,8 @@ pub async fn require_session(
         )
             .into_response();
     }
+    // Every authenticated request from the holder counts as presence (D3).
+    session::touch(&pool, &principal.subject).await;
     request.extensions_mut().insert(principal);
     next.run(request).await
 }
@@ -297,6 +302,15 @@ pub async fn optional_session(
     ) {
         match session_principal(&pool, &SessionToken::hash_value(token)).await {
             Ok(Some(principal)) => {
+                // Console use by the holder counts as presence too (D3).
+                if state.auth.as_ref().is_some_and(|auth| {
+                    principal
+                        .groups
+                        .iter()
+                        .any(|group| group == &auth.access_group)
+                }) {
+                    session::touch(&pool, &principal.subject).await;
+                }
                 request.extensions_mut().insert(principal);
             }
             Ok(None) => {}

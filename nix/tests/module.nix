@@ -24,6 +24,7 @@
         foundryWorld = {
           baseUrl = "https://vtt.example";
           apiPasswordFile = "/run/agenix/foundry-circle-api-password";
+          adminPasswordFile = "/run/agenix/foundry-admin-password";
           worldId = "foundry-circle-canary";
           foundryVersion = "13.351";
           systemId = "daggerheart";
@@ -49,6 +50,14 @@ in
   assert enabled.config.systemd.services.foundry-circle.serviceConfig.ExecStart == "${package}/bin/foundry-circle";
   assert enabled.config.systemd.services.foundry-circle.environment.FOUNDRY_WORLD_ID == "foundry-circle-canary";
   assert builtins.elem "api-password:/run/agenix/foundry-circle-api-password" enabled.config.systemd.services.foundry-circle.serviceConfig.LoadCredential;
+  assert builtins.elem "admin-password:/run/agenix/foundry-admin-password" enabled.config.systemd.services.foundry-circle.serviceConfig.LoadCredential;
+  assert enabled.config.systemd.services.foundry-circle.environment.FOUNDRY_ADMIN_PASSWORD_FILE == "/run/credentials/foundry-circle.service/admin-password";
+  assert enabled.config.systemd.services.foundry-circle.environment.FOUNDRY_CIRCLE_RESTART_UNIT == "foundryvtt.service";
+  assert enabled.config.systemd.services.foundry-circle.environment.FOUNDRY_CIRCLE_SYSTEMCTL == "${enabled.config.systemd.package}/bin/systemctl";
+  assert pkgs.lib.hasInfix "org.freedesktop.systemd1.manage-units" enabled.config.security.polkit.extraConfig;
+  assert pkgs.lib.hasInfix "action.lookup(\"unit\") == \"foundryvtt.service\"" enabled.config.security.polkit.extraConfig;
+  assert pkgs.lib.hasInfix "action.lookup(\"verb\") == \"restart\"" enabled.config.security.polkit.extraConfig;
+  assert !(pkgs.lib.hasInfix "org.freedesktop.systemd1.manage-units" disabled.config.security.polkit.extraConfig);
   assert builtins.elem "foundry_circle" enabled.config.services.postgresql.ensureDatabases;
   assert pkgs.lib.any (user: user.name == "foundry-circle") enabled.config.services.postgresql.ensureUsers;
   assert builtins.elem 8032 enabled.config.networking.firewall.allowedTCPPorts;

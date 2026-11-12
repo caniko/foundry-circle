@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 use tokio::{sync::RwLock, time::sleep};
+use uuid::Uuid;
 
 use crate::{
     ConsoleData, ConsoleView, LiveGame, Role,
@@ -22,12 +23,16 @@ use crate::{
 #[path = "auth.rs"]
 pub mod auth;
 
+#[path = "session.rs"]
+pub mod session;
+
 #[derive(Clone)]
 pub struct AppState {
     pub driver: Arc<dyn FoundryDriver>,
     pub database: DatabaseState,
     pub auth: Option<auth::AuthState>,
     pub console: ConsoleLinks,
+    pub lease: session::Lease,
 }
 
 /// Origins the lobby links to and polls; all optional so a partially
@@ -175,6 +180,7 @@ impl AppState {
             database: DatabaseState::new(),
             auth: None,
             console: ConsoleLinks::default(),
+            lease: session::Lease::default(),
         }
     }
 }
@@ -229,6 +235,13 @@ struct IdPayload {
     id: String,
 }
 
+/// Session routes only take the id; the body's JSON content type is the CSRF
+/// guard that pairs with the SameSite=Lax cookie.
+#[derive(Debug, Deserialize)]
+pub struct SessionIdRequest {
+    pub id: Uuid,
+}
+
 #[derive(Debug, Deserialize)]
 struct CombatUpdatePayload {
     action: String,
@@ -250,6 +263,9 @@ pub fn api_router_with_state(state: AppState) -> Router {
     let protected = Router::new()
         .route("/api/v1", get(discovery))
         .route("/api/v1/me", get(me))
+        .route("/api/v1/session", get(session_status).post(session_start))
+        .route("/api/v1/session/setup", post(session_setup))
+        .route("/api/v1/session/stop", post(session_stop))
         .route("/api/v1/world", get(world))
         .route("/api/v1/world/capabilities", get(capabilities))
         .route("/api/v1/world/documents/{collection}", get(documents))
@@ -342,18 +358,132 @@ pub async fn console_view() -> ConsoleView {
     let role = principal.role(&auth.admin_group, auth.gm_group.as_deref());
     let links = &state.console;
     let join = |origin: &Option<String>, path: &str| origin.as_ref().map(|o| format!("{o}{path}"));
+    let game = live_game(links.foundry_url.as_deref()).await;
+    let open = match state.database.pool().await {
+        Some(pool) => session::open(&pool).await.unwrap_or_else(|error| {
+            tracing::warn!(%error, "failed to read the open Foundry Circle session");
+            None
+        }),
+        None => None,
+    };
+    let unmanaged = open.is_none() && matches!(game, LiveGame::Live(_));
+    let session = open
+        .as_ref()
+        .map(|open| session::view(open, &principal.subject));
     ConsoleView::Console(Box::new(ConsoleData {
         name,
         email: principal.email.clone(),
         role,
-        game: live_game(links.foundry_url.as_deref()).await,
+        game,
         join_url: join(&links.play_url, "/join"),
         setup_url: (role != Role::Player)
             .then(|| join(&links.platform_url, "/setup"))
             .flatten(),
         world_state: state.driver.world_state(),
         database: state.database.is_ready().await,
+        can_start_session: session::may_start(role) && session.is_none() && !unmanaged,
+        session,
+        unmanaged_world: unmanaged,
     }))
+}
+
+/// The lobby's server functions run the same lease operations as the JSON
+/// routes, so the two surfaces cannot drift.
+/// The signed-in access-group member behind a console mutation. Server
+/// functions run under `optional_session`, so this repeats the access-group
+/// check `require_session` makes, and accepts only same-origin requests: the
+/// console's own fetch carries `Origin` equal to the platform origin, while
+/// a form or fetch from any other origin (including same-site siblings that
+/// SameSite=Lax lets through) does not.
+fn console_actor() -> Option<(AppState, auth::Principal)> {
+    use dioxus::fullstack::FullstackContext;
+    let context = FullstackContext::current()?;
+    let state = context.extension::<AppState>()?;
+    let principal = context.extension::<auth::Principal>()?;
+    let auth = state.auth.as_ref()?;
+    if !principal.groups.contains(&auth.access_group) {
+        return None;
+    }
+    let origin = context
+        .parts_mut()
+        .headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    if !same_origin(origin.as_deref(), state.console.platform_url.as_deref()) {
+        return None;
+    }
+    Some((state, principal))
+}
+
+/// A mutation's `Origin` must equal the configured platform origin exactly.
+fn same_origin(origin: Option<&str>, platform: Option<&str>) -> bool {
+    matches!((origin, platform), (Some(origin), Some(platform)) if origin == platform)
+}
+
+pub async fn console_start() -> Option<String> {
+    let Some((state, principal)) = console_actor() else {
+        return Some("not_signed_in".into());
+    };
+    let Some(auth) = state.auth.as_ref() else {
+        return Some("not_signed_in".into());
+    };
+    if !session::may_start(principal.role(&auth.admin_group, auth.gm_group.as_deref())) {
+        return Some("permission_denied".into());
+    }
+    let Some(pool) = state.database.pool().await else {
+        return Some("database_unavailable".into());
+    };
+    session::start(&pool, &state.lease, &principal.subject)
+        .await
+        .err()
+        .map(|error| lease_code(error).to_owned())
+}
+
+pub async fn console_setup(id: &str) -> Option<String> {
+    let Some((state, principal)) = console_actor() else {
+        return Some("not_signed_in".into());
+    };
+    let Some(auth) = state.auth.as_ref() else {
+        return Some("not_signed_in".into());
+    };
+    let Some(id) = Uuid::parse_str(id).ok() else {
+        return Some("session_not_found".into());
+    };
+    let Some(pool) = state.database.pool().await else {
+        return Some("database_unavailable".into());
+    };
+    let caller = session::Caller {
+        subject: &principal.subject,
+        is_admin: principal.is_admin(&auth.admin_group),
+    };
+    session::return_to_setup(&pool, &state.lease, id, caller)
+        .await
+        .err()
+        .map(|error| lease_code(error).to_owned())
+}
+
+pub async fn console_stop(id: &str) -> Option<String> {
+    let Some((state, principal)) = console_actor() else {
+        return Some("not_signed_in".into());
+    };
+    let Some(auth) = state.auth.as_ref() else {
+        return Some("not_signed_in".into());
+    };
+    let Some(id) = Uuid::parse_str(id).ok() else {
+        return Some("session_not_found".into());
+    };
+    let Some(pool) = state.database.pool().await else {
+        return Some("database_unavailable".into());
+    };
+    let caller = session::Caller {
+        subject: &principal.subject,
+        is_admin: principal.is_admin(&auth.admin_group),
+    };
+    session::stop(&pool, &state.lease, id, caller, "stop")
+        .await
+        .err()
+        .map(|error| lease_code(error).to_owned())
 }
 
 async fn discovery() -> impl IntoResponse {
@@ -381,7 +511,159 @@ async fn me(Extension(principal): Extension<auth::Principal>) -> impl IntoRespon
     }))
 }
 
-async fn world(State(state): State<AppState>) -> impl IntoResponse {
+fn database_unavailable() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": "database_unavailable"})),
+    )
+        .into_response()
+}
+
+/// The refusal code, logged with the database text kept server-side.
+fn lease_code(error: session::LeaseError) -> &'static str {
+    match &error {
+        session::LeaseError::Database(source) => {
+            tracing::warn!(error = %source, "session lease database operation failed");
+        }
+        other => tracing::warn!(error = other.code(), "session lease operation refused"),
+    }
+    error.code()
+}
+
+fn lease_response(error: session::LeaseError) -> Response {
+    let status = error.status();
+    (status, Json(json!({"error": lease_code(error)}))).into_response()
+}
+
+fn permission_denied() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({"error": "permission_denied"})),
+    )
+        .into_response()
+}
+
+/// The one open lease, for the API and console. Any access-group member may
+/// see it; only the holder and admins may act on it.
+async fn session_status(
+    State(state): State<AppState>,
+    Extension(principal): Extension<auth::Principal>,
+) -> Response {
+    let Some(pool) = state.database.pool().await else {
+        return database_unavailable();
+    };
+    let open = match session::open(&pool).await {
+        Ok(open) => open,
+        Err(error) => {
+            tracing::warn!(%error, "failed to read the open Foundry Circle session");
+            return database_unavailable();
+        }
+    };
+    // Only an observation when nothing is leased: a world with no lease is
+    // what the console reports as unmanaged.
+    let unmanaged = open.is_none()
+        && matches!(
+            state.lease.observe().await,
+            session::FoundryObservation::Active { .. }
+        );
+    let view = open
+        .as_ref()
+        .map(|open| session::view(open, &principal.subject));
+    (
+        StatusCode::OK,
+        Json(json!({"session": view, "unmanaged": unmanaged})),
+    )
+        .into_response()
+}
+
+async fn session_start(
+    State(state): State<AppState>,
+    Extension(principal): Extension<auth::Principal>,
+    Json(_guard): Json<Value>,
+) -> Response {
+    let Some(auth) = state.auth.as_ref() else {
+        return oidc_not_configured();
+    };
+    if !session::may_start(principal.role(&auth.admin_group, auth.gm_group.as_deref())) {
+        return permission_denied();
+    }
+    let Some(pool) = state.database.pool().await else {
+        return database_unavailable();
+    };
+    match session::start(&pool, &state.lease, &principal.subject).await {
+        Ok(open) => (
+            StatusCode::OK,
+            Json(json!({
+                "session": session::view(&open, &principal.subject),
+                "unmanaged": false,
+            })),
+        )
+            .into_response(),
+        Err(error) => lease_response(error),
+    }
+}
+
+async fn session_setup(
+    State(state): State<AppState>,
+    Extension(principal): Extension<auth::Principal>,
+    Json(request): Json<SessionIdRequest>,
+) -> Response {
+    let Some(auth) = state.auth.as_ref() else {
+        return oidc_not_configured();
+    };
+    let Some(pool) = state.database.pool().await else {
+        return database_unavailable();
+    };
+    let caller = session::Caller {
+        subject: &principal.subject,
+        is_admin: principal.is_admin(&auth.admin_group),
+    };
+    match session::return_to_setup(&pool, &state.lease, request.id, caller).await {
+        Ok(open) => (
+            StatusCode::OK,
+            Json(json!({"session": session::view(&open, &principal.subject), "unmanaged": false})),
+        )
+            .into_response(),
+        Err(error) => lease_response(error),
+    }
+}
+
+async fn session_stop(
+    State(state): State<AppState>,
+    Extension(principal): Extension<auth::Principal>,
+    Json(request): Json<SessionIdRequest>,
+) -> Response {
+    let Some(auth) = state.auth.as_ref() else {
+        return oidc_not_configured();
+    };
+    let Some(pool) = state.database.pool().await else {
+        return database_unavailable();
+    };
+    let caller = session::Caller {
+        subject: &principal.subject,
+        is_admin: principal.is_admin(&auth.admin_group),
+    };
+    match session::stop(&pool, &state.lease, request.id, caller, "stop").await {
+        Ok(open) => (
+            StatusCode::OK,
+            Json(json!({"session": session::view(&open, &principal.subject), "unmanaged": false})),
+        )
+            .into_response(),
+        Err(error) => lease_response(error),
+    }
+}
+
+async fn world(
+    State(state): State<AppState>,
+    Extension(principal): Extension<auth::Principal>,
+) -> Response {
+    if let Err(response) = require_reader(&state, &principal).await {
+        return response;
+    }
+    world_response(&state)
+}
+
+fn world_response(state: &AppState) -> Response {
     let snapshot = state.driver.snapshot();
     let descriptor = WorldDescriptor {
         id: snapshot.id.clone().unwrap_or_else(|| "active".to_string()),
@@ -393,7 +675,7 @@ async fn world(State(state): State<AppState>) -> impl IntoResponse {
         is_gm: snapshot.is_gm,
     };
     if descriptor.state == WorldState::Ready {
-        (StatusCode::OK, Json(serde_json::json!(descriptor)))
+        (StatusCode::OK, Json(serde_json::json!(descriptor))).into_response()
     } else {
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -402,6 +684,7 @@ async fn world(State(state): State<AppState>) -> impl IntoResponse {
                 "world": descriptor,
             })),
         )
+            .into_response()
     }
 }
 
@@ -429,19 +712,47 @@ fn oidc_not_configured() -> Response {
 }
 
 /// Players share the access group with the GM browser session, so document
-/// reads must not fall through to what that session can see.
-fn require_reader(
+/// reads must not fall through to what that session can see. Reads follow the
+/// lease: its holder and admins, nobody else. A player is never a holder
+/// (`may_start` refuses them), so the role check is belt and braces.
+fn reader_allowed(
     principal: &auth::Principal,
     admin_group: &str,
     gm_group: Option<&str>,
-) -> Result<(), (StatusCode, Json<Value>)> {
-    if principal.role(admin_group, gm_group) == Role::Player {
-        Err((
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "permission_denied"})),
-        ))
-    } else {
+    holder: Option<&str>,
+) -> bool {
+    let role = principal.role(admin_group, gm_group);
+    role == Role::Admin || (role == Role::Gm && holder == Some(principal.subject.as_str()))
+}
+
+/// `reader_allowed` plus the holder lookup; a read fails closed without one.
+#[allow(
+    clippy::result_large_err,
+    reason = "the error is the axum response returned as-is; boxing it only adds noise"
+)]
+async fn require_reader(state: &AppState, principal: &auth::Principal) -> Result<(), Response> {
+    let Some(auth) = state.auth.as_ref() else {
+        return Err(oidc_not_configured());
+    };
+    let Some(pool) = state.database.pool().await else {
+        return Err(database_unavailable());
+    };
+    let holder = match session::open(&pool).await {
+        Ok(open) => open.map(|open| open.holder),
+        Err(error) => {
+            tracing::warn!(%error, "failed to read the open Foundry Circle session");
+            return Err(database_unavailable());
+        }
+    };
+    if reader_allowed(
+        principal,
+        &auth.admin_group,
+        auth.gm_group.as_deref(),
+        holder.as_deref(),
+    ) {
         Ok(())
+    } else {
+        Err(permission_denied())
     }
 }
 
@@ -451,13 +762,8 @@ async fn documents(
     Path(collection): Path<String>,
     Query(query): Query<DocumentQuery>,
 ) -> Response {
-    let Some(auth) = state.auth.as_ref() else {
-        return oidc_not_configured();
-    };
-    if let Err((status, body)) =
-        require_reader(&principal, &auth.admin_group, auth.gm_group.as_deref())
-    {
-        return (status, body).into_response();
+    if let Err(response) = require_reader(&state, &principal).await {
+        return response;
     }
     read_documents(
         state.driver.as_ref(),
@@ -473,13 +779,8 @@ async fn document(
     Extension(principal): Extension<auth::Principal>,
     Path((collection, id)): Path<(String, String)>,
 ) -> Response {
-    let Some(auth) = state.auth.as_ref() else {
-        return oidc_not_configured();
-    };
-    if let Err((status, body)) =
-        require_reader(&principal, &auth.admin_group, auth.gm_group.as_deref())
-    {
-        return (status, body).into_response();
+    if let Err(response) = require_reader(&state, &principal).await {
+        return response;
     }
     read_document(state.driver.as_ref(), &collection, &id).await
 }
@@ -890,6 +1191,7 @@ mod tests {
             database: DatabaseState::new(),
             auth: None,
             console: ConsoleLinks::default(),
+            lease: session::Lease::default(),
         };
         let response = readyz(State(state.clone())).await.into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -899,10 +1201,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["state"], "ready");
         assert_eq!(body["ready"], false);
-        assert_eq!(
-            world(State(state)).await.into_response().status(),
-            StatusCode::OK
-        );
+        assert_eq!(world_response(&state).status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -949,7 +1248,7 @@ mod tests {
             })),
             ..AppState::unconfigured()
         };
-        let response = world(State(state)).await.into_response();
+        let response = world_response(&state);
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 1024)
             .await
@@ -977,6 +1276,20 @@ mod tests {
         let requests = [
             Request::get("/api/v1").body(Body::empty()),
             Request::get("/api/v1/me").body(Body::empty()),
+            Request::get("/api/v1/session").body(Body::empty()),
+            Request::post("/api/v1/session")
+                .header("content-type", "application/json")
+                .body(Body::from("{}")),
+            Request::post("/api/v1/session/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"id":"0b6f4c2e-0000-4000-8000-000000000000"}"#,
+                )),
+            Request::post("/api/v1/session/stop")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"id":"0b6f4c2e-0000-4000-8000-000000000000"}"#,
+                )),
             Request::get("/api/v1/world").body(Body::empty()),
             Request::get("/api/v1/world/capabilities").body(Body::empty()),
             Request::get("/api/v1/world/documents/actors").body(Body::empty()),
@@ -1023,18 +1336,57 @@ mod tests {
     #[tokio::test]
     async fn players_cannot_read_world_documents() {
         let player = principal(&["foundry-circle-users"]);
-        let (status, Json(body)) =
-            require_reader(&player, "foundry-circle-admins", Some("foundry-circle-gms"))
-                .unwrap_err();
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert_eq!(body["error"], "permission_denied");
+        assert!(!reader_allowed(
+            &player,
+            "foundry-circle-admins",
+            Some("foundry-circle-gms"),
+            None
+        ));
+        // Even naming the player as the holder does not open a GM-only read.
+        assert!(!reader_allowed(
+            &player,
+            "foundry-circle-admins",
+            Some("foundry-circle-gms"),
+            Some("subject")
+        ));
+    }
+
+    #[tokio::test]
+    async fn only_the_session_holder_or_an_admin_reads_world_documents() {
+        let gm = principal(&["foundry-circle-users", "foundry-circle-gms"]);
+        let admin = principal(&[
+            "foundry-circle-users",
+            "foundry-circle-gms",
+            "foundry-circle-admins",
+        ]);
+        assert!(!reader_allowed(
+            &gm,
+            "foundry-circle-admins",
+            Some("foundry-circle-gms"),
+            None
+        ));
+        assert!(!reader_allowed(
+            &gm,
+            "foundry-circle-admins",
+            Some("foundry-circle-gms"),
+            Some("another-gm")
+        ));
+        assert!(reader_allowed(
+            &gm,
+            "foundry-circle-admins",
+            Some("foundry-circle-gms"),
+            Some("subject")
+        ));
+        assert!(reader_allowed(
+            &admin,
+            "foundry-circle-admins",
+            Some("foundry-circle-gms"),
+            None
+        ));
     }
 
     #[tokio::test]
     async fn gms_read_fixture_documents_with_a_stable_etag() {
-        let gm = principal(&["foundry-circle-users", "foundry-circle-gms"]);
-        assert!(require_reader(&gm, "foundry-circle-admins", Some("foundry-circle-gms")).is_ok());
-
         let driver = FakeDriver::new(WorldState::Ready);
         let first = read_document(&driver, "actors", "a1").await;
         assert_eq!(first.status(), StatusCode::OK);
@@ -1125,5 +1477,15 @@ mod tests {
             LiveGame::from_status(serde_json::from_str(idle).unwrap()),
             LiveGame::None
         ));
+    }
+
+    #[test]
+    fn console_mutations_require_the_exact_platform_origin() {
+        let platform = Some("https://vtt.example");
+        assert!(same_origin(Some("https://vtt.example"), platform));
+        assert!(!same_origin(None, platform));
+        assert!(!same_origin(Some("https://play.vtt.example"), platform));
+        assert!(!same_origin(Some("https://vtt.example.evil"), platform));
+        assert!(!same_origin(Some("https://vtt.example"), None));
     }
 }

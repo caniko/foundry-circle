@@ -27,6 +27,7 @@ axum = { version = "0.8", features = ["macros"] }
 tokio = { version = "1", features = [
   "macros",
   "net",
+  "process",
   "rt",
   "rt-multi-thread",
   "signal",

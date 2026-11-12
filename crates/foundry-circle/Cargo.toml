@@ -33,6 +33,7 @@ server = [
   "dep:futures-util",
   "dep:sha2",
   "dep:hex",
+  "dep:hmac",
 ]
 devtools = ["dioxus/devtools", "tartan-ui-dioxus/devtools"]
 
@@ -51,6 +52,7 @@ chromiumoxide = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
+hmac = { workspace = true, optional = true }
 theme-broker.workspace = true
 
 axum = { workspace = true, optional = true }

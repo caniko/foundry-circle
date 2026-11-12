@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let driver_config = DriverConfig::from_env()?;
     let console = ConsoleLinks::from_env(&driver_config.base_url);
     let lease = foundry_circle::http::session::Lease::from_env(&driver_config.base_url);
-    let driver = LiveFoundryDriver::start(driver_config);
+    let driver = LiveFoundryDriver::start(driver_config.clone());
 
     let state = FullstackState::new(ServeConfig::new(), foundry_circle::App);
     let pages = Router::<FullstackState>::new()
@@ -45,13 +45,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_state(state);
 
     let app_state = AppState {
-        driver,
+        driver: driver.clone(),
         database,
         auth: Some(oidc),
         console,
         lease: lease.clone(),
     };
-    foundry_circle::http::session::spawn_reconciler(app_state.database.clone(), lease);
+    foundry_circle::http::session::spawn_reconciler(
+        app_state.database.clone(),
+        lease,
+        driver,
+        driver_config,
+    );
     let app: Router = api_router_with_state(app_state.clone())
         .merge(pages.layer(from_fn_with_state(
             app_state.clone(),

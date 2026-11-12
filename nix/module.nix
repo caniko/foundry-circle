@@ -74,17 +74,17 @@ in {
       apiUser = lib.mkOption {
         type = lib.types.str;
         default = "foundry-circle-api";
-        description = "Dedicated Foundry-world API user name, provisioned in the live world.";
+        description = "Foundry user the broker drives the adopted world as. Adoption creates it (or reuses an existing user of this name) with a derived password; players never type it.";
       };
       baseUrl = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
         description = "Canonical Foundry origin used by the authenticated browser driver.";
       };
-      apiPasswordFile = lib.mkOption {
+      passwordSecretFile = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
         default = null;
-        description = "Runtime credential containing the dedicated Foundry API-user password.";
+        description = "Runtime HMAC secret for broker-mapped Foundry passwords (`/_circle/enter` and world adoption). Without it both answer 503.";
       };
       adminPasswordFile = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
@@ -95,10 +95,6 @@ in {
         type = lib.types.str;
         default = "foundryvtt.service";
         description = "systemd unit restarted when a session ends; the polkit rule is scoped to this unit's restart.";
-      };
-      worldId = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
-        default = null;
       };
       foundryVersion = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
@@ -117,7 +113,7 @@ in {
       playBaseUrl = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
-        description = "Public origin players join the live game from; the lobby links to `<playBaseUrl>/join`.";
+        description = "Public origin players join the live game from; the lobby links to `<playBaseUrl>/_circle/enter`.";
       };
       chromiumPackage = lib.mkOption {
         type = lib.types.package;
@@ -180,11 +176,9 @@ in {
         {
           assertion = lib.all (value: value != null) [
             cfg.foundryWorld.baseUrl
-            cfg.foundryWorld.apiPasswordFile
-            cfg.foundryWorld.worldId
             cfg.foundryWorld.foundryVersion
           ];
-          message = "services.foundry-circle.foundryWorld must define baseUrl, apiPasswordFile, worldId, and foundryVersion";
+          message = "services.foundry-circle.foundryWorld must define baseUrl and foundryVersion";
         }
       ];
 
@@ -205,8 +199,6 @@ in {
           {
             FOUNDRY_WORLD_API_USER = cfg.foundryWorld.apiUser;
             FOUNDRY_WORLD_BASE_URL = cfg.foundryWorld.baseUrl;
-            FOUNDRY_WORLD_API_PASSWORD_FILE = "/run/credentials/foundry-circle.service/api-password";
-            FOUNDRY_WORLD_ID = cfg.foundryWorld.worldId;
             FOUNDRY_EXPECTED_FOUNDRY_VERSION = cfg.foundryWorld.foundryVersion;
             FOUNDRY_EXPECTED_SYSTEM_ID = cfg.foundryWorld.systemId;
             FOUNDRY_EXPECTED_SYSTEM_VERSION = cfg.foundryWorld.systemVersion;
@@ -232,6 +224,9 @@ in {
           // lib.optionalAttrs (cfg.foundryWorld.adminPasswordFile != null) {
             FOUNDRY_ADMIN_PASSWORD_FILE = "/run/credentials/foundry-circle.service/admin-password";
           }
+          // lib.optionalAttrs (cfg.foundryWorld.passwordSecretFile != null) {
+            FOUNDRY_CIRCLE_PASSWORD_SECRET_FILE = "/run/credentials/foundry-circle.service/password-secret";
+          }
           // lib.optionalAttrs (cfg.oidc.issuer != null && cfg.oidc.clientId != null && cfg.oidc.publicBaseUrl != null) {
             FOUNDRY_CIRCLE_OIDC_ISSUER = cfg.oidc.issuer;
             FOUNDRY_CIRCLE_OIDC_CLIENT_ID = cfg.oidc.clientId;
@@ -256,7 +251,8 @@ in {
           ProtectHome = true;
           ReadWritePaths = ["/run/foundry-circle" "/var/lib/foundry-circle"];
           LoadCredential =
-            ["api-password:${cfg.foundryWorld.apiPasswordFile}"]
+            lib.optional (cfg.foundryWorld.passwordSecretFile != null)
+            "password-secret:${cfg.foundryWorld.passwordSecretFile}"
             ++ lib.optional (cfg.foundryWorld.adminPasswordFile != null)
             "admin-password:${cfg.foundryWorld.adminPasswordFile}"
             ++ lib.optional (cfg.database.urlFile != null)

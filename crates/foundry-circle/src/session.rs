@@ -9,17 +9,20 @@
 //! once the next poll still reports no active world.
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use axum::http::{HeaderMap, header};
+use axum::http::header;
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
+use crate::adoption;
+use crate::driver::{DriverConfig, LiveFoundryDriver};
 use crate::http::DatabaseState;
 use crate::{GameStatus, Role, SessionHolder, SessionPhase, SessionView};
 
@@ -111,6 +114,8 @@ pub struct OpenSession {
     pub holder_name: String,
     pub phase: SessionPhase,
     pub world_id: Option<String>,
+    /// The running world has completed adoption (G5).
+    pub adopted: bool,
     pub started_at: DateTime<Utc>,
     pub last_seen: DateTime<Utc>,
 }
@@ -139,6 +144,12 @@ pub struct Lease {
     config: Arc<LeaseConfig>,
     /// Session whose restart already succeeded; the next idle poll ends it.
     restarted: Arc<Mutex<Option<Uuid>>>,
+    /// The broker's own admin session for adoption, keyed by lease id. It is
+    /// never relayed to a browser or to the steady-state driver.
+    bootstrap: Arc<Mutex<HashMap<Uuid, String>>>,
+    /// The last adoption attempt, so a failing world does not start a
+    /// Chromium every poll.
+    adoption_attempt: Arc<Mutex<Option<(Uuid, Instant)>>>,
 }
 
 #[derive(Debug)]
@@ -159,6 +170,8 @@ impl Default for Lease {
                 systemctl: "systemctl".into(),
             }),
             restarted: Arc::new(Mutex::new(None)),
+            bootstrap: Arc::new(Mutex::new(HashMap::new())),
+            adoption_attempt: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -183,6 +196,8 @@ impl Lease {
                 systemctl: value("FOUNDRY_CIRCLE_SYSTEMCTL").unwrap_or_else(|| "systemctl".into()),
             }),
             restarted: Arc::new(Mutex::new(None)),
+            bootstrap: Arc::new(Mutex::new(HashMap::new())),
+            adoption_attempt: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -245,10 +260,11 @@ impl Lease {
         }
     }
 
-    /// Open a fresh admin session for the holder's visit to Foundry Setup: a
-    /// cookie-less `POST /auth` with the admin key, redirects disabled. The
-    /// body is form-encoded, as Foundry's own login form sends it; the caller
-    /// relays the returned `session` cookie and nothing is kept here.
+    /// Open a fresh admin session: a cookie-less `POST /auth` with the admin
+    /// key, redirects disabled. The body is form-encoded, as Foundry's own
+    /// login form sends it. `/_circle/setup` calls this once for the holder's
+    /// browser and once for the broker's adoption session; the broker keeps
+    /// the second cookie in memory and never relays it.
     pub async fn open_setup(&self) -> Result<String, SetupFailure> {
         let Some(base) = self.config.base_url.as_deref() else {
             return Err(SetupFailure);
@@ -263,7 +279,7 @@ impl Lease {
             .send()
             .await
             .map_err(|_| SetupFailure)?;
-        let session = foundry_session_cookie(reply.headers()).ok_or(SetupFailure)?;
+        let session = crate::driver::foundry_session_cookie(reply.headers()).ok_or(SetupFailure)?;
         let location = reply
             .headers()
             .get(header::LOCATION)
@@ -309,6 +325,55 @@ impl Lease {
 
     fn clear_restarted(&self) {
         *self.restarted.lock().expect("lease restart lock poisoned") = None;
+    }
+
+    /// Keep the broker's own admin session for this lease's adoption.
+    pub fn remember_bootstrap(&self, id: Uuid, cookie: String) {
+        self.bootstrap
+            .lock()
+            .expect("lease bootstrap lock poisoned")
+            .insert(id, cookie);
+    }
+
+    /// The adoption cookie, if this broker process obtained one. A restart
+    /// loses it: the world must return to Setup and relaunch to adopt.
+    pub fn bootstrap_cookie(&self, id: Uuid) -> Option<String> {
+        self.bootstrap
+            .lock()
+            .expect("lease bootstrap lock poisoned")
+            .get(&id)
+            .cloned()
+    }
+
+    pub fn forget_bootstrap(&self, id: Uuid) {
+        self.bootstrap
+            .lock()
+            .expect("lease bootstrap lock poisoned")
+            .remove(&id);
+    }
+
+    /// At most one adoption attempt every 30 s per lease.
+    pub fn adoption_due(&self, id: Uuid) -> bool {
+        let mut attempt = self
+            .adoption_attempt
+            .lock()
+            .expect("lease adoption lock poisoned");
+        match *attempt {
+            Some((attempted, at)) if attempted == id && at.elapsed() < Duration::from_secs(30) => {
+                false
+            }
+            _ => {
+                *attempt = Some((id, Instant::now()));
+                true
+            }
+        }
+    }
+
+    pub fn clear_adoption_attempt(&self) {
+        *self
+            .adoption_attempt
+            .lock()
+            .expect("lease adoption lock poisoned") = None;
     }
 }
 
@@ -384,7 +449,8 @@ impl From<sqlx::Error> for LeaseError {
 pub async fn open(pool: &PgPool) -> Result<Option<OpenSession>, sqlx::Error> {
     let row = sqlx::query(
         "SELECT s.id, s.holder, COALESCE(p.display_name, p.email, p.subject) AS holder_name,
-                s.phase, s.world_id, s.started_at, s.last_seen
+                s.phase, s.world_id, s.started_at, s.last_seen,
+                EXISTS (SELECT 1 FROM adopted_worlds a WHERE a.world_id = s.world_id) AS adopted
            FROM game_session s
            JOIN principals p ON p.subject = s.holder
           WHERE s.ended_at IS NULL",
@@ -530,33 +596,48 @@ pub async fn stop(
 }
 
 /// Record holder activity; called by every authenticated broker request.
+/// Best effort and detached: `/_circle/enter` holds the lease row lock across
+/// its Foundry round trips, and presence must never stall the gate behind it.
 pub async fn touch(pool: &PgPool, subject: &str) {
-    if let Err(error) = sqlx::query(
-        "UPDATE game_session SET last_seen = now() WHERE ended_at IS NULL AND holder = $1",
-    )
-    .bind(subject)
-    .execute(pool)
-    .await
-    {
-        tracing::warn!(%error, "failed to record Foundry Circle session activity");
-    }
+    let (pool, subject) = (pool.clone(), subject.to_owned());
+    tokio::spawn(async move {
+        if let Err(error) = sqlx::query(
+            "UPDATE game_session SET last_seen = now() WHERE ended_at IS NULL AND holder = $1",
+        )
+        .bind(&subject)
+        .execute(&pool)
+        .await
+        {
+            tracing::warn!(%error, "failed to record Foundry Circle session activity");
+        }
+    });
 }
 
 /// Drive the lease from the same `/api/status` poll the lobby uses. Runs
 /// whenever a database is available; without a credential it only observes.
-pub fn spawn_reconciler(database: DatabaseState, lease: Lease) {
+pub fn spawn_reconciler(
+    database: DatabaseState,
+    lease: Lease,
+    driver: Arc<LiveFoundryDriver>,
+    config: DriverConfig,
+) {
     tokio::spawn(async move {
         let mut poll = tokio::time::interval(Duration::from_secs(POLL_SECONDS));
         loop {
             poll.tick().await;
             if let Some(pool) = database.pool().await {
-                reconcile_once(&pool, &lease).await;
+                reconcile_once(&pool, &lease, &driver, &config).await;
             }
         }
     });
 }
 
-async fn reconcile_once(pool: &PgPool, lease: &Lease) {
+async fn reconcile_once(
+    pool: &PgPool,
+    lease: &Lease,
+    driver: &LiveFoundryDriver,
+    config: &DriverConfig,
+) {
     let open = match open(pool).await {
         Ok(open) => open,
         Err(error) => {
@@ -583,11 +664,55 @@ async fn reconcile_once(pool: &PgPool, lease: &Lease) {
         }
         return;
     }
-    let Some(session) = open else { return };
+    let Some(session) = open else {
+        driver.clear_session().await;
+        return;
+    };
     for action in actions {
         if let Err(error) = apply(pool, lease, &session, action).await {
             tracing::warn!(%error, "failed to apply a session lease action");
         }
+    }
+    drive(pool, lease, driver, config).await;
+}
+
+/// Keep the live driver in step with the lease: adopt an unadopted running
+/// world once, then log the driver in as the adopted world's API user. Only a
+/// `running` lease with an adopted world ever holds a driver session.
+async fn drive(pool: &PgPool, lease: &Lease, driver: &LiveFoundryDriver, config: &DriverConfig) {
+    let open = match open(pool).await {
+        Ok(open) => open,
+        Err(error) => {
+            tracing::warn!(%error, "failed to read the open Foundry Circle session");
+            return;
+        }
+    };
+    let Some(session) = open else {
+        driver.clear_session().await;
+        lease.clear_adoption_attempt();
+        return;
+    };
+    if session.phase != SessionPhase::Running {
+        driver.clear_session().await;
+        lease.clear_adoption_attempt();
+        return;
+    }
+    let Some(world) = session.world_id.as_deref() else {
+        driver.clear_session().await;
+        return;
+    };
+    if !session.adopted {
+        driver.clear_session().await;
+        if lease.adoption_due(session.id) {
+            match adoption::adopt(pool, lease, config, driver, &session, world).await {
+                Ok(()) => lease.clear_adoption_attempt(),
+                Err(error) => tracing::debug!(?error, world, "world adoption is pending"),
+            }
+        }
+        return;
+    }
+    if let Err(error) = adoption::prepare_driver(pool, driver, config, world).await {
+        tracing::warn!(?error, world, "the Foundry driver session is not ready");
     }
 }
 
@@ -699,6 +824,8 @@ async fn apply(
             }
             transaction.commit().await?;
             lease.clear_restarted();
+            lease.forget_bootstrap(id);
+            lease.clear_adoption_attempt();
         }
         Action::AbsentStop => {
             let mut transaction = pool.begin().await?;
@@ -736,7 +863,8 @@ async fn lock(
 ) -> Result<Option<OpenSession>, sqlx::Error> {
     let row = sqlx::query(
         "SELECT s.id, s.holder, COALESCE(p.display_name, p.email, p.subject) AS holder_name,
-                s.phase, s.world_id, s.started_at, s.last_seen
+                s.phase, s.world_id, s.started_at, s.last_seen,
+                EXISTS (SELECT 1 FROM adopted_worlds a WHERE a.world_id = s.world_id) AS adopted
            FROM game_session s
            JOIN principals p ON p.subject = s.holder
           WHERE s.id = $1 AND s.ended_at IS NULL
@@ -757,6 +885,7 @@ fn row_session(row: &sqlx::postgres::PgRow) -> Result<OpenSession, sqlx::Error> 
         phase: SessionPhase::from_db(&phase)
             .ok_or_else(|| sqlx::Error::Decode(format!("unknown session phase {phase}").into()))?,
         world_id: row.try_get("world_id")?,
+        adopted: row.try_get("adopted")?,
         started_at: row.try_get("started_at")?,
         last_seen: row.try_get("last_seen")?,
     })
@@ -810,30 +939,6 @@ fn shutdown_accepted(body: &Value) -> bool {
     body.get("status").and_then(Value::as_str) == Some("success")
 }
 
-/// The `session` cookie value from Foundry's `POST /auth` reply. Other
-/// Set-Cookie headers and their attributes are ignored.
-fn foundry_session_cookie(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get_all(header::SET_COOKIE)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .map(|value| value.split(';').next().unwrap_or(value))
-        .filter_map(|pair| pair.split_once('='))
-        .find_map(|(name, value)| {
-            (name.trim() == "session").then(|| value.trim().trim_matches('"').to_owned())
-        })
-        .filter(|value| valid_cookie_value(value))
-}
-
-/// Only a cookie-octet string may reach our own `Set-Cookie` header.
-fn valid_cookie_value(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 512
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_graphic() && !matches!(byte, b';' | b',' | b'"' | b'\\'))
-}
-
 /// A successful admin login redirects to Setup; a refusal goes back to
 /// `/auth`. The path may be absolute.
 fn is_setup_redirect(location: &str) -> bool {
@@ -868,6 +973,7 @@ fn post_client() -> &'static reqwest::Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::HeaderMap;
 
     fn session_at(
         phase: SessionPhase,
@@ -881,6 +987,7 @@ mod tests {
             holder_name: "GM".into(),
             phase,
             world_id: world.map(str::to_owned),
+            adopted: false,
             started_at: now,
             last_seen: now - chrono::Duration::minutes(last_seen_minutes),
         }
@@ -1082,6 +1189,7 @@ mod tests {
 
     #[test]
     fn the_admin_login_session_is_taken_from_its_own_set_cookie() {
+        use crate::driver::foundry_session_cookie;
         // Other attributes and other Set-Cookie headers do not matter.
         assert_eq!(
             foundry_session_cookie(&set_cookies(&[

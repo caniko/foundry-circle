@@ -23,10 +23,9 @@
         database.createLocally = true;
         foundryWorld = {
           baseUrl = "https://vtt.example";
-          apiPasswordFile = "/run/agenix/foundry-circle-api-password";
+          passwordSecretFile = "/run/agenix/foundry-circle-password-secret";
           adminPasswordFile = "/run/agenix/foundry-admin-password";
-          worldId = "foundry-circle-canary";
-          foundryVersion = "13.351";
+          foundryVersion = "14.367";
           systemId = "daggerheart";
           systemVersion = "1.6.4";
         };
@@ -48,9 +47,11 @@ in
   assert enabled.config.systemd.services.foundry-circle.environment.DIOXUS_PUBLIC_PATH == "${package}/share/foundry-circle/public";
   assert enabled.config.systemd.services.foundry-circle.environment.XDG_CONFIG_HOME == "/var/lib/foundry-circle/config";
   assert enabled.config.systemd.services.foundry-circle.serviceConfig.ExecStart == "${package}/bin/foundry-circle";
-  assert enabled.config.systemd.services.foundry-circle.environment.FOUNDRY_WORLD_ID == "foundry-circle-canary";
-  assert builtins.elem "api-password:/run/agenix/foundry-circle-api-password" enabled.config.systemd.services.foundry-circle.serviceConfig.LoadCredential;
+  assert enabled.config.systemd.services.foundry-circle.environment.FOUNDRY_WORLD_API_USER == "foundry-circle-api";
+  assert !(enabled.config.systemd.services.foundry-circle.environment ? FOUNDRY_WORLD_ID);
+  assert builtins.elem "password-secret:/run/agenix/foundry-circle-password-secret" enabled.config.systemd.services.foundry-circle.serviceConfig.LoadCredential;
   assert builtins.elem "admin-password:/run/agenix/foundry-admin-password" enabled.config.systemd.services.foundry-circle.serviceConfig.LoadCredential;
+  assert enabled.config.systemd.services.foundry-circle.environment.FOUNDRY_CIRCLE_PASSWORD_SECRET_FILE == "/run/credentials/foundry-circle.service/password-secret";
   assert enabled.config.systemd.services.foundry-circle.environment.FOUNDRY_ADMIN_PASSWORD_FILE == "/run/credentials/foundry-circle.service/admin-password";
   assert enabled.config.systemd.services.foundry-circle.environment.FOUNDRY_CIRCLE_RESTART_UNIT == "foundryvtt.service";
   assert enabled.config.systemd.services.foundry-circle.environment.FOUNDRY_CIRCLE_SYSTEMCTL == "${enabled.config.systemd.package}/bin/systemctl";

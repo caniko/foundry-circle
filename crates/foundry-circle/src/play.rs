@@ -17,7 +17,7 @@ use serde_json::json;
 use sqlx::PgPool;
 
 use crate::{
-    SessionPhase,
+    SessionPhase, adoption,
     http::{
         AppState,
         auth::{self, LoginHost, PLAY_SESSION_COOKIE, Principal},
@@ -46,6 +46,9 @@ pub enum Denial {
     /// Joining goes through `/_circle/enter` in the next slice; this also
     /// blocks Foundry's `loginAs`.
     JoinBlocked,
+    /// The running world has not finished adoption, so only the holder and
+    /// admins may reach it.
+    NotAdopted,
 }
 
 impl Denial {
@@ -56,6 +59,7 @@ impl Denial {
             Self::NoSession => "no_session",
             Self::SetupOnly => "setup_only",
             Self::JoinBlocked => "join_blocked",
+            Self::NotAdopted => "not_adopted",
         }
     }
 }
@@ -69,6 +73,8 @@ pub struct GateFacts<'a> {
     pub is_admin: bool,
     pub is_holder: bool,
     pub phase: Option<SessionPhase>,
+    /// The running world completed adoption (G5).
+    pub adopted: bool,
     pub method: &'a str,
     pub uri: &'a str,
 }
@@ -95,8 +101,14 @@ pub fn decide(facts: &GateFacts<'_>) -> Decision {
     {
         return Decision::Allow;
     }
-    if facts.phase == Some(SessionPhase::Running) && !is_setup_path(&path) && path != "/auth" {
-        return Decision::Allow;
+    if facts.phase == Some(SessionPhase::Running) {
+        // Players stay out until adoption has finished (G5).
+        if !facts.adopted {
+            return Decision::Deny(Denial::NotAdopted);
+        }
+        if !is_setup_path(&path) && path != "/auth" {
+            return Decision::Allow;
+        }
     }
     if is_setup_path(&path) || path == "/auth" {
         Decision::Deny(Denial::SetupOnly)
@@ -225,6 +237,7 @@ fn facts<'a>(
             _ => false,
         },
         phase: open.map(|open| open.phase),
+        adopted: open.is_some_and(|open| open.adopted),
         method,
         uri,
     }
@@ -293,6 +306,17 @@ pub async fn setup(State(state): State<AppState>, headers: HeaderMap) -> Respons
             return (StatusCode::BAD_GATEWAY, "Foundry did not open Setup").into_response();
         }
     };
+    // A second, broker-only admin session: adoption uses it to take over a GM
+    // once the holder launches. It never reaches a browser or the driver.
+    match state.lease.open_setup().await {
+        Ok(adoption_session) => state.lease.remember_bootstrap(open.id, adoption_session),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "Foundry did not open the broker's adoption session; adoption will need a relaunch"
+            );
+        }
+    }
     if let Err(error) = session::insert_audit(
         &pool,
         Some(&principal.subject),
@@ -307,10 +331,109 @@ pub async fn setup(State(state): State<AppState>, headers: HeaderMap) -> Respons
     setup_page(&session_id)
 }
 
+/// `GET /_circle/enter`: map the signed-in player to a Foundry user and relay
+/// a fresh non-admin session cookie for it.
+pub async fn enter(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(auth) = state.auth.as_ref() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "OIDC is not configured").into_response();
+    };
+    let Some(platform) = state.console.platform_url.as_deref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the lobby is not configured",
+        )
+            .into_response();
+    };
+    let Some(pool) = state.database.pool().await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database is not configured",
+        )
+            .into_response();
+    };
+    let principal = match play_principal(&pool, &headers).await {
+        Ok(principal) => principal,
+        Err(error) => {
+            tracing::warn!(%error, "failed to resolve a play-host session");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "session lookup error").into_response();
+        }
+    };
+    let Some(principal) = principal else {
+        return play_login_redirect(ENTER_ROUTE);
+    };
+    if !principal.groups.contains(&auth.access_group) {
+        return lobby_redirect(platform, Denial::NoAccess);
+    }
+    let open = match session::open(&pool).await {
+        Ok(open) => open,
+        Err(error) => {
+            tracing::warn!(%error, "failed to read the open Foundry Circle session");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "session lookup error").into_response();
+        }
+    };
+    let Some(open) = open else {
+        return lobby_redirect(platform, Denial::NoSession);
+    };
+    if open.phase != SessionPhase::Running {
+        return lobby_redirect(platform, Denial::NoSession);
+    }
+    if !open.adopted {
+        return lobby_redirect(platform, Denial::NotAdopted);
+    }
+    let (Some(world), Some(base_url)) = (
+        open.world_id.as_deref(),
+        state.console.foundry_url.as_deref(),
+    ) else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "Foundry is not configured").into_response();
+    };
+    let display_name = principal
+        .display_name
+        .clone()
+        .or_else(|| principal.email.clone())
+        .unwrap_or_else(|| principal.subject.clone());
+    // The entry locks the lease row and decides the role from it; the `open`
+    // read above is only the fast path to a redirect.
+    let (session_id, is_holder) = match adoption::enter(
+        &pool,
+        state.driver.as_ref(),
+        base_url,
+        open.id,
+        &principal.subject,
+        &display_name,
+        world,
+    )
+    .await
+    {
+        Ok(entered) => entered,
+        Err(error) => {
+            tracing::warn!(code = error.code(), "Foundry Circle entry was refused");
+            return (error.status(), error.code()).into_response();
+        }
+    };
+    if is_holder {
+        session::touch(&pool, &principal.subject).await;
+    }
+    handoff_page(
+        &session_id,
+        "/game",
+        "Opening Foundry",
+        "Continue to Foundry",
+    )
+}
+
 /// Foundry's cookie is `SameSite=Strict`, and a 302 at the end of a redirect
 /// chain that began at Rauthy would drop it. This page sets the cookie and
-/// navigates to `/setup` as a new same-site navigation.
+/// navigates to the target as a new same-site navigation.
 fn setup_page(session_id: &str) -> Response {
+    handoff_page(
+        session_id,
+        "/setup",
+        "Opening Foundry Setup",
+        "Continue to Foundry Setup",
+    )
+}
+
+fn handoff_page(session_id: &str, path: &str, title: &str, label: &str) -> Response {
     let Ok(cookie) = HeaderValue::try_from(format!(
         "session={session_id}; Path=/; HttpOnly; Secure; SameSite=Strict"
     )) else {
@@ -320,12 +443,12 @@ fn setup_page(session_id: &str) -> Response {
         )
             .into_response();
     };
-    let mut response = Html(
+    let mut response = Html(format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
-<meta http-equiv=\"refresh\" content=\"0;url=/setup\">\
-<title>Opening Foundry Setup</title></head>\
-<body><p><a href=\"/setup\">Continue to Foundry Setup</a></p></body></html>",
-    )
+<meta http-equiv=\"refresh\" content=\"0;url={path}\">\
+<title>{title}</title></head>\
+<body><p><a href=\"{path}\">{label}</a></p></body></html>"
+    ))
     .into_response();
     let headers = response.headers_mut();
     headers.insert(header::SET_COOKIE, cookie);
@@ -355,6 +478,9 @@ async fn play_principal(
 
 /// The holder's way into Foundry Setup on the play host.
 const SETUP_ROUTE: &str = "/_circle/setup";
+
+/// Every player's way into the running, adopted world.
+const ENTER_ROUTE: &str = "/_circle/enter";
 
 fn play_login_redirect(uri: &str) -> Response {
     let location = format!("/_circle/login?return_to={}", query_value(uri));
@@ -410,6 +536,7 @@ mod tests {
             is_admin: false,
             is_holder,
             phase,
+            adopted: true,
             method,
             uri,
         }
@@ -663,12 +790,28 @@ mod tests {
     }
 
     #[test]
+    fn an_unadopted_world_admits_only_the_holder_and_admins() {
+        let running = Some(SessionPhase::Running);
+        let mut player = facts(true, false, running, "GET", "/game");
+        player.adopted = false;
+        assert_eq!(denial(&player), Denial::NotAdopted);
+        let mut holder = facts(true, true, running, "GET", "/setup");
+        holder.adopted = false;
+        assert!(allowed(&holder));
+        let mut admin = facts(true, false, running, "GET", "/game");
+        admin.adopted = false;
+        admin.is_admin = true;
+        assert!(allowed(&admin));
+    }
+
+    #[test]
     fn denial_codes_are_the_lobby_reasons() {
         assert_eq!(Denial::SignedOut.code(), "signed_out");
         assert_eq!(Denial::NoAccess.code(), "no_access");
         assert_eq!(Denial::NoSession.code(), "no_session");
         assert_eq!(Denial::SetupOnly.code(), "setup_only");
         assert_eq!(Denial::JoinBlocked.code(), "join_blocked");
+        assert_eq!(Denial::NotAdopted.code(), "not_adopted");
     }
 
     #[test]

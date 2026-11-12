@@ -14,6 +14,7 @@ use std::{
     time::Duration,
 };
 
+use axum::http::{HeaderMap, header};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
@@ -244,6 +245,36 @@ impl Lease {
         }
     }
 
+    /// Open a fresh admin session for the holder's visit to Foundry Setup: a
+    /// cookie-less `POST /auth` with the admin key, redirects disabled. The
+    /// body is form-encoded, as Foundry's own login form sends it; the caller
+    /// relays the returned `session` cookie and nothing is kept here.
+    pub async fn open_setup(&self) -> Result<String, SetupFailure> {
+        let Some(base) = self.config.base_url.as_deref() else {
+            return Err(SetupFailure);
+        };
+        let Some(password) = self.admin_password() else {
+            tracing::warn!("the Foundry admin credential is not readable; Setup cannot open");
+            return Err(SetupFailure);
+        };
+        let reply = post_client()
+            .post(format!("{base}/auth"))
+            .form(&[("adminPassword", password.as_str())])
+            .send()
+            .await
+            .map_err(|_| SetupFailure)?;
+        let session = foundry_session_cookie(reply.headers()).ok_or(SetupFailure)?;
+        let location = reply
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        if !is_setup_redirect(location) {
+            return Err(SetupFailure);
+        }
+        Ok(session)
+    }
+
     /// Restart Foundry through systemd; the deployment's polkit rule allows
     /// exactly this restart of exactly this unit.
     pub async fn restart(&self) -> bool {
@@ -285,6 +316,11 @@ impl Lease {
 #[derive(Debug, thiserror::Error)]
 #[error("Foundry did not stop the world")]
 pub struct ShutdownFailure;
+
+/// Foundry refused the admin login or did not answer.
+#[derive(Debug, thiserror::Error)]
+#[error("Foundry did not open Setup")]
+pub struct SetupFailure;
 
 /// A refused lease operation, with the code the JSON API reports.
 #[derive(Debug)]
@@ -737,7 +773,8 @@ async fn record(pool: &PgPool, subject: Option<&str>, action: &str, outcome: &st
     }
 }
 
-async fn insert_audit(
+/// Shared audit writer for the lease and the play-host gate.
+pub(crate) async fn insert_audit(
     executor: impl sqlx::PgExecutor<'_>,
     subject: Option<&str>,
     action: &str,
@@ -773,12 +810,56 @@ fn shutdown_accepted(body: &Value) -> bool {
     body.get("status").and_then(Value::as_str) == Some("success")
 }
 
+/// The `session` cookie value from Foundry's `POST /auth` reply. Other
+/// Set-Cookie headers and their attributes are ignored.
+fn foundry_session_cookie(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(|value| value.split(';').next().unwrap_or(value))
+        .filter_map(|pair| pair.split_once('='))
+        .find_map(|(name, value)| {
+            (name.trim() == "session").then(|| value.trim().trim_matches('"').to_owned())
+        })
+        .filter(|value| valid_cookie_value(value))
+}
+
+/// Only a cookie-octet string may reach our own `Set-Cookie` header.
+fn valid_cookie_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 512
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && !matches!(byte, b';' | b',' | b'"' | b'\\'))
+}
+
+/// A successful admin login redirects to Setup; a refusal goes back to
+/// `/auth`. The path may be absolute.
+fn is_setup_redirect(location: &str) -> bool {
+    let path = location.split(['?', '#']).next().unwrap_or(location);
+    path.trim_end_matches('/').ends_with("/setup")
+}
+
 /// The same short-timeout client pattern as the lobby's `/api/status` read.
 fn client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap_or_default()
+    })
+}
+
+/// The admin login must not follow Foundry's redirect: its reply carries the
+/// cookie and the Location the decision is made from.
+fn post_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(5))
             .build()
             .unwrap_or_default()
     })
@@ -989,6 +1070,62 @@ mod tests {
             &json!({"status": "error", "message": "invalid admin password"})
         ));
         assert!(!shutdown_accepted(&json!({})));
+    }
+
+    fn set_cookies(values: &[&str]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for value in values {
+            headers.append(header::SET_COOKIE, value.parse().unwrap());
+        }
+        headers
+    }
+
+    #[test]
+    fn the_admin_login_session_is_taken_from_its_own_set_cookie() {
+        // Other attributes and other Set-Cookie headers do not matter.
+        assert_eq!(
+            foundry_session_cookie(&set_cookies(&[
+                "other=1; Path=/",
+                "session=abc123; Path=/; HttpOnly; SameSite=Strict",
+            ])),
+            Some("abc123".into())
+        );
+        assert_eq!(
+            foundry_session_cookie(&set_cookies(&["session=\"quoted\"; Path=/"])),
+            Some("quoted".into())
+        );
+        // A missing cookie or a malformed value is a failure.
+        assert_eq!(
+            foundry_session_cookie(&set_cookies(&["path=/; HttpOnly"])),
+            None
+        );
+        assert_eq!(
+            foundry_session_cookie(&set_cookies(&["session=; Path=/"])),
+            None
+        );
+        // Header values cannot carry CR/LF; a space or non-ASCII value still
+        // must not reach our own Set-Cookie.
+        assert_eq!(
+            foundry_session_cookie(&set_cookies(&["session=a b; Path=/"])),
+            None
+        );
+        assert_eq!(
+            foundry_session_cookie(&set_cookies(&["session=é; Path=/"])),
+            None
+        );
+        assert_eq!(foundry_session_cookie(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn an_admin_login_counts_only_on_a_setup_redirect() {
+        assert!(is_setup_redirect("/setup"));
+        assert!(is_setup_redirect("https://foundry.example/setup"));
+        assert!(is_setup_redirect("/setup?x=1"));
+        assert!(is_setup_redirect("/setup/"));
+        assert!(!is_setup_redirect("/auth"));
+        assert!(!is_setup_redirect("/setupx"));
+        assert!(!is_setup_redirect("/setup/../join"));
+        assert!(!is_setup_redirect(""));
     }
 
     #[test]

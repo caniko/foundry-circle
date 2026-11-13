@@ -1,4 +1,9 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    future::Future,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use axum::{
     extract::{Query, State},
@@ -8,8 +13,8 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use oidc_app_auth::{
-    AuthError, Callback, LoginTransaction, OidcClient, OidcConfig, SessionToken, VerifiedIdentity,
-    sanitize_return_to,
+    AuthError, Callback, LoginTransaction, OidcClient, OidcConfig, SessionToken, TokenSet,
+    UserInfoClaims, UserInfoError, VerifiedIdentity, sanitize_return_to,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -17,9 +22,22 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::{
-    Role,
+    Role, adoption,
+    driver::AccountOp,
     http::{AppState, session},
 };
+
+/// How long a successful revalidation answer is trusted (D5, G6).
+const FRESHNESS: Duration = Duration::from_secs(5);
+
+/// Rauthy accepts a refresh token from `access_expires_at - 60 s` (its `nbf`
+/// is issuance + access-token lifetime − 60 s), so the refresh only runs inside
+/// this margin.
+const REFRESH_MARGIN: Duration = Duration::from_secs(60);
+
+/// One gate request's whole Rauthy budget: a refresh, when due, and userinfo
+/// share it, leaving the rest of Caddy's 2 s deadline to us.
+const BUDGET: Duration = Duration::from_millis(1500);
 
 #[derive(Clone)]
 pub struct AuthState {
@@ -28,10 +46,136 @@ pub struct AuthState {
     /// `/_circle/oidc/callback` redirect URI. `None` when no play host is
     /// configured.
     pub play_client: Option<Arc<OidcClient>>,
+    /// The play host's browser origin, without a trailing slash. The play
+    /// logout requires it as the request's exact `Origin`.
+    pub play_base_url: Option<String>,
     pub access_group: String,
     pub admin_group: String,
     pub gm_group: Option<String>,
     pub session_ttl: Duration,
+    /// Refreshed token sets the database refused to store; see [`TokenStash`].
+    stashed_tokens: TokenStash,
+    /// One lock per session, so parallel gate requests for one browser do not
+    /// refresh with the same rotated-away token; see [`SessionLocks`].
+    session_locks: SessionLocks,
+}
+
+/// Removes a session's lock entry once nothing else uses it. Runs on drop, so
+/// a timed-out or cancelled request cleans up too; the count is checked under
+/// the map lock, so a request cannot take the entry between check and removal.
+struct GateLease<'a> {
+    locks: &'a SessionLocks,
+    hash: &'a str,
+    // `Option` so `drop` can release it while still holding the map lock.
+    gate: Option<Arc<tokio::sync::Mutex<()>>>,
+}
+
+impl Drop for GateLease<'_> {
+    fn drop(&mut self) {
+        let mut gates = self.locks.gates.lock().expect("session lock map poisoned");
+        if let Some(gate) = self.gate.take() {
+            // The map and this lease are the only owners left.
+            if Arc::strong_count(&gate) == 2 {
+                gates.remove(self.hash);
+            }
+            // Release this owner before the map lock: two leases dropping at
+            // once must not both count each other and leave the entry behind.
+            drop(gate);
+        }
+    }
+}
+
+/// Refreshed token sets the database refused to store, keyed by the session's
+/// token hash. The next revalidation of that session persists the set before
+/// it does anything else, so a rotated-away refresh token is never reused.
+#[derive(Clone, Default)]
+struct TokenStash {
+    // ponytail: one process, and a restart drops it; the affected user signs in
+    // again. Persist it (e.g. a `pending_tokens` table) if that matters.
+    tokens: Arc<Mutex<HashMap<String, Arc<TokenSet>>>>,
+}
+
+impl TokenStash {
+    /// Clone a session's set so a request can retry the database write. The set
+    /// stays stashed until that write succeeds: another request must not lose
+    /// it while the first one awaits.
+    fn peek(&self, hash: &str) -> Option<Arc<TokenSet>> {
+        self.tokens
+            .lock()
+            .expect("token stash lock poisoned")
+            .get(hash)
+            .cloned()
+    }
+
+    /// Drop a session's set once the row has it.
+    fn remove(&self, hash: &str) {
+        self.tokens
+            .lock()
+            .expect("token stash lock poisoned")
+            .remove(hash);
+    }
+
+    fn insert(&self, hash: &str, tokens: TokenSet) -> Arc<TokenSet> {
+        let tokens = Arc::new(tokens);
+        self.tokens
+            .lock()
+            .expect("token stash lock poisoned")
+            .insert(hash.to_owned(), tokens.clone());
+        tokens
+    }
+}
+
+/// One lock per session token hash: parallel requests for one browser (asset
+/// loads) must not all refresh with the same refresh token, which the provider
+/// reads as reuse and answers by revoking the subject.
+#[derive(Clone, Default)]
+struct SessionLocks {
+    // ponytail: one process, so a second broker instance could still refresh
+    // the same session concurrently. A database advisory lock covers that if
+    // more than one instance ever serves the gate.
+    gates: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+}
+
+impl SessionLocks {
+    /// Run `work` as the one holder of `hash`'s lock, or answer `None` when
+    /// `deadline` passes while waiting. The wait spends the request's budget,
+    /// so an expired wait is "ask again", never a verdict on the identity.
+    async fn run<T>(
+        &self,
+        hash: &str,
+        deadline: tokio::time::Instant,
+        work: impl Future<Output = T>,
+    ) -> Option<T> {
+        // Declared before the guard so it drops after it, on every exit:
+        // completion, an expired wait, or the request being cancelled.
+        let lease = GateLease {
+            locks: self,
+            hash,
+            gate: Some(self.gate(hash)),
+        };
+        let _guard = tokio::time::timeout_at(
+            deadline,
+            lease
+                .gate
+                .clone()
+                .expect("lease holds its gate")
+                .lock_owned(),
+        )
+        .await
+        .ok()?;
+        Some(work.await)
+    }
+
+    /// The lock for `hash`, created on first use. The caller holds a clone, so
+    /// an entry lives until every request using or waiting on it is done.
+    fn gate(&self, hash: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.gates
+            .lock()
+            .expect("session lock map poisoned")
+            .entry(hash.to_owned())
+            .or_default()
+            .clone()
+    }
 }
 
 /// The two hosts that run the same OIDC login. Cookies are host-only, so each
@@ -126,6 +270,205 @@ pub struct LoginQuery {
     pub return_to: Option<String>,
 }
 
+/// The session row behind one request: the identity the console renders and the
+/// tokens revalidation needs. There is no `Debug`: a row carries a bearer
+/// access token, a refresh token and an ID token, and none of them may be
+/// logged or rendered.
+pub(crate) struct SessionRow {
+    /// The SHA-256 of the opaque cookie, never the cookie itself: the row is
+    /// updated by this key.
+    pub token_hash: String,
+    pub principal: Principal,
+    pub access_token: Option<String>,
+    pub refresh_token: Option<String>,
+    pub id_token: Option<String>,
+    pub access_expires_at: Option<DateTime<Utc>>,
+    pub validated_at: Option<DateTime<Utc>>,
+}
+
+/// What one gate revalidation concluded (D5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Revalidation {
+    /// Fresh, or just confirmed by Rauthy with access still granted.
+    Valid,
+    /// The identity is gone: revoke the subject and deny.
+    Revoked,
+    /// This row alone cannot be revalidated (it predates token storage):
+    /// revoke it and treat the request as signed out. It says nothing about
+    /// the subject's other sessions.
+    Stale,
+    /// Rauthy could not answer or the budget ran out: deny for now, do not
+    /// revoke (D6).
+    Unavailable,
+}
+
+/// A valid revalidation, with the principal carrying Rauthy's newest claims.
+pub(crate) enum Revalidated {
+    Valid(Principal),
+    Revoked,
+    Stale,
+    Unavailable,
+}
+
+fn revalidated(outcome: Revalidation, principal: &Principal) -> Revalidated {
+    match outcome {
+        Revalidation::Valid => Revalidated::Valid(principal.clone()),
+        Revalidation::Revoked => Revalidated::Revoked,
+        Revalidation::Stale => Revalidated::Stale,
+        Revalidation::Unavailable => Revalidated::Unavailable,
+    }
+}
+
+impl Revalidated {
+    /// The decision without the claims it may carry.
+    pub(crate) fn outcome(&self) -> Revalidation {
+        match self {
+            Self::Valid(_) => Revalidation::Valid,
+            Self::Revoked => Revalidation::Revoked,
+            Self::Stale => Revalidation::Stale,
+            Self::Unavailable => Revalidation::Unavailable,
+        }
+    }
+
+    /// The principal Rauthy just confirmed, when the outcome is `Valid`.
+    pub(crate) fn principal(self) -> Option<Principal> {
+        match self {
+            Self::Valid(principal) => Some(principal),
+            _ => None,
+        }
+    }
+}
+
+/// What the optional refresh step (due in the access token's last minute) did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Refresh {
+    /// A new token set was issued; userinfo still decides the identity.
+    Refreshed,
+    /// The provider refused the grant: the identity is gone.
+    Rejected,
+    /// The provider could not answer: nothing is known about the identity.
+    Unavailable,
+}
+
+/// What the userinfo step found. `Missing` is a session from before tokens were
+/// stored: there is nothing to revalidate, so that row alone is revoked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UserInfo {
+    /// The provider answered for the expected subject.
+    Claims,
+    /// The provider rejected the token or the subject.
+    Rejected,
+    /// The row holds no access token.
+    Missing,
+}
+
+/// The pure revalidation decision table (D5, G6). `userinfo` is `None` when no
+/// answer arrived: the provider was unavailable, the budget ran out, or a due
+/// refresh already decided the request. `cached_age` counts from when the last
+/// successful check *started*, so a slow answer cannot extend the window.
+pub(crate) fn decide(
+    cached_age: Option<Duration>,
+    refresh_due: bool,
+    refresh: Option<Refresh>,
+    userinfo: Option<UserInfo>,
+    in_access_group: bool,
+) -> Revalidation {
+    if is_fresh(cached_age) {
+        // A cached answer is only valid while its own claims still grant access.
+        return if in_access_group {
+            Revalidation::Valid
+        } else {
+            Revalidation::Revoked
+        };
+    }
+    // A due refresh always runs before userinfo, unless the budget ends first.
+    debug_assert!(
+        !refresh_due || refresh.is_some() || userinfo.is_none(),
+        "a due refresh has an outcome before userinfo runs"
+    );
+    debug_assert!(
+        !matches!(refresh, Some(Refresh::Rejected | Refresh::Unavailable)) || userinfo.is_none(),
+        "a refused or unavailable refresh never reaches userinfo"
+    );
+    // A refused grant proves the identity is gone; an outage proves nothing
+    // about it. Only a successful refresh (or no refresh due) may go on to
+    // judge the access token with userinfo.
+    match refresh {
+        Some(Refresh::Rejected) => return Revalidation::Revoked,
+        Some(Refresh::Unavailable) => return Revalidation::Unavailable,
+        Some(Refresh::Refreshed) | None => {}
+    }
+    match userinfo {
+        Some(UserInfo::Claims) if in_access_group => Revalidation::Valid,
+        Some(UserInfo::Claims | UserInfo::Rejected) => Revalidation::Revoked,
+        // A row from before 0006: revoke it alone, never the subject.
+        Some(UserInfo::Missing) => Revalidation::Stale,
+        None => Revalidation::Unavailable,
+    }
+}
+
+/// Inside the freshness window the gate answers without asking Rauthy.
+fn is_fresh(cached_age: Option<Duration>) -> bool {
+    cached_age.is_some_and(|age| age < FRESHNESS)
+}
+
+/// How long ago the last successful check started, if there was one.
+fn cached_age(validated_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Option<Duration> {
+    validated_at.map(|at| (now - at).to_std().unwrap_or_default())
+}
+
+/// Refresh only inside the 60 s margin before the access token expires; earlier
+/// refreshes are rejected by Rauthy's refresh-token `nbf`.
+fn refresh_due(
+    access_expires_at: Option<DateTime<Utc>>,
+    has_refresh_token: bool,
+    now: DateTime<Utc>,
+) -> bool {
+    has_refresh_token
+        && access_expires_at.is_some_and(|expires| {
+            expires - now <= chrono::Duration::from_std(REFRESH_MARGIN).unwrap_or_default()
+        })
+}
+
+/// The principal after a successful revalidation: Rauthy's claims replace the
+/// groups, email and display name the session was created with.
+fn principal_from(row: &SessionRow, claims: &UserInfoClaims) -> Principal {
+    Principal {
+        subject: row.principal.subject.clone(),
+        issuer: row.principal.issuer.clone(),
+        display_name: claims.display_name.clone(),
+        email: claims.email.clone(),
+        groups: claims.groups.iter().cloned().collect(),
+    }
+}
+
+/// Why a principal's sessions were revoked; only ever an audit detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RevokeReason {
+    /// A gate revalidation was refused (D5).
+    Revoked,
+    /// An admin pressed "Revoke sessions".
+    Admin,
+    /// The principal signed out.
+    Logout,
+}
+
+impl RevokeReason {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Revoked => "revoked",
+            Self::Admin => "admin",
+            Self::Logout => "logout",
+        }
+    }
+}
+
+/// Only an admin may revoke another principal's sessions. The console's
+/// "Revoke sessions" button and the JSON route both ask this one question.
+pub(crate) fn may_revoke(principal: &Principal, admin_group: &str) -> bool {
+    principal.is_admin(admin_group)
+}
+
 pub async fn from_env() -> Result<AuthState, AuthError> {
     let issuer = required_env("FOUNDRY_CIRCLE_OIDC_ISSUER")?;
     let client_id = required_env("FOUNDRY_CIRCLE_OIDC_CLIENT_ID")?;
@@ -156,7 +499,8 @@ pub async fn from_env() -> Result<AuthState, AuthError> {
     .await?;
     // A second registered redirect URI on the same Rauthy client: the play
     // host has its own origin, so it needs its own cookie-scoped login.
-    let play_client = match play_base_url() {
+    let play_base = play_base_url();
+    let play_client = match play_base.as_deref() {
         Some(base) => Some(Arc::new(
             OidcClient::discover(OidcConfig {
                 issuer,
@@ -171,10 +515,13 @@ pub async fn from_env() -> Result<AuthState, AuthError> {
     Ok(AuthState {
         client: Arc::new(client),
         play_client,
+        play_base_url: play_base,
         access_group,
         admin_group,
         gm_group,
         session_ttl: Duration::from_secs(session_ttl),
+        stashed_tokens: TokenStash::default(),
+        session_locks: SessionLocks::default(),
     })
 }
 
@@ -322,8 +669,11 @@ async fn complete_login(
             return (StatusCode::INTERNAL_SERVER_ERROR, "login transaction error").into_response();
         }
     };
-    let identity = match client.complete(callback, transaction.clone()).await {
-        Ok(identity) => identity,
+    let (identity, tokens) = match client
+        .complete_with_tokens(callback, transaction.clone())
+        .await
+    {
+        Ok(completed) => completed,
         Err(error) => return auth_error_response(error),
     };
     if !identity
@@ -343,7 +693,9 @@ async fn complete_login(
             .unwrap_or_else(|| host.default_return_to().into()),
         LoginHost::Play => play_return_to(transaction.return_to.as_deref()),
     };
-    if let Err(error) = save_principal_and_session(&pool, auth, &identity, &token, host).await {
+    if let Err(error) =
+        save_principal_and_session(&pool, auth, &identity, &tokens, &token, host).await
+    {
         tracing::error!(%error, "failed to create Foundry Circle session");
         return (StatusCode::INTERNAL_SERVER_ERROR, "session error").into_response();
     }
@@ -358,26 +710,125 @@ async fn complete_login(
 }
 
 pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let Some(pool) = state.database.pool().await else {
-        return (StatusCode::NO_CONTENT, "").into_response();
-    };
-    if let Some(token) = cookie(&headers, LoginHost::Platform.cookie_name()) {
-        let hash = SessionToken::hash_value(token);
-        if let Err(error) = sqlx::query(
-            "UPDATE sessions SET revoked_at = now() WHERE token_hash = $1 AND kind = 'platform'",
-        )
-        .bind(hash)
-        .execute(&pool)
-        .await
-        {
-            tracing::warn!(%error, "failed to revoke Foundry Circle session");
+    end_session(state, LoginHost::Platform, headers).await
+}
+
+/// `POST /_circle/logout`: the play host's own cookie, ended the same way, and
+/// the browser lands on the platform console.
+pub async fn play_logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    end_session(state, LoginHost::Play, headers).await
+}
+
+/// Revoke every session the caller holds on both hosts, expire this host's
+/// cookie, then hand the browser to Rauthy's RP-initiated logout so the SSO
+/// session ends too (G6).
+///
+/// The request's `Origin` must be the configured origin of *this* host
+/// exactly: `SameSite=Lax` still lets a same-site sibling origin POST here,
+/// and a logout must not be triggerable there. A refused origin is answered
+/// before anything is revoked.
+async fn end_session(state: AppState, host: LoginHost, headers: HeaderMap) -> Response {
+    let play = state
+        .auth
+        .as_ref()
+        .and_then(|auth| auth.play_base_url.as_deref());
+    if !logout_origin_allowed(host, &headers, state.console.platform_url.as_deref(), play) {
+        return (StatusCode::FORBIDDEN, "cross-origin logout refused").into_response();
+    }
+    let mut id_token = None;
+    let token = cookie(&headers, host.cookie_name());
+    let pool = state.database.pool().await;
+    match logout_plan(token, pool.is_some()) {
+        // This host's cookie names sessions that must be revoked; without the
+        // database they stay valid, so refuse instead of pretending otherwise.
+        LogoutPlan::Refuse => {
+            tracing::warn!("logout cannot revoke its session: the database is not ready");
+            return (StatusCode::SERVICE_UNAVAILABLE, "logout failed").into_response();
+        }
+        // Nothing this host could revoke: clearing the cookie is the logout.
+        LogoutPlan::Clear => {}
+        LogoutPlan::Revoke => {
+            let (Some(pool), Some(token)) = (pool.as_ref(), token) else {
+                return (StatusCode::SERVICE_UNAVAILABLE, "logout failed").into_response();
+            };
+            let hash = SessionToken::hash_value(token);
+            let row = match session_row(pool, &hash, host.kind()).await {
+                Ok(row) => row,
+                Err(error) => {
+                    tracing::warn!(%error, "failed to resolve a Foundry Circle session on logout");
+                    return (StatusCode::SERVICE_UNAVAILABLE, "logout failed").into_response();
+                }
+            };
+            if let Some(row) = row {
+                id_token = row.id_token.clone();
+                if let Err(error) =
+                    revoke_subject(&state, &row.principal.subject, RevokeReason::Logout).await
+                {
+                    tracing::warn!(error = %error, "failed to revoke Foundry Circle sessions on logout");
+                    return (StatusCode::SERVICE_UNAVAILABLE, "logout failed").into_response();
+                }
+            }
         }
     }
+    // The registered post-logout URI lives on the platform origin; without one
+    // Rauthy's end_session call has nowhere to return to.
+    let target = state.console.platform_url.as_deref().and_then(|platform| {
+        state
+            .auth
+            .as_ref()?
+            .client
+            .end_session_url(id_token.as_deref(), &format!("{platform}/api/console"))
+    });
     (
-        AppendHeaders([(header::SET_COOKIE, expired_session_cookie())]),
-        Redirect::to("/api/console"),
+        AppendHeaders([(header::SET_COOKIE, expired_session_cookie(host))]),
+        Redirect::to(&logout_destination(target)),
     )
         .into_response()
+}
+
+/// What a logout must do before it may tell the browser it signed out. A
+/// request carrying this host's cookie must revoke its sessions first; a
+/// cookie-less request has nothing to revoke, so it only clears and redirects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogoutPlan {
+    Revoke,
+    Clear,
+    Refuse,
+}
+
+fn logout_plan(session_cookie: Option<&str>, pool_ready: bool) -> LogoutPlan {
+    match (
+        session_cookie.is_some_and(|token| !token.is_empty()),
+        pool_ready,
+    ) {
+        (true, false) => LogoutPlan::Refuse,
+        (true, true) => LogoutPlan::Revoke,
+        (false, _) => LogoutPlan::Clear,
+    }
+}
+
+/// A logout's `Origin` must equal the configured origin of the host whose
+/// cookie it ends, with no normalisation: missing or different means refused.
+fn logout_origin_allowed(
+    host: LoginHost,
+    headers: &HeaderMap,
+    platform: Option<&str>,
+    play: Option<&str>,
+) -> bool {
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok());
+    let configured = match host {
+        LoginHost::Platform => platform,
+        LoginHost::Play => play,
+    };
+    crate::http::same_origin(origin, configured)
+}
+
+/// Rauthy's RP-initiated logout when discovery advertised one, else the console
+/// on this host.
+fn logout_destination(end_session: Option<String>) -> String {
+    end_session.unwrap_or_else(|| "/api/console".into())
 }
 
 pub async fn require_session(
@@ -399,25 +850,34 @@ pub async fn require_session(
         return Redirect::to("/api/auth/login").into_response();
     };
     let hash = SessionToken::hash_value(token);
-    let principal = match session_principal(&pool, &hash, LoginHost::Platform.kind()).await {
-        Ok(Some(principal)) => principal,
+    let row = match session_row(&pool, &hash, LoginHost::Platform.kind()).await {
+        Ok(Some(row)) => row,
         Ok(None) => return Redirect::to("/api/auth/login").into_response(),
         Err(error) => {
             tracing::warn!(%error, "failed to resolve Foundry Circle session");
             return (StatusCode::INTERNAL_SERVER_ERROR, "session lookup error").into_response();
         }
     };
-    if !principal
-        .groups
-        .iter()
-        .any(|group| group == &auth.access_group)
-    {
-        return (
-            StatusCode::FORBIDDEN,
-            "Foundry Circle access is no longer provisioned",
-        )
-            .into_response();
-    }
+    let principal = match revalidate(auth, &pool, &row).await {
+        Revalidated::Valid(principal) => principal,
+        Revalidated::Revoked => {
+            if let Err(error) =
+                revoke_subject(&state, &row.principal.subject, RevokeReason::Revoked).await
+            {
+                tracing::warn!(error = %error, "failed to revoke a rejected Foundry Circle session");
+                return (StatusCode::SERVICE_UNAVAILABLE, "session revocation failed")
+                    .into_response();
+            }
+            return Redirect::to("/api/auth/login").into_response();
+        }
+        Revalidated::Stale => {
+            invalidate_session(&pool, &row.token_hash).await;
+            return Redirect::to("/api/auth/login").into_response();
+        }
+        Revalidated::Unavailable => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "Rauthy is unavailable").into_response();
+        }
+    };
     // Every authenticated request from the holder counts as presence (D3).
     session::touch(&pool, &principal.subject).await;
     request.extensions_mut().insert(principal);
@@ -433,34 +893,241 @@ pub async fn optional_session(
     next: Next,
 ) -> Response {
     request.extensions_mut().insert(state.clone());
-    if let (Some(pool), Some(token)) = (
-        state.database.pool().await,
-        cookie(request.headers(), LoginHost::Platform.cookie_name()),
-    ) {
-        match session_principal(
+    if let (Some(auth), Some(pool)) = (state.auth.as_ref(), state.database.pool().await)
+        && let Some(token) = cookie(request.headers(), LoginHost::Platform.cookie_name())
+        && let Ok(Some(row)) = session_row(
             &pool,
             &SessionToken::hash_value(token),
             LoginHost::Platform.kind(),
         )
         .await
-        {
-            Ok(Some(principal)) => {
+    {
+        match revalidate(auth, &pool, &row).await {
+            Revalidated::Valid(principal) => {
                 // Console use by the holder counts as presence too (D3).
-                if state.auth.as_ref().is_some_and(|auth| {
-                    principal
-                        .groups
-                        .iter()
-                        .any(|group| group == &auth.access_group)
-                }) {
-                    session::touch(&pool, &principal.subject).await;
-                }
+                session::touch(&pool, &principal.subject).await;
                 request.extensions_mut().insert(principal);
             }
-            Ok(None) => {}
-            Err(error) => tracing::warn!(%error, "failed to resolve Foundry Circle session"),
+            Revalidated::Revoked => {
+                if let Err(error) =
+                    revoke_subject(&state, &row.principal.subject, RevokeReason::Revoked).await
+                {
+                    tracing::warn!(
+                        error = %error,
+                        "failed to revoke a rejected Foundry Circle session"
+                    );
+                }
+            }
+            Revalidated::Stale => invalidate_session(&pool, &row.token_hash).await,
+            // Render signed out, but leave the session for the next check.
+            Revalidated::Unavailable => {}
         }
     }
     next.run(request).await
+}
+
+/// The newest token set a check may reason from: a refreshed set whose storage
+/// failed on an earlier request is newer than the row, and its refresh token is
+/// the only one Rauthy still accepts.
+struct TokenBasis {
+    access_token: String,
+    access_expires_at: Option<DateTime<Utc>>,
+    refresh_token: Option<String>,
+}
+
+fn token_basis(carried: Option<&TokenSet>, row: &SessionRow, original: &str) -> TokenBasis {
+    let Some(tokens) = carried else {
+        return TokenBasis {
+            access_token: original.to_owned(),
+            access_expires_at: row.access_expires_at,
+            refresh_token: row.refresh_token.clone(),
+        };
+    };
+    TokenBasis {
+        access_token: tokens.access_token.clone(),
+        access_expires_at: timestamp(tokens.access_expires_at),
+        refresh_token: tokens
+            .refresh_token
+            .clone()
+            .or_else(|| row.refresh_token.clone()),
+    }
+}
+
+/// Revalidate one session (D5, G6): answer from the 5 s cache when it is fresh,
+/// else spend at most [`BUDGET`] on a refresh (when due) and one userinfo call.
+/// A refreshed set is persisted *before* userinfo: the provider has already
+/// rotated its refresh token away, so losing the new set would strand it. The
+/// returned principal carries the claims Rauthy just confirmed.
+///
+/// Only the fresh answer runs unlocked. Everything after it is serialized per
+/// session, so parallel gate requests for one browser (asset loads) refresh at
+/// most once with a given refresh token.
+pub(crate) async fn revalidate(auth: &AuthState, pool: &PgPool, row: &SessionRow) -> Revalidated {
+    let started = Utc::now();
+    let age = cached_age(row.validated_at, started);
+    if is_fresh(age) {
+        let in_access_group = row.principal.groups.contains(&auth.access_group);
+        let outcome = decide(age, false, None, None, in_access_group);
+        return revalidated(outcome, &row.principal);
+    }
+    // The wait for the session's lock spends the same budget as Rauthy: one
+    // that runs out is a retry, not a verdict on the identity.
+    let deadline = tokio::time::Instant::now() + BUDGET;
+    auth.session_locks
+        .run(
+            &row.token_hash,
+            deadline,
+            revalidate_serial(auth, pool, &row.token_hash, started, deadline),
+        )
+        .await
+        .unwrap_or(Revalidated::Unavailable)
+}
+
+/// The serialized part of [`revalidate`], holding the session's lock. The
+/// request before it may have just refreshed: re-read the row first and answer
+/// from its write when it recorded a freshness this request can trust.
+async fn revalidate_serial(
+    auth: &AuthState,
+    pool: &PgPool,
+    hash: &str,
+    started: DateTime<Utc>,
+    deadline: tokio::time::Instant,
+) -> Revalidated {
+    let row = match session_row_by_hash(pool, hash).await {
+        Ok(Some(row)) => row,
+        // Revoked or expired while this request waited: deny this one only.
+        Ok(None) => return Revalidated::Stale,
+        Err(error) => {
+            tracing::warn!(%error, "failed to re-read a Foundry Circle session");
+            return Revalidated::Unavailable;
+        }
+    };
+    let age = cached_age(row.validated_at, started);
+    let in_access_group = |principal: &Principal| principal.groups.contains(&auth.access_group);
+    if is_fresh(age) {
+        let outcome = decide(age, false, None, None, in_access_group(&row.principal));
+        return revalidated(outcome, &row.principal);
+    }
+    let Some(original) = row.access_token.as_deref() else {
+        // A row from before 0006: there is nothing to revalidate, so it alone
+        // is invalidated. A fresh legacy row already answered above.
+        let outcome = decide(
+            age,
+            false,
+            None,
+            Some(UserInfo::Missing),
+            in_access_group(&row.principal),
+        );
+        return revalidated(outcome, &row.principal);
+    };
+    // A set the database refused on an earlier request is newer than the row:
+    // retry the write before using it, and keep it if the retry fails too. The
+    // session's lock is held, so no other request reads or removes it.
+    let carried = match auth.stashed_tokens.peek(hash) {
+        Some(tokens) => {
+            if persist_tokens(pool, hash, &tokens, &row, None).await {
+                auth.stashed_tokens.remove(hash);
+                Some(tokens)
+            } else {
+                // Nothing new is known and no freshness is recorded: the next
+                // request retries once more.
+                return Revalidated::Unavailable;
+            }
+        }
+        None => None,
+    };
+    let basis = token_basis(carried.as_deref(), &row, original);
+    let due = refresh_due(
+        basis.access_expires_at,
+        basis.refresh_token.is_some(),
+        started,
+    );
+    let mut refresh = None;
+    let mut refreshed = None;
+    if due && let Some(refresh_token) = basis.refresh_token.as_deref() {
+        match tokio::time::timeout_at(
+            deadline,
+            auth.client.refresh(refresh_token, &row.principal.subject),
+        )
+        .await
+        {
+            Ok(Ok(tokens)) => {
+                // Once Rauthy has rotated the refresh token the old row can
+                // never renew again, so the new set is stashed BEFORE the write
+                // is awaited: a request cancelled mid-write (Caddy gives up at
+                // 2 s) still leaves it for the next one, and it is dropped only
+                // after the row has it. Persisting precedes userinfo.
+                let tokens = auth.stashed_tokens.insert(hash, tokens);
+                if persist_tokens(pool, hash, &tokens, &row, carried.as_deref()).await {
+                    auth.stashed_tokens.remove(hash);
+                    refreshed = Some(tokens);
+                    refresh = Some(Refresh::Refreshed);
+                } else {
+                    return Revalidated::Unavailable;
+                }
+            }
+            Ok(Err(UserInfoError::Rejected)) => {
+                // The grant itself is gone: no userinfo call can change that.
+                tracing::debug!("Foundry Circle token refresh was rejected");
+                refresh = Some(Refresh::Rejected);
+            }
+            // Retryable: the expiring access token says nothing now, so do not
+            // judge it with userinfo. New requests fail closed, nothing is
+            // revoked (D6).
+            Ok(Err(UserInfoError::Unavailable)) | Err(_) => {
+                refresh = Some(Refresh::Unavailable);
+            }
+        }
+    }
+    let access = refreshed
+        .as_ref()
+        .map_or(basis.access_token.as_str(), |tokens| {
+            tokens.access_token.as_str()
+        });
+    // Only a successful refresh (or no refresh due) may judge the token with
+    // userinfo: a refusal or an outage has already decided the request.
+    let mut claims = None;
+    let userinfo = if refresh.is_none_or(|refresh| refresh == Refresh::Refreshed) {
+        match tokio::time::timeout_at(
+            deadline,
+            auth.client.userinfo(access, &row.principal.subject),
+        )
+        .await
+        {
+            Ok(Ok(found)) => {
+                let verdict = if found.groups.contains(&auth.access_group) {
+                    UserInfo::Claims
+                } else {
+                    UserInfo::Rejected
+                };
+                claims = Some(found);
+                Some(verdict)
+            }
+            Ok(Err(UserInfoError::Rejected)) => Some(UserInfo::Rejected),
+            // Retryable: new requests fail closed, the session stays.
+            Ok(Err(UserInfoError::Unavailable)) | Err(_) => None,
+        }
+    } else {
+        None
+    };
+    // The verdict's own claims decide membership: a group added in Rauthy
+    // since login counts as access now.
+    let confirmed_group = claims
+        .as_ref()
+        .is_some_and(|claims| claims.groups.contains(&auth.access_group));
+    match decide(age, due, refresh, userinfo, confirmed_group) {
+        Revalidation::Valid => {
+            let Some(claims) = claims else {
+                return Revalidated::Valid(row.principal.clone());
+            };
+            let principal = principal_from(&row, &claims);
+            apply_claims(pool, hash, &principal, started).await;
+            Revalidated::Valid(principal)
+        }
+        Revalidation::Revoked => Revalidated::Revoked,
+        Revalidation::Stale => Revalidated::Stale,
+        Revalidation::Unavailable => Revalidated::Unavailable,
+    }
 }
 
 async fn save_transaction(
@@ -516,20 +1183,18 @@ async fn save_principal_and_session(
     pool: &PgPool,
     auth: &AuthState,
     identity: &VerifiedIdentity,
+    tokens: &TokenSet,
     token: &SessionToken,
     host: LoginHost,
 ) -> Result<(), sqlx::Error> {
     let groups: Vec<String> = identity.groups.iter().cloned().collect();
     let claims =
         json!({"groups": groups, "email": identity.email, "display_name": identity.display_name});
-    let configured_expiry = Utc::now()
+    // G7: the session lives for the broker's own TTL. Revalidation (D5) bounds
+    // membership, so it is no longer capped at the ID token's expiry.
+    let expires_at = Utc::now()
         + chrono::Duration::from_std(auth.session_ttl)
             .unwrap_or_else(|_| chrono::Duration::hours(12));
-    let expires_at = identity
-        .expires_at
-        .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp as i64, 0))
-        .map(|token_expiry| token_expiry.min(configured_expiry))
-        .unwrap_or(configured_expiry);
     let mut transaction = pool.begin().await?;
     sqlx::query("INSERT INTO principals (subject, issuer, display_name, email, claims) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (subject) DO UPDATE SET issuer = EXCLUDED.issuer, display_name = EXCLUDED.display_name, email = EXCLUDED.email, claims = EXCLUDED.claims, updated_at = now()")
         .bind(&identity.subject)
@@ -539,31 +1204,65 @@ async fn save_principal_and_session(
         .bind(claims)
         .execute(&mut *transaction)
         .await?;
+    // `validated_at` stays NULL: the login's userinfo answer can arrive long
+    // after it started, so treating it as a completed revalidation would open
+    // a fresh 5 s window. The first authenticated request revalidates.
     sqlx::query(
-        "INSERT INTO sessions (id, subject, token_hash, expires_at, kind) VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO sessions (id, subject, token_hash, expires_at, kind, access_token, refresh_token, id_token, access_expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(Uuid::new_v4())
     .bind(&identity.subject)
     .bind(token.hash())
     .bind(expires_at)
     .bind(host.kind())
+    .bind(&tokens.access_token)
+    .bind(tokens.refresh_token.as_deref())
+    .bind(tokens.id_token.as_deref())
+    .bind(timestamp(tokens.access_expires_at))
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await
 }
 
-/// Resolve an opaque session token for one host kind. A token created on the
-/// other host never matches.
-pub(crate) async fn session_principal(
+/// The Unix seconds from a provider token response, as a database timestamp.
+fn timestamp(seconds: Option<u64>) -> Option<DateTime<Utc>> {
+    DateTime::<Utc>::from_timestamp(seconds? as i64, 0)
+}
+
+/// Resolve an opaque session token for one host kind, with the tokens the gate
+/// revalidates. A token created on the other host never matches.
+pub(crate) async fn session_row(
     pool: &PgPool,
     hash: &str,
     kind: &str,
-) -> Result<Option<Principal>, sqlx::Error> {
-    let row = sqlx::query("SELECT p.subject, p.issuer, p.display_name, p.email, p.claims FROM sessions s JOIN principals p ON p.subject = s.subject WHERE s.token_hash = $1 AND s.kind = $2 AND s.revoked_at IS NULL AND s.expires_at > now()")
-        .bind(hash)
-        .bind(kind)
-        .fetch_optional(pool)
-        .await?;
+) -> Result<Option<SessionRow>, sqlx::Error> {
+    fetch_session_row(pool, hash, Some(kind)).await
+}
+
+/// Re-read a session whatever its host kind, for a request that already
+/// resolved it through [`session_row`] and holds its lock: the row it must use
+/// is the one the previous holder wrote, not its own snapshot.
+async fn session_row_by_hash(pool: &PgPool, hash: &str) -> Result<Option<SessionRow>, sqlx::Error> {
+    fetch_session_row(pool, hash, None).await
+}
+
+async fn fetch_session_row(
+    pool: &PgPool,
+    hash: &str,
+    kind: Option<&str>,
+) -> Result<Option<SessionRow>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT p.subject, p.issuer, p.display_name, p.email, p.claims,
+                s.access_token, s.refresh_token, s.id_token, s.access_expires_at, s.validated_at
+           FROM sessions s JOIN principals p ON p.subject = s.subject
+          WHERE s.token_hash = $1 AND ($2::text IS NULL OR s.kind = $2)
+            AND s.revoked_at IS NULL AND s.expires_at > now()",
+    )
+    .bind(hash)
+    .bind(kind)
+    .fetch_optional(pool)
+    .await?;
     row.map(|row| {
         let claims: serde_json::Value = row.try_get("claims")?;
         let groups = claims
@@ -576,15 +1275,226 @@ pub(crate) async fn session_principal(
                     .collect()
             })
             .unwrap_or_default();
-        Ok(Principal {
-            subject: row.try_get("subject")?,
-            issuer: row.try_get("issuer")?,
-            display_name: row.try_get("display_name")?,
-            email: row.try_get("email")?,
-            groups,
+        Ok(SessionRow {
+            token_hash: hash.to_owned(),
+            principal: Principal {
+                subject: row.try_get("subject")?,
+                issuer: row.try_get("issuer")?,
+                display_name: row.try_get("display_name")?,
+                email: row.try_get("email")?,
+                groups,
+            },
+            access_token: row.try_get("access_token")?,
+            refresh_token: row.try_get("refresh_token")?,
+            id_token: row.try_get("id_token")?,
+            access_expires_at: row.try_get("access_expires_at")?,
+            validated_at: row.try_get("validated_at")?,
         })
     })
     .transpose()
+}
+
+/// Record a confirmed revalidation: Rauthy's claims on the principal, and the
+/// freshness anchor as when the check *started*.
+async fn apply_claims(pool: &PgPool, hash: &str, principal: &Principal, started: DateTime<Utc>) {
+    let claims = json!({
+        "groups": principal.groups,
+        "email": principal.email,
+        "display_name": principal.display_name,
+    });
+    let result = async {
+        sqlx::query("UPDATE principals SET display_name = $2, email = $3, claims = $4, updated_at = now() WHERE subject = $1")
+            .bind(&principal.subject)
+            .bind(&principal.display_name)
+            .bind(&principal.email)
+            .bind(claims)
+            .execute(pool)
+            .await?;
+        sqlx::query("UPDATE sessions SET validated_at = $2 WHERE token_hash = $1")
+            .bind(hash)
+            .bind(started)
+            .execute(pool)
+            .await?;
+        Ok::<(), sqlx::Error>(())
+    }
+    .await;
+    if let Err(error) = result {
+        tracing::warn!(%error, "failed to record a Foundry Circle revalidation");
+    }
+}
+
+/// Persist a refreshed token set, returning whether the row was written. The
+/// provider may omit the refresh token: the previous one stays, because it is
+/// still the only way to renew; the same holds for the ID token the logout hint
+/// needs.
+async fn persist_tokens(
+    pool: &PgPool,
+    hash: &str,
+    tokens: &TokenSet,
+    row: &SessionRow,
+    previous: Option<&TokenSet>,
+) -> bool {
+    let refresh = tokens
+        .refresh_token
+        .as_deref()
+        .or_else(|| previous.and_then(|previous| previous.refresh_token.as_deref()))
+        .or(row.refresh_token.as_deref());
+    let id_token = tokens
+        .id_token
+        .as_deref()
+        .or_else(|| previous.and_then(|previous| previous.id_token.as_deref()))
+        .or(row.id_token.as_deref());
+    match sqlx::query(
+        "UPDATE sessions SET access_token = $2, refresh_token = $3, id_token = $4, access_expires_at = $5 WHERE token_hash = $1",
+    )
+    .bind(hash)
+    .bind(&tokens.access_token)
+    .bind(refresh)
+    .bind(id_token)
+    .bind(timestamp(tokens.access_expires_at))
+    .execute(pool)
+    .await
+    {
+        Ok(_) => true,
+        Err(error) => {
+            tracing::warn!(%error, "failed to store refreshed Foundry Circle tokens");
+            false
+        }
+    }
+}
+
+/// Why a subject-wide revocation could not complete. Every entry point turns
+/// this into a 503: the browser must not be told the sessions are gone while
+/// the database still has them.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RevokeError {
+    /// The database pool is not ready.
+    #[error("database is not configured")]
+    DatabaseUnavailable,
+    /// The revocation UPDATE failed; nothing was revoked.
+    #[error("session revocation failed: {0}")]
+    Store(#[from] sqlx::Error),
+}
+
+/// Revoke one session row. A row from before 0006 holds no tokens, so nothing
+/// can revalidate it; the request is signed out without touching the subject's
+/// newer sessions.
+pub(crate) async fn invalidate_session(pool: &PgPool, hash: &str) {
+    if let Err(error) = sqlx::query(
+        "UPDATE sessions SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL",
+    )
+    .bind(hash)
+    .execute(pool)
+    .await
+    {
+        tracing::warn!(%error, "failed to invalidate a Foundry Circle session");
+    }
+}
+
+/// Revoke every session a subject holds and begin ending the lease they hold,
+/// in one transaction, then rotate their Foundry users' passwords (D5, G6).
+/// The database rows and their audit entries are never best effort: a failure
+/// rolls back both and is returned to the caller. The reconciler finishes an
+/// `ending` lease (stop the world, restart Foundry) without depending on this
+/// request. Only the Foundry password rotation is detached and best effort,
+/// because it would outlast Caddy's 2 s gate deadline and the revoked play
+/// session already makes every gated Foundry request fail.
+pub(crate) async fn revoke_subject(
+    state: &AppState,
+    subject: &str,
+    reason: RevokeReason,
+) -> Result<(), RevokeError> {
+    let pool = state
+        .database
+        .pool()
+        .await
+        .ok_or(RevokeError::DatabaseUnavailable)?;
+    let mut transaction = pool.begin().await?;
+    // Lock order matches `/_circle/enter`, which locks the lease row first: the
+    // `game_session` row must come before the subject's `sessions` rows, or the
+    // two writers can deadlock. A plain row-level transition is enough; the
+    // reconciler owns Foundry from here.
+    let ending = sqlx::query(
+        "UPDATE game_session SET phase = 'ending', end_reason = 'revoked'
+         WHERE ended_at IS NULL AND holder = $1 AND phase IN ('setup', 'running')
+         RETURNING id",
+    )
+    .bind(subject)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    sqlx::query("UPDATE sessions SET revoked_at = now() WHERE subject = $1 AND revoked_at IS NULL")
+        .bind(subject)
+        .execute(&mut *transaction)
+        .await?;
+    // The audit records what actually happened: "ok" only after both writes.
+    session::insert_audit(
+        &mut *transaction,
+        Some(subject),
+        "session.revoke",
+        "ok",
+        json!({"subject": subject, "reason": reason.as_str()}),
+    )
+    .await?;
+    if let Some(ending) = ending {
+        let id: Uuid = ending.try_get("id")?;
+        session::insert_audit(
+            &mut *transaction,
+            Some(subject),
+            "session.stop",
+            "ok",
+            json!({"sessionId": id, "reason": "revoked"}),
+        )
+        .await?;
+    }
+    // The open world, if any, holds the subject's mapped Foundry users. The
+    // rotation reads it after commit, so the row is only observed here.
+    let world: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT world_id FROM game_session WHERE ended_at IS NULL",
+    )
+    .fetch_optional(&mut *transaction)
+    .await?
+    .flatten();
+    transaction.commit().await?;
+    // Defense in depth only: the revoked play session already closes the gate
+    // and `stream_reauth` drops open sockets. A cancelled gate request must not
+    // lose it, so it stays detached.
+    if let Some(world) = world {
+        let state = state.clone();
+        let subject = subject.to_owned();
+        tokio::spawn(async move {
+            rotate_mapped_users(&state, &pool, &subject, &world).await;
+        });
+    }
+    Ok(())
+}
+
+/// Rotate each of the subject's mapped Foundry users' passwords in `world`.
+/// Foundry deletes a user's HTTP sessions on a password change, and the play
+/// host's `stream_reauth` then closes their socket because the gate refuses it.
+async fn rotate_mapped_users(state: &AppState, pool: &PgPool, subject: &str, world: &str) {
+    let users: Vec<String> = match sqlx::query_scalar(
+        "SELECT user_id FROM foundry_users WHERE subject = $1 AND world_id = $2",
+    )
+    .bind(subject)
+    .bind(world)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(users) => users,
+        Err(error) => {
+            tracing::warn!(%error, "failed to read a revoked principal's Foundry users");
+            return;
+        }
+    };
+    for user_id in users {
+        let op = AccountOp::SetPassword {
+            user_id,
+            password: adoption::random_password(),
+        };
+        if let Err(error) = state.driver.account(op).await {
+            tracing::warn!(%error, world, "Foundry refused a revocation password rotation");
+        }
+    }
 }
 
 fn auth_error_response(error: AuthError) -> Response {
@@ -613,8 +1523,11 @@ fn session_cookie(host: LoginHost, token: &str, ttl: Duration) -> String {
     )
 }
 
-fn expired_session_cookie() -> String {
-    "foundry_circle_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax".into()
+fn expired_session_cookie(host: LoginHost) -> String {
+    format!(
+        "{}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax",
+        host.cookie_name()
+    )
 }
 
 /// After the play-host login only a same-host path is followed; anything else
@@ -742,11 +1655,17 @@ mod tests {
 
     #[test]
     fn logout_cookie_expires_the_session() {
-        let cookie = expired_session_cookie();
-        assert!(cookie.contains("Max-Age=0"));
-        assert!(cookie.contains("HttpOnly"));
-        assert!(cookie.contains("Secure"));
-        assert!(cookie.contains("SameSite=Lax"));
+        for (host, name) in [
+            (LoginHost::Platform, "foundry_circle_session="),
+            (LoginHost::Play, "foundry_circle_play="),
+        ] {
+            let cookie = expired_session_cookie(host);
+            assert!(cookie.starts_with(name), "{cookie}");
+            assert!(cookie.contains("Max-Age=0"));
+            assert!(cookie.contains("HttpOnly"));
+            assert!(cookie.contains("Secure"));
+            assert!(cookie.contains("SameSite=Lax"));
+        }
     }
 
     fn headers_with_cookie(value: &str) -> HeaderMap {
@@ -842,5 +1761,512 @@ mod tests {
         assert_eq!(play_return_to(Some("//evil.invalid/game")), "/join");
         assert_eq!(play_return_to(Some("/game\\@evil.invalid")), "/join");
         assert_eq!(play_return_to(Some("game")), "/join");
+    }
+
+    fn stored_row() -> SessionRow {
+        SessionRow {
+            token_hash: "hash".into(),
+            principal: Principal {
+                subject: "sub".into(),
+                issuer: "https://id.example/".into(),
+                display_name: Some("Robin".into()),
+                email: Some("robin@example.test".into()),
+                groups: vec!["foundry-circle-users".into()],
+            },
+            access_token: Some("access".into()),
+            refresh_token: Some("refresh".into()),
+            id_token: Some("id".into()),
+            access_expires_at: None,
+            validated_at: None,
+        }
+    }
+
+    #[test]
+    fn a_fresh_answer_is_used_without_asking_rauthy() {
+        // Inside 5 s the cached answer wins even with no Rauthy results at all.
+        assert_eq!(
+            decide(Some(Duration::from_millis(4_999)), false, None, None, true),
+            Revalidation::Valid
+        );
+        // Exactly at the window the check must run again; with no answer yet it
+        // cannot be trusted.
+        assert_eq!(
+            decide(Some(Duration::from_secs(5)), false, None, None, true),
+            Revalidation::Unavailable
+        );
+        // A legacy row (never validated) is never fresh, and it is stale alone:
+        // it must not revoke the subject's newer sessions.
+        assert_eq!(
+            decide(None, false, None, Some(UserInfo::Missing), true),
+            Revalidation::Stale
+        );
+    }
+
+    #[test]
+    fn a_tokenless_row_is_stale_and_never_revokes_the_subject() {
+        // A row from before 0006 cannot be revalidated, so it is invalidated
+        // alone: an old tab must not end the subject's newer sessions or lease.
+        let outcome = decide(None, false, None, Some(UserInfo::Missing), true);
+        assert_eq!(outcome, Revalidation::Stale);
+        assert_ne!(outcome, Revalidation::Revoked);
+        assert_eq!(
+            decide(None, false, None, Some(UserInfo::Missing), false),
+            Revalidation::Stale
+        );
+    }
+
+    #[test]
+    fn a_login_row_has_no_freshness_anchor() {
+        // `save_principal_and_session` inserts `validated_at = NULL`, so a
+        // login-time userinfo answer that arrived late cannot open a window:
+        // the first authenticated request asks again.
+        let now = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        assert_eq!(cached_age(None, now), None);
+        assert_eq!(
+            decide(None, false, None, Some(UserInfo::Claims), true),
+            Revalidation::Valid
+        );
+    }
+
+    #[test]
+    fn only_a_confirmed_member_is_valid() {
+        let stale = Some(Duration::from_secs(30));
+        assert_eq!(
+            decide(stale, false, None, Some(UserInfo::Claims), true),
+            Revalidation::Valid
+        );
+        assert_eq!(
+            decide(stale, false, None, Some(UserInfo::Claims), false),
+            Revalidation::Revoked
+        );
+        // Even a cached answer stops being valid when its claims lost access.
+        assert_eq!(
+            decide(Some(Duration::from_secs(1)), false, None, None, false),
+            Revalidation::Revoked
+        );
+    }
+
+    #[test]
+    fn a_rejected_identity_is_revoked_and_an_outage_is_not() {
+        let stale = Some(Duration::from_secs(30));
+        assert_eq!(
+            decide(stale, false, None, Some(UserInfo::Rejected), true),
+            Revalidation::Revoked
+        );
+        assert_eq!(
+            decide(
+                stale,
+                true,
+                Some(Refresh::Refreshed),
+                Some(UserInfo::Rejected),
+                true
+            ),
+            Revalidation::Revoked
+        );
+        assert_eq!(
+            decide(stale, false, None, None, true),
+            Revalidation::Unavailable
+        );
+    }
+
+    #[test]
+    fn a_refused_refresh_revokes_without_judging_the_access_token() {
+        let stale = Some(Duration::from_secs(30));
+        for in_access_group in [true, false] {
+            assert_eq!(
+                decide(stale, true, Some(Refresh::Rejected), None, in_access_group),
+                Revalidation::Revoked
+            );
+        }
+    }
+
+    #[test]
+    fn an_unavailable_refresh_is_unavailable_without_judging_the_access_token() {
+        let stale = Some(Duration::from_secs(30));
+        assert_eq!(
+            decide(stale, true, Some(Refresh::Unavailable), None, true),
+            Revalidation::Unavailable
+        );
+    }
+
+    #[test]
+    fn a_successful_refresh_still_lets_userinfo_decide() {
+        let stale = Some(Duration::from_secs(30));
+        assert_eq!(
+            decide(
+                stale,
+                true,
+                Some(Refresh::Refreshed),
+                Some(UserInfo::Claims),
+                true
+            ),
+            Revalidation::Valid
+        );
+        assert_eq!(
+            decide(stale, true, Some(Refresh::Refreshed), None, true),
+            Revalidation::Unavailable
+        );
+    }
+
+    #[test]
+    fn the_budget_running_out_is_unavailable() {
+        // A refresh that used the whole budget leaves no userinfo answer: new
+        // requests fail closed and nothing is revoked (D6).
+        assert_eq!(
+            decide(
+                Some(Duration::from_secs(30)),
+                true,
+                Some(Refresh::Refreshed),
+                None,
+                true
+            ),
+            Revalidation::Unavailable
+        );
+    }
+
+    #[test]
+    fn freshness_is_anchored_at_the_start_of_the_check() {
+        let started = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        // A check that took 1.4 s still anchors at `started`, so 5.1 s after it
+        // began the answer is stale, even though it arrived 3.7 s earlier.
+        let age = cached_age(
+            Some(started),
+            started + chrono::Duration::milliseconds(5_100),
+        );
+        assert_eq!(age, Some(Duration::from_millis(5_100)));
+        assert_eq!(
+            decide(age, false, None, None, true),
+            Revalidation::Unavailable
+        );
+        // Anchored at completion it would still be fresh: the difference the
+        // start anchor makes.
+        let at_completion = cached_age(
+            Some(started),
+            started + chrono::Duration::milliseconds(1_400),
+        );
+        assert_eq!(
+            decide(at_completion, false, None, None, true),
+            Revalidation::Valid
+        );
+    }
+
+    #[test]
+    fn a_carried_refresh_wins_over_the_stored_row() {
+        let mut row = stored_row();
+        row.access_expires_at = DateTime::<Utc>::from_timestamp(1_600_000_000, 0);
+        row.refresh_token = Some("old-refresh".into());
+        let carried = TokenSet {
+            access_token: "new-access".into(),
+            refresh_token: Some("new-refresh".into()),
+            id_token: None,
+            access_expires_at: Some(1_700_000_000),
+        };
+        let basis = token_basis(Some(&carried), &row, "old-access");
+        // The carried set is newer than the row, and its refresh token is the
+        // only one Rauthy still accepts.
+        assert_eq!(basis.access_token, "new-access");
+        assert_eq!(
+            basis.access_expires_at,
+            DateTime::<Utc>::from_timestamp(1_700_000_000, 0)
+        );
+        assert_eq!(basis.refresh_token.as_deref(), Some("new-refresh"));
+        // Nothing carried: the row is the basis, as before.
+        let basis = token_basis(None, &row, "old-access");
+        assert_eq!(basis.access_token, "old-access");
+        assert_eq!(basis.access_expires_at, row.access_expires_at);
+        assert_eq!(basis.refresh_token.as_deref(), Some("old-refresh"));
+        // A carried set without a refresh token keeps the row's.
+        let carried = TokenSet {
+            refresh_token: None,
+            ..carried
+        };
+        assert_eq!(
+            token_basis(Some(&carried), &row, "old-access")
+                .refresh_token
+                .as_deref(),
+            Some("old-refresh")
+        );
+    }
+
+    #[test]
+    fn a_stashed_refresh_is_peeked_and_kept_until_the_row_has_it() {
+        let stash = TokenStash::default();
+        let tokens = TokenSet {
+            access_token: "access-1".into(),
+            refresh_token: Some("refresh-1".into()),
+            id_token: None,
+            access_expires_at: None,
+        };
+        stash.insert("hash", tokens);
+        // The next check clones the set to retry the database write, and the
+        // set stays stashed: a failing write must not lose it.
+        let carried = stash.peek("hash").expect("a stashed set");
+        assert_eq!(carried.access_token, "access-1");
+        assert!(stash.peek("hash").is_some());
+        // The retry failed, so the check after finds it again.
+        assert_eq!(
+            stash.peek("hash").map(|tokens| tokens.access_token.clone()),
+            Some("access-1".into())
+        );
+        // Only a write that succeeded removes it.
+        stash.remove("hash");
+        assert!(stash.peek("hash").is_none());
+        // Another session's stash is separate.
+        assert!(stash.peek("other").is_none());
+    }
+
+    #[tokio::test]
+    async fn parallel_revalidations_of_one_session_refresh_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // One fake request: its "row" is fresh only once the other task wrote
+        // it. `yield_now` lets both tasks pile up on the lock, as parallel
+        // asset loads do.
+        async fn request(
+            locks: &SessionLocks,
+            refreshes: Arc<AtomicUsize>,
+            stored: Arc<Mutex<Option<&'static str>>>,
+        ) -> Option<&'static str> {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+            locks
+                .run("hash", deadline, async move {
+                    if let Some(seen) = *stored.lock().unwrap() {
+                        return seen;
+                    }
+                    tokio::task::yield_now().await;
+                    refreshes.fetch_add(1, Ordering::SeqCst);
+                    *stored.lock().unwrap() = Some("refreshed");
+                    "refreshed"
+                })
+                .await
+        }
+
+        let locks = SessionLocks::default();
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        // The stand-in for the shared row: whichever request refreshes records
+        // its result here, which is what the other one must observe instead of
+        // refreshing again with the same refresh token.
+        let stored: Arc<Mutex<Option<&'static str>>> = Arc::new(Mutex::new(None));
+        let (first, second) = tokio::join!(
+            request(&locks, refreshes.clone(), stored.clone()),
+            request(&locks, refreshes.clone(), stored.clone()),
+        );
+        assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+        // The second caller answered from the first caller's write.
+        assert_eq!(first, Some("refreshed"));
+        assert_eq!(second, Some("refreshed"));
+        // Nothing outlives the requests that used the session.
+        assert!(locks.gates.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_waiter_past_the_budget_gets_no_verdict() {
+        let locks = SessionLocks::default();
+        let holder_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let waiter_deadline = tokio::time::Instant::now() + Duration::from_millis(10);
+        let (held, waited) = tokio::join!(
+            locks.run("hash", holder_deadline, async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                7
+            }),
+            locks.run("hash", waiter_deadline, async { 8 }),
+        );
+        assert_eq!(held, Some(7));
+        // Out of budget: the request is retried, not judged.
+        assert_eq!(waited, None);
+        // Neither the expired waiter nor the holder leaves an entry behind.
+        assert!(locks.gates.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn leases_dropped_together_leave_no_lock_entry() {
+        // Two leases on one entry released from two threads at once: the
+        // last one out must still see itself as the only user and remove it.
+        for _ in 0..200 {
+            let locks = SessionLocks::default();
+            let barrier = std::sync::Barrier::new(2);
+            std::thread::scope(|scope| {
+                for _ in 0..2 {
+                    scope.spawn(|| {
+                        let lease = GateLease {
+                            locks: &locks,
+                            hash: "hash",
+                            gate: Some(locks.gate("hash")),
+                        };
+                        barrier.wait();
+                        drop(lease);
+                    });
+                }
+            });
+            assert!(locks.gates.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_holder_leaves_no_lock_entry() {
+        let locks = SessionLocks::default();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        // Caddy dropping the request at 2 s cancels the future mid-work.
+        let cancelled = tokio::time::timeout(
+            Duration::from_millis(10),
+            locks.run("hash", deadline, std::future::pending::<()>()),
+        )
+        .await;
+        assert!(cancelled.is_err());
+        assert!(locks.gates.lock().unwrap().is_empty());
+        // And the lock is free for the next request.
+        assert_eq!(locks.run("hash", deadline, async { 1 }).await, Some(1));
+    }
+
+    #[test]
+    fn a_refresh_is_only_due_inside_the_last_minute() {
+        let now = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        let at = |seconds: i64| Some(now + chrono::Duration::seconds(seconds));
+        assert!(refresh_due(at(60), true, now));
+        assert!(refresh_due(at(1), true, now));
+        assert!(refresh_due(at(-30), true, now));
+        assert!(!refresh_due(at(61), true, now));
+        // No refresh token, no refresh; no expiry, no refresh.
+        assert!(!refresh_due(at(1), false, now));
+        assert!(!refresh_due(None, true, now));
+    }
+
+    #[test]
+    fn revoke_reasons_are_the_audit_strings() {
+        assert_eq!(RevokeReason::Revoked.as_str(), "revoked");
+        assert_eq!(RevokeReason::Admin.as_str(), "admin");
+        assert_eq!(RevokeReason::Logout.as_str(), "logout");
+        // The lease records the same word the gate used.
+        assert_eq!(RevokeReason::Revoked.as_str(), "revoked");
+    }
+
+    #[test]
+    fn only_an_admin_may_revoke_sessions() {
+        let groups = |groups: &[&str]| Principal {
+            subject: "sub".into(),
+            issuer: "https://id.example/".into(),
+            display_name: None,
+            email: None,
+            groups: groups.iter().map(|group| (*group).to_owned()).collect(),
+        };
+        let admin = groups(&["foundry-circle-users", "foundry-circle-admins"]);
+        let gm = groups(&["foundry-circle-users", "foundry-circle-gms"]);
+        let player = groups(&["foundry-circle-users"]);
+        assert!(may_revoke(&admin, "foundry-circle-admins"));
+        assert!(!may_revoke(&gm, "foundry-circle-admins"));
+        assert!(!may_revoke(&player, "foundry-circle-admins"));
+        // A similar group name is not the admin group.
+        assert!(!may_revoke(
+            &groups(&["foundry-circle-admin"]),
+            "foundry-circle-admins"
+        ));
+    }
+
+    #[test]
+    fn logout_uses_rauthy_when_it_advertises_an_end_session_url() {
+        let url = "https://id.example/auth/v1/logout?client_id=fc".to_owned();
+        assert_eq!(logout_destination(Some(url.clone())), url);
+        assert_eq!(logout_destination(None), "/api/console");
+    }
+
+    #[test]
+    fn logout_requires_the_exact_origin_of_its_host() {
+        let platform = Some("https://vtt.example");
+        let play = Some("https://play.vtt.example");
+        let origin = |value: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::ORIGIN, value.parse().unwrap());
+            headers
+        };
+        assert!(logout_origin_allowed(
+            LoginHost::Platform,
+            &origin("https://vtt.example"),
+            platform,
+            play
+        ));
+        // The play host's origin never authorises the platform logout.
+        assert!(!logout_origin_allowed(
+            LoginHost::Platform,
+            &origin("https://play.vtt.example"),
+            platform,
+            play
+        ));
+        assert!(logout_origin_allowed(
+            LoginHost::Play,
+            &origin("https://play.vtt.example"),
+            platform,
+            play
+        ));
+        // The platform origin never authorises the play logout.
+        assert!(!logout_origin_allowed(
+            LoginHost::Play,
+            &origin("https://vtt.example"),
+            platform,
+            play
+        ));
+        // Missing `Origin` is a refusal, never an accepted logout.
+        assert!(!logout_origin_allowed(
+            LoginHost::Platform,
+            &HeaderMap::new(),
+            platform,
+            play
+        ));
+        assert!(!logout_origin_allowed(
+            LoginHost::Play,
+            &HeaderMap::new(),
+            platform,
+            play
+        ));
+        // A lookalike origin and an unconfigured host are refusals too.
+        assert!(!logout_origin_allowed(
+            LoginHost::Platform,
+            &origin("https://vtt.example.evil"),
+            platform,
+            play
+        ));
+        assert!(!logout_origin_allowed(
+            LoginHost::Play,
+            &origin("https://play.vtt.example"),
+            platform,
+            None
+        ));
+    }
+
+    #[test]
+    fn a_logout_with_a_session_cookie_needs_the_database() {
+        // No cookie: nothing this host could revoke, so the cookie is cleared
+        // and the browser leaves even while the database is down.
+        assert_eq!(logout_plan(None, false), LogoutPlan::Clear);
+        assert_eq!(logout_plan(None, true), LogoutPlan::Clear);
+        // A cookie names sessions that stay valid without the database: the
+        // logout refuses instead of clearing the cookie and redirecting as if
+        // they were gone.
+        assert_eq!(logout_plan(Some("opaque"), false), LogoutPlan::Refuse);
+        assert_eq!(logout_plan(Some("opaque"), true), LogoutPlan::Revoke);
+        // An empty cookie carries no session.
+        assert_eq!(logout_plan(Some(""), false), LogoutPlan::Clear);
+    }
+
+    #[test]
+    fn revalidated_claims_replace_the_login_snapshot() {
+        let row = stored_row();
+        let claims = UserInfoClaims {
+            subject: "sub".into(),
+            email: Some("new@example.test".into()),
+            display_name: Some("Robin (2)".into()),
+            groups: ["foundry-circle-users", "foundry-circle-gms"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        };
+        let principal = principal_from(&row, &claims);
+        assert_eq!(principal.subject, "sub");
+        assert_eq!(principal.issuer, "https://id.example/");
+        assert_eq!(principal.email.as_deref(), Some("new@example.test"));
+        assert_eq!(principal.display_name.as_deref(), Some("Robin (2)"));
+        assert_eq!(
+            principal.groups,
+            vec!["foundry-circle-gms", "foundry-circle-users"]
+        );
     }
 }

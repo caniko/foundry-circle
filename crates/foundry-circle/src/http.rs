@@ -16,7 +16,7 @@ use tokio::{sync::RwLock, time::sleep};
 use uuid::Uuid;
 
 use crate::{
-    ConsoleData, ConsoleView, LiveGame, Role, SessionPhase,
+    ConsoleData, ConsoleView, LiveGame, Role, SessionPhase, SessionUser,
     driver::{FakeDriver, FoundryDriver, WorldError, WorldOp, WorldState},
 };
 
@@ -269,6 +269,10 @@ pub fn api_router_with_state(state: AppState) -> Router {
         .route("/api/v1/session", get(session_status).post(session_start))
         .route("/api/v1/session/setup", post(session_setup))
         .route("/api/v1/session/stop", post(session_stop))
+        .route(
+            "/api/v1/admin/principals/{subject}/revoke",
+            post(revoke_principal),
+        )
         .route("/api/v1/world", get(world))
         .route("/api/v1/world/capabilities", get(capabilities))
         .route("/api/v1/world/documents/{collection}", get(documents))
@@ -286,6 +290,7 @@ pub fn api_router_with_state(state: AppState) -> Router {
         // everything else goes through `forward_auth` to `/_circle/auth`.
         .route("/_circle/login", get(auth::play_login_start))
         .route("/_circle/oidc/callback", get(auth::play_callback))
+        .route("/_circle/logout", post(auth::play_logout))
         .route("/_circle/auth", get(play::gate))
         .route("/_circle/setup", get(play::setup))
         .route("/_circle/enter", get(play::enter))
@@ -386,6 +391,14 @@ pub async fn console_view() -> ConsoleView {
     let adoption_pending = open
         .as_ref()
         .is_some_and(|open| open.phase == SessionPhase::Running && !open.adopted);
+    let session_users = if role == Role::Admin {
+        match state.database.pool().await {
+            Some(pool) => active_session_users(&pool).await,
+            None => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
     ConsoleView::Console(Box::new(ConsoleData {
         name,
         email: principal.email.clone(),
@@ -404,7 +417,40 @@ pub async fn console_view() -> ConsoleView {
         session,
         unmanaged_world: unmanaged,
         adoption_pending,
+        session_users,
     }))
+}
+
+/// Every principal with an unrevoked, unexpired session, for the admin's
+/// revocation list (D5). Identity only: no token ever leaves the database.
+async fn active_session_users(pool: &PgPool) -> Vec<SessionUser> {
+    let rows = sqlx::query(
+        "SELECT p.subject, COALESCE(p.display_name, p.email, p.subject) AS name, p.email,
+                array_agg(DISTINCT s.kind) AS kinds
+           FROM sessions s JOIN principals p ON p.subject = s.subject
+          WHERE s.revoked_at IS NULL AND s.expires_at > now()
+          GROUP BY p.subject, p.display_name, p.email
+          ORDER BY name",
+    )
+    .fetch_all(pool)
+    .await;
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(%error, "failed to list Foundry Circle sessions");
+            return Vec::new();
+        }
+    };
+    rows.iter()
+        .filter_map(|row| {
+            Some(SessionUser {
+                subject: row.try_get("subject").ok()?,
+                name: row.try_get("name").ok()?,
+                email: row.try_get("email").ok()?,
+                kinds: row.try_get("kinds").ok()?,
+            })
+        })
+        .collect()
 }
 
 /// The lobby's server functions run the same lease operations as the JSON
@@ -437,7 +483,7 @@ fn console_actor() -> Option<(AppState, auth::Principal)> {
 }
 
 /// A mutation's `Origin` must equal the configured platform origin exactly.
-fn same_origin(origin: Option<&str>, platform: Option<&str>) -> bool {
+pub(crate) fn same_origin(origin: Option<&str>, platform: Option<&str>) -> bool {
     matches!((origin, platform), (Some(origin), Some(platform)) if origin == platform)
 }
 
@@ -504,6 +550,26 @@ pub async fn console_stop(id: &str) -> Option<String> {
         .await
         .err()
         .map(|error| lease_code(error).to_owned())
+}
+
+/// An admin revokes every session a principal holds on both hosts (D5, G6).
+pub async fn console_revoke(subject: &str) -> Option<String> {
+    let Some((state, principal)) = console_actor() else {
+        return Some("not_signed_in".into());
+    };
+    let Some(auth) = state.auth.as_ref() else {
+        return Some("not_signed_in".into());
+    };
+    if !auth::may_revoke(&principal, &auth.admin_group) {
+        return Some("permission_denied".into());
+    }
+    match auth::revoke_subject(&state, subject, auth::RevokeReason::Admin).await {
+        Ok(()) => None,
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to revoke Foundry Circle sessions");
+            Some("revoke_failed".into())
+        }
+    }
 }
 
 async fn discovery() -> impl IntoResponse {
@@ -671,6 +737,32 @@ async fn session_stop(
             .into_response(),
         Err(error) => lease_response(error),
     }
+}
+
+/// `POST /api/v1/admin/principals/{subject}/revoke`: an admin revokes every
+/// session a principal holds on both hosts (D5, G6). JSON-only, like the other
+/// mutations, so the content type is the CSRF guard next to SameSite=Lax.
+async fn revoke_principal(
+    State(state): State<AppState>,
+    Extension(principal): Extension<auth::Principal>,
+    Path(subject): Path<String>,
+    Json(_guard): Json<Value>,
+) -> Response {
+    let Some(auth) = state.auth.as_ref() else {
+        return oidc_not_configured();
+    };
+    if !auth::may_revoke(&principal, &auth.admin_group) {
+        return permission_denied();
+    }
+    if let Err(error) = auth::revoke_subject(&state, &subject, auth::RevokeReason::Admin).await {
+        tracing::warn!(error = %error, subject = %subject, "failed to revoke Foundry Circle sessions");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "revoke_failed"})),
+        )
+            .into_response();
+    }
+    (StatusCode::OK, Json(json!({"revoked": true}))).into_response()
 }
 
 async fn world(
@@ -1310,6 +1402,9 @@ mod tests {
                 .body(Body::from(
                     r#"{"id":"0b6f4c2e-0000-4000-8000-000000000000"}"#,
                 )),
+            Request::post("/api/v1/admin/principals/someone/revoke")
+                .header("content-type", "application/json")
+                .body(Body::from("{}")),
             Request::get("/api/v1/world").body(Body::empty()),
             Request::get("/api/v1/world/capabilities").body(Body::empty()),
             Request::get("/api/v1/world/documents/actors").body(Body::empty()),

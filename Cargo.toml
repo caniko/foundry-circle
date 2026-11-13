@@ -69,6 +69,7 @@ chromiumoxide = { version = "0.9", default-features = false }
 base64 = "0.22"
 fs2 = "0.4"
 hex = "0.4"
+hmac = "0.12"
 reqwest = { version = "0.12", default-features = false, features = [
   "cookies",
   "json",

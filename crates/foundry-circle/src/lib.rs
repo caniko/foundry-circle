@@ -13,6 +13,9 @@ use tartan_ui_dioxus::{
 use theme_broker::{Mode, role, stylesheet};
 
 #[cfg(feature = "server")]
+pub mod adoption;
+
+#[cfg(feature = "server")]
 pub mod http;
 
 pub mod driver;
@@ -105,7 +108,7 @@ pub struct ConsoleData {
     pub email: Option<String>,
     pub role: Role,
     pub game: LiveGame,
-    /// `<playBaseUrl>/join`, when configured.
+    /// `<playBaseUrl>/_circle/enter`, when configured.
     pub join_url: Option<String>,
     /// `<platformBaseUrl>/setup`; only resolved for GMs and admins.
     pub setup_url: Option<String>,
@@ -120,6 +123,9 @@ pub struct ConsoleData {
     pub can_start_session: bool,
     /// A world runs with no lease; starting is refused until it stops.
     pub unmanaged_world: bool,
+    /// The running world has not been adopted yet, so only the holder and
+    /// admins can reach Foundry.
+    pub adoption_pending: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -570,9 +576,15 @@ fn SessionCard(data: ConsoleData, refresh: EventHandler<()>) -> Element {
             // reports a running world; this is the lease-driven fallback.
             let session_join =
                 phase == SessionPhase::Running && !matches!(&data.game, LiveGame::Live(_));
+            let adoption_pending = data.adoption_pending && (is_holder || is_admin);
             rsx! {
                 p { class: "tartan-muted", "Session held by {holder}." }
                 p { class: "tartan-tag", {phase_label(phase)} }
+                if adoption_pending {
+                    p { class: "tartan-muted",
+                        "This world has not finished setup. Return to Setup and relaunch the world to finish setup."
+                    }
+                }
                 div { class: "tartan-metrics",
                     if let Some(setup) = play_setup {
                         a { class: "tartan-button", href: setup, "Open Foundry Setup" }
@@ -670,7 +682,7 @@ fn InviteCard(join_url: Option<String>) -> Element {
                 p { class: "tartan-tag", style: "user-select: all", {url} }
             }
             p { class: "tartan-muted",
-                "Create each player's Foundry user inside your world before they join. Their Foundry user is separate from their sign-in."
+                "Players join with their Rauthy account. The broker creates each Foundry user on first entry; nobody types a Foundry password."
             }
         }
     }
@@ -687,7 +699,7 @@ mod tests {
             email: Some("robin@example.test".into()),
             role,
             game,
-            join_url: Some("https://play.example.test/join".into()),
+            join_url: Some("https://play.example.test/_circle/enter".into()),
             setup_url: (role != Role::Player).then(|| "https://play.example.test/setup".into()),
             play_setup_url: None,
             world_state: driver::WorldState::WorldStopped,
@@ -695,6 +707,7 @@ mod tests {
             session: None,
             can_start_session: role != Role::Player,
             unmanaged_world: false,
+            adoption_pending: false,
         }
     }
 
@@ -889,7 +902,7 @@ mod tests {
             false,
         ))));
         assert!(html.contains("Join game"));
-        assert!(html.contains("https://play.example.test/join"));
+        assert!(html.contains("https://play.example.test/_circle/enter"));
         // A live world already offers the same link on the game card; the
         // session card must not duplicate it.
         let console = ConsoleData {
@@ -898,6 +911,21 @@ mod tests {
         };
         let html = render(ConsoleView::Console(Box::new(console)));
         assert_eq!(html.matches("Join game").count(), 1);
+    }
+
+    #[test]
+    fn the_holder_is_told_to_relaunch_an_unadopted_world() {
+        let mut console = held(Role::Gm, SessionPhase::Running, true);
+        console.adoption_pending = true;
+        let html = render(ConsoleView::Console(Box::new(console)));
+        assert!(html.contains("Return to Setup and relaunch the world"));
+        // Players get no actionable Setup advice.
+        let console = ConsoleData {
+            adoption_pending: true,
+            ..held(Role::Player, SessionPhase::Running, false)
+        };
+        let html = render(ConsoleView::Console(Box::new(console)));
+        assert!(!html.contains("Return to Setup and relaunch the world"));
     }
 
     #[test]

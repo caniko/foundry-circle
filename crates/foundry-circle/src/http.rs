@@ -288,6 +288,7 @@ pub fn api_router_with_state(state: AppState) -> Router {
         .route("/_circle/oidc/callback", get(auth::play_callback))
         .route("/_circle/auth", get(play::gate))
         .route("/_circle/setup", get(play::setup))
+        .route("/_circle/enter", get(play::enter))
         .merge(protected)
         .with_state(state)
 }
@@ -382,12 +383,15 @@ pub async fn console_view() -> ConsoleView {
     let holder_setup = open
         .as_ref()
         .is_some_and(|open| open.phase == SessionPhase::Setup && open.holder == principal.subject);
+    let adoption_pending = open
+        .as_ref()
+        .is_some_and(|open| open.phase == SessionPhase::Running && !open.adopted);
     ConsoleView::Console(Box::new(ConsoleData {
         name,
         email: principal.email.clone(),
         role,
         game,
-        join_url: join(&links.play_url, "/join"),
+        join_url: join(&links.play_url, "/_circle/enter"),
         setup_url: (role != Role::Player)
             .then(|| join(&links.platform_url, "/setup"))
             .flatten(),
@@ -399,6 +403,7 @@ pub async fn console_view() -> ConsoleView {
         can_start_session: session::may_start(role) && session.is_none() && !unmanaged,
         session,
         unmanaged_world: unmanaged,
+        adoption_pending,
     }))
 }
 

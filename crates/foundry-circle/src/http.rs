@@ -16,7 +16,7 @@ use tokio::{sync::RwLock, time::sleep};
 use uuid::Uuid;
 
 use crate::{
-    ConsoleData, ConsoleView, LiveGame, Role,
+    ConsoleData, ConsoleView, LiveGame, Role, SessionPhase,
     driver::{FakeDriver, FoundryDriver, WorldError, WorldOp, WorldState},
 };
 
@@ -25,6 +25,9 @@ pub mod auth;
 
 #[path = "session.rs"]
 pub mod session;
+
+#[path = "play.rs"]
+pub mod play;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -279,6 +282,12 @@ pub fn api_router_with_state(state: AppState) -> Router {
         .route("/api/auth/login", get(auth::login_start))
         .route("/api/auth/oidc/callback", get(auth::oidc_callback))
         .route("/api/auth/logout", post(auth::logout))
+        // The play host's Caddy routes `/_circle/*` here without the gate;
+        // everything else goes through `forward_auth` to `/_circle/auth`.
+        .route("/_circle/login", get(auth::play_login_start))
+        .route("/_circle/oidc/callback", get(auth::play_callback))
+        .route("/_circle/auth", get(play::gate))
+        .route("/_circle/setup", get(play::setup))
         .merge(protected)
         .with_state(state)
 }
@@ -370,6 +379,9 @@ pub async fn console_view() -> ConsoleView {
     let session = open
         .as_ref()
         .map(|open| session::view(open, &principal.subject));
+    let holder_setup = open
+        .as_ref()
+        .is_some_and(|open| open.phase == SessionPhase::Setup && open.holder == principal.subject);
     ConsoleView::Console(Box::new(ConsoleData {
         name,
         email: principal.email.clone(),
@@ -378,6 +390,9 @@ pub async fn console_view() -> ConsoleView {
         join_url: join(&links.play_url, "/join"),
         setup_url: (role != Role::Player)
             .then(|| join(&links.platform_url, "/setup"))
+            .flatten(),
+        play_setup_url: holder_setup
+            .then(|| join(&links.play_url, "/_circle/setup"))
             .flatten(),
         world_state: state.driver.world_state(),
         database: state.database.is_ready().await,

@@ -109,6 +109,9 @@ pub struct ConsoleData {
     pub join_url: Option<String>,
     /// `<platformBaseUrl>/setup`; only resolved for GMs and admins.
     pub setup_url: Option<String>,
+    /// `<playBaseUrl>/_circle/setup` while the viewer holds the lease in
+    /// `setup`; the gate turns it into a Foundry admin session.
+    pub play_setup_url: Option<String>,
     pub world_state: driver::WorldState,
     pub database: bool,
     /// The open session lease, if one is held.
@@ -561,10 +564,24 @@ fn SessionCard(data: ConsoleData, refresh: EventHandler<()>) -> Element {
             let holder = session.holder.name.clone();
             let setup_id = session.id.clone();
             let stop_id = session.id.clone();
+            let play_setup = data.play_setup_url.clone();
+            let join_url = data.join_url.clone();
+            // The live-game card already links to the join URL when Foundry
+            // reports a running world; this is the lease-driven fallback.
+            let session_join =
+                phase == SessionPhase::Running && !matches!(&data.game, LiveGame::Live(_));
             rsx! {
                 p { class: "tartan-muted", "Session held by {holder}." }
                 p { class: "tartan-tag", {phase_label(phase)} }
                 div { class: "tartan-metrics",
+                    if let Some(setup) = play_setup {
+                        a { class: "tartan-button", href: setup, "Open Foundry Setup" }
+                    }
+                    if session_join {
+                        if let Some(join) = join_url {
+                            a { class: "tartan-button", href: join, "Join game" }
+                        }
+                    }
                     if is_holder && phase == SessionPhase::Running {
                         button {
                             class: "tartan-button",
@@ -672,6 +689,7 @@ mod tests {
             game,
             join_url: Some("https://play.example.test/join".into()),
             setup_url: (role != Role::Player).then(|| "https://play.example.test/setup".into()),
+            play_setup_url: None,
             world_state: driver::WorldState::WorldStopped,
             database: true,
             session: None,
@@ -842,6 +860,44 @@ mod tests {
         ))));
         assert!(html.contains("End session"));
         assert!(!html.contains("Return to Setup"));
+    }
+
+    #[test]
+    fn the_holder_in_setup_gets_the_play_host_setup_link() {
+        let mut console = held(Role::Gm, SessionPhase::Setup, true);
+        console.play_setup_url = Some("https://play.example.test/_circle/setup".into());
+        let html = render(ConsoleView::Console(Box::new(console)));
+        assert!(html.contains("Open Foundry Setup"));
+        assert!(html.contains("https://play.example.test/_circle/setup"));
+    }
+
+    #[test]
+    fn a_non_holder_in_setup_gets_no_setup_link() {
+        let html = render(ConsoleView::Console(Box::new(held(
+            Role::Gm,
+            SessionPhase::Setup,
+            false,
+        ))));
+        assert!(!html.contains("Open Foundry Setup"));
+    }
+
+    #[test]
+    fn a_running_session_offers_join_to_everyone() {
+        let html = render(ConsoleView::Console(Box::new(held(
+            Role::Player,
+            SessionPhase::Running,
+            false,
+        ))));
+        assert!(html.contains("Join game"));
+        assert!(html.contains("https://play.example.test/join"));
+        // A live world already offers the same link on the game card; the
+        // session card must not duplicate it.
+        let console = ConsoleData {
+            game: live(),
+            ..held(Role::Player, SessionPhase::Running, false)
+        };
+        let html = render(ConsoleView::Console(Box::new(console)));
+        assert_eq!(html.matches("Join game").count(), 1);
     }
 
     #[test]

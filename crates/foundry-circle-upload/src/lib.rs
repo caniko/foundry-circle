@@ -580,7 +580,10 @@ fn open_browser(url: &str) -> std::io::Result<()> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map(drop)
+        .map(|mut child| {
+            // Reap it off the login path so long-lived callers keep no zombies.
+            std::thread::spawn(move || child.wait());
+        })
 }
 
 /// No shell: `cmd /C start` would read the URL's `&` as a command separator.

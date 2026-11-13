@@ -36,7 +36,8 @@ match what Foundry actually does.
 ## Scope
 
 The broker service (health, discovery, typed driver seam, OIDC login,
-PostgreSQL-backed sessions, capability registry), the Dioxus console, the
+PostgreSQL-backed sessions, capability registry), validated GM asset upload with
+native-client (loopback + PKCE) sign-in, the Dioxus console, the
 `foundryvtt-fetch` crate and its provenance model, package metadata validation,
 declarative module/system reconciliation with an initialization marker, and the
 Nix package and NixOS module interfaces a consumer flake imports.

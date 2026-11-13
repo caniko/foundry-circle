@@ -20,6 +20,56 @@ Admins can call `POST /api/v1/world/commands` with `chat.create`, `dice.roll`,
 `idempotencyKey`. Events and JSON-patch
 mutations are not implemented.
 
+## Asset upload
+
+A DM converts assets on their own machine with
+[media-oxide](https://github.com/caniko/media-oxide) (choices are mapped to
+Foundry's `tokens`, `maps`, `tiles`, `artwork` and `audio` directories) and the
+native client uploads the converted file. The server re-validates everything;
+nothing the client sends is trusted.
+
+```
+PUT /api/v1/assets/{kind}/{name}
+Content-Type: application/octet-stream
+Cookie: foundry_circle_session=<token>
+
+<file bytes>
+```
+
+`kind` is `token`, `map`, `tile`, `artwork` or `audio`, and GMs and admins only.
+The body must be exactly `application/octet-stream` (an upload cannot be made
+from a cross-origin form), up to 100 MiB, and it must pass the same media-oxide
+policy the client used: `[a-z0-9]+(-[a-z0-9]+)*` names with an extension the kind
+accepts, magic bytes matching that extension, and for SVG a UTF-8 document whose
+root is `<svg>` and which carries no script, entity or JavaScript URL. A refused
+upload is JSON `{"error":"<code>"}`; a name that already exists answers `409`
+`{"error":"asset_exists"}` and is never overwritten. Success is `201`
+`{"path":"<prefix>/<kind>/<name>"}`, which is the path Foundry serves.
+
+Files land in `FOUNDRY_CIRCLE_ASSETS_DIR/<kind>/<name>`, where that directory is
+mounted read-only at `<Foundry data dir>/Data/<FOUNDRY_CIRCLE_ASSETS_PREFIX>`.
+Both variables are set by `services.foundry-circle.assets`; without them the
+route answers `503` `{"error":"assets_not_configured"}`.
+
+### Native sign-in
+
+A native client cannot reuse the browser's session: sessions carry Rauthy
+refresh tokens that rotate, so a copied row would break the browser's next
+refresh and revoke the subject. The client runs its own login instead:
+
+1. `GET /api/auth/native?port=<1024..65535>&state=<base64url, 16..128>&challenge=<43 chars base64url(sha256(verifier))>`
+   starts the ordinary Rauthy login in the system browser.
+2. The callback creates a normal session but sets no browser cookie; it answers
+   `303` to `http://127.0.0.1:<port>/callback?code=<code>&state=<state>`.
+3. `POST /api/auth/native/token` with `{"code":"...","verifier":"..."}` (JSON,
+   as every other POST) returns
+   `{"token":"...","cookie":"foundry_circle_session","expires_at":"<rfc3339>"}`.
+   The code is single use and expires after two minutes; a wrong verifier, an
+   unknown or replayed code, or a revoked session is `400`
+   `{"error":"invalid_grant"}`.
+
+The client then sends `Cookie: foundry_circle_session=<token>` on every request.
+
 ## Development
 
 Rust 1.88 or newer is required to use the security-patched dependency graph.

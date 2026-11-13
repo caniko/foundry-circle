@@ -1,11 +1,15 @@
 [workspace]
 resolver = "2"
-members = ["crates/foundry-circle", "crates/foundryvtt-fetch"]
+members = [
+  "crates/foundry-circle",
+  "crates/foundry-circle-upload",
+  "crates/foundryvtt-fetch",
+]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.93"
 license = "MIT OR Apache-2.0"
 authors = ["Can H. Tartanoglu <canhtart@gmail.com>"]
 
@@ -25,6 +29,8 @@ theme-broker = { git = "https://github.com/caniko/nix-theme-broker.git", rev = "
 
 axum = { version = "0.8", features = ["macros"] }
 tokio = { version = "1", features = [
+  "fs",
+  "io-util",
   "macros",
   "net",
   "process",
@@ -59,11 +65,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 # Keep the integration reproducible before the first crates.io publication.
 oidc-app-auth = { version = "0.1.0", git = "https://github.com/caniko/oidc-app-auth.git", rev = "cc83fde58f45872c65271bf71024dd028610d89d" }
-# The DM's local converter and this server share one asset contract: kinds,
-# allowed names, and magic sniffing. The server always re-validates.
+# The DM's local converter (upload client) and this server share one asset
+# contract: kinds, allowed names, and magic sniffing. The server re-validates.
 media-oxide = { git = "https://github.com/caniko/media-oxide.git", rev = "250ff2c6641d8847d244a9a0565bf9a9c991b5dd", default-features = false, features = [
   "foundry",
 ] }
+getrandom = "0.3"
 
 # The downloader is deliberately independent of the Dioxus application so it
 # can be published and used by Nix/systemd without shipping the operator UI.

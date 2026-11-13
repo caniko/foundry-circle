@@ -1,0 +1,34 @@
+[package]
+name = "foundry-circle-upload"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Native client for the Foundry Circle asset upload API"
+readme = "README.md"
+repository = "https://github.com/caniko/foundry-circle"
+keywords = ["foundryvtt", "assets", "upload", "cli"]
+categories = ["command-line-utilities", "api-bindings"]
+publish = false
+
+[lib]
+name = "foundry_circle_upload"
+path = "src/lib.rs"
+
+[[bin]]
+name = "foundry-circle-upload"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+clap.workspace = true
+getrandom.workspace = true
+media-oxide.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true

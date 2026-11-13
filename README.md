@@ -72,7 +72,8 @@ The client then sends `Cookie: foundry_circle_session=<token>` on every request.
 
 ## Development
 
-Rust 1.88 or newer is required to use the security-patched dependency graph.
+Rust 1.93 or newer is required to use the security-patched dependency graph;
+`media-oxide` (Foundry asset conversion) declares 1.93 as its minimum.
 
 ```bash
 cargo check --all-targets --all-features
@@ -89,6 +90,17 @@ and initially seeds mutable module/system directories from
 `services.foundryvtt.declarativePackages`. Use `state = "absent"` to reset an
 initialization marker; worlds and package directories remain mutable
 Foundry-owned state.
+
+`foundry-circle-upload` is the native asset client. `login` signs in through the
+system browser with a loopback PKCE redirect, `push` converts images and audio
+with ffmpeg to Foundry's token, map, tile, artwork, and audio policy, and
+uploads each result to `PUT /api/v1/assets/{kind}/{file_name}`; `whoami`,
+`logout`, and `--dry-run` cover the rest. Conversion policy, including the
+per-format defaults and normalized names, comes from `media-oxide`, so the
+client and the broker agree. See
+[`crates/foundry-circle-upload/README.md`](crates/foundry-circle-upload/README.md)
+for usage and for what still needs the DM (south-facing token art, maps with the
+grid drawn in).
 
 ## Boundaries
 

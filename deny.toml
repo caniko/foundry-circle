@@ -20,6 +20,12 @@ allow = [
   "Zlib",
 ]
 
+# media-oxide owns the Foundry asset conversion policy and is AGPL-3.0-only.
+# Scoped to that crate instead of widening the global allow list.
+[[licenses.exceptions]]
+crate = "media-oxide"
+allow = ["AGPL-3.0-only"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "allow"
@@ -29,8 +35,8 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
+  "https://github.com/caniko/media-oxide.git",
   "https://github.com/caniko/tartan-ui.git",
   "https://github.com/caniko/nix-theme-broker.git",
   "https://github.com/caniko/oidc-app-auth.git",
-  "https://github.com/caniko/media-oxide.git",
 ]

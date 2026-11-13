@@ -285,6 +285,25 @@
           (import ./nix/addons.nix)
           (import ./nix/acquisition.nix)
           (import ./nix/module.nix)
+          (
+            {
+              lib,
+              config,
+              ...
+            }: {
+              # Foundry serves the uploaded assets itself, so the broker's
+              # directory appears read-only at the data-relative prefix it
+              # reports to clients (`services.foundryvtt.dataDir`/Data/<prefix>).
+              config = lib.mkIf config.services.foundry-circle.assets.enable {
+                systemd.services.foundryvtt.serviceConfig.BindReadOnlyPaths = [
+                  "${config.services.foundry-circle.assets.directory}:${config.services.foundryvtt.dataDir}/Data/${config.services.foundry-circle.assets.prefix}"
+                ];
+                systemd.tmpfiles.rules = [
+                  "d ${config.services.foundryvtt.dataDir}/Data/${config.services.foundry-circle.assets.prefix} 0755 foundryvtt foundryvtt"
+                ];
+              };
+            }
+          )
         ];
       };
     };

@@ -70,6 +70,20 @@ in {
       };
     };
 
+    assets = {
+      enable = lib.mkEnableOption "GM asset uploads through the broker";
+      directory = lib.mkOption {
+        type = lib.types.str;
+        default = "/var/lib/foundry-circle/assets";
+        description = "Absolute directory uploaded assets are written to. The Foundry service sees it read-only at `<dataDir>/Data/<prefix>`.";
+      };
+      prefix = lib.mkOption {
+        type = lib.types.str;
+        default = "circle";
+        description = "Data-relative path the directory appears at under Foundry's `Data` folder; clients receive `<prefix>/<kind>/<name>` from the upload response.";
+      };
+    };
+
     foundryWorld = {
       apiUser = lib.mkOption {
         type = lib.types.str;
@@ -190,6 +204,10 @@ in {
       };
       users.groups.foundry-circle = {};
 
+      # Uploaded game art is public: Foundry serves it to every player.
+      systemd.tmpfiles.rules =
+        lib.optional cfg.assets.enable "d ${cfg.assets.directory} 0755 foundry-circle foundry-circle";
+
       systemd.services.foundry-circle = {
         description = "Foundry Circle typed Foundry VTT broker";
         wantedBy = ["multi-user.target"];
@@ -236,6 +254,10 @@ in {
             FOUNDRY_CIRCLE_OIDC_ADMIN_GROUP = cfg.oidc.adminGroup;
             FOUNDRY_CIRCLE_OIDC_GM_GROUP = cfg.oidc.gmGroup;
             FOUNDRY_CIRCLE_SESSION_TTL_SECONDS = toString cfg.oidc.sessionTtlSeconds;
+          }
+          // lib.optionalAttrs cfg.assets.enable {
+            FOUNDRY_CIRCLE_ASSETS_DIR = cfg.assets.directory;
+            FOUNDRY_CIRCLE_ASSETS_PREFIX = cfg.assets.prefix;
           };
         serviceConfig = {
           User = "foundry-circle";
@@ -249,7 +271,9 @@ in {
           PrivateTmp = true;
           ProtectSystem = "strict";
           ProtectHome = true;
-          ReadWritePaths = ["/run/foundry-circle" "/var/lib/foundry-circle"];
+          ReadWritePaths =
+            ["/run/foundry-circle" "/var/lib/foundry-circle"]
+            ++ lib.optional cfg.assets.enable cfg.assets.directory;
           LoadCredential =
             lib.optional (cfg.foundryWorld.passwordSecretFile != null)
             "password-secret:${cfg.foundryWorld.passwordSecretFile}"

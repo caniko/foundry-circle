@@ -86,6 +86,16 @@ in {
         default = null;
         description = "Runtime credential containing the dedicated Foundry API-user password.";
       };
+      adminPasswordFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "Runtime credential containing the Foundry admin password; the broker uses it to stop the world when a session ends. Without it the session endpoints answer 503 and the reconciler only observes.";
+      };
+      restartUnit = lib.mkOption {
+        type = lib.types.str;
+        default = "foundryvtt.service";
+        description = "systemd unit restarted when a session ends; the polkit rule is scoped to this unit's restart.";
+      };
       worldId = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
@@ -203,6 +213,8 @@ in {
             FOUNDRY_CIRCLE_PLAY_BASE_URL = cfg.foundryWorld.playBaseUrl;
             FOUNDRY_CHROMIUM = "${cfg.foundryWorld.chromiumPackage}/bin/chromium";
             FOUNDRY_BROWSER_PROFILE_DIR = "/run/foundry-circle/browser";
+            FOUNDRY_CIRCLE_RESTART_UNIT = cfg.foundryWorld.restartUnit;
+            FOUNDRY_CIRCLE_SYSTEMCTL = "${config.systemd.package}/bin/systemctl";
             XDG_CONFIG_HOME = "/var/lib/foundry-circle/config";
             FOUNDRY_CIRCLE_BIND = "${cfg.listenAddress}:${toString cfg.listenPort}";
             RUST_LOG = lib.mkDefault "info";
@@ -216,6 +228,9 @@ in {
           }
           // lib.optionalAttrs (cfg.database.urlFile != null) {
             DATABASE_URL_FILE = "/run/credentials/foundry-circle.service/database-url";
+          }
+          // lib.optionalAttrs (cfg.foundryWorld.adminPasswordFile != null) {
+            FOUNDRY_ADMIN_PASSWORD_FILE = "/run/credentials/foundry-circle.service/admin-password";
           }
           // lib.optionalAttrs (cfg.oidc.issuer != null && cfg.oidc.clientId != null && cfg.oidc.publicBaseUrl != null) {
             FOUNDRY_CIRCLE_OIDC_ISSUER = cfg.oidc.issuer;
@@ -242,6 +257,8 @@ in {
           ReadWritePaths = ["/run/foundry-circle" "/var/lib/foundry-circle"];
           LoadCredential =
             ["api-password:${cfg.foundryWorld.apiPasswordFile}"]
+            ++ lib.optional (cfg.foundryWorld.adminPasswordFile != null)
+            "admin-password:${cfg.foundryWorld.adminPasswordFile}"
             ++ lib.optional (cfg.database.urlFile != null)
             "database-url:${cfg.database.urlFile}";
         };
@@ -262,6 +279,20 @@ in {
       };
       systemd.services.postgresql-setup.script = lib.mkAfter ''
         psql -tAc 'ALTER DATABASE "${cfg.database.name}" OWNER TO "${cfg.database.user}";'
+      '';
+    })
+    # Ending a session restarts Foundry to drop every in-memory session. The
+    # service user may restart exactly that one unit and nothing else.
+    (lib.mkIf (cfg.foundryWorld.adminPasswordFile != null) {
+      security.polkit.extraConfig = ''
+        polkit.addRule(function(action, subject) {
+          if (action.id == "org.freedesktop.systemd1.manage-units"
+              && subject.user == "foundry-circle"
+              && action.lookup("unit") == "${cfg.foundryWorld.restartUnit}"
+              && action.lookup("verb") == "restart") {
+            return polkit.Result.YES;
+          }
+        });
       '';
     })
   ]);

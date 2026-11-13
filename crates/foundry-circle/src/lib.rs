@@ -60,6 +60,45 @@ impl LiveGame {
     }
 }
 
+/// Where the one open session lease stands.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionPhase {
+    Setup,
+    Running,
+    Ending,
+}
+
+impl SessionPhase {
+    /// The database spelling; the CHECK constraint uses the same three values.
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "setup" => Some(Self::Setup),
+            "running" => Some(Self::Running),
+            "ending" => Some(Self::Ending),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SessionHolder {
+    /// Display name, never the OIDC subject.
+    pub name: String,
+}
+
+/// One open lease, as the JSON API and the lobby report it.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionView {
+    pub id: String,
+    pub phase: SessionPhase,
+    pub holder: SessionHolder,
+    pub world_id: Option<String>,
+    pub started_at: String,
+    pub is_holder: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ConsoleData {
     pub name: String,
@@ -72,6 +111,12 @@ pub struct ConsoleData {
     pub setup_url: Option<String>,
     pub world_state: driver::WorldState,
     pub database: bool,
+    /// The open session lease, if one is held.
+    pub session: Option<SessionView>,
+    /// A GM or admin may open the one session now.
+    pub can_start_session: bool,
+    /// A world runs with no lease; starting is refused until it stops.
+    pub unmanaged_world: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -89,17 +134,39 @@ async fn console_view() -> Result<ConsoleView, ServerFnError> {
     Ok(http::console_view().await)
 }
 
+/// The lobby buttons run the same lease operations as the JSON routes; the
+/// optional code is what the card shows when the action is refused.
+#[server]
+async fn start_session() -> Result<Option<String>, ServerFnError> {
+    Ok(http::console_start().await)
+}
+
+#[server]
+async fn return_to_setup(id: String) -> Result<Option<String>, ServerFnError> {
+    Ok(http::console_setup(&id).await)
+}
+
+#[server]
+async fn end_session(id: String) -> Result<Option<String>, ServerFnError> {
+    Ok(http::console_stop(&id).await)
+}
+
 /// Dioxus console root.  The server resolves the caller's role and the live
 /// game; this only renders what it was told, so nothing here is authorization.
 #[component]
 pub fn App() -> Element {
     let view = use_server_future(console_view)?;
+    let refresh = EventHandler::new(move |()| {
+        // A copy of the resource: restarting reloads the server view.
+        let mut view = view;
+        view.restart();
+    });
     let view = match &*view.read() {
         Some(Ok(view)) => view.clone(),
         _ => ConsoleView::SignedOut,
     };
     rsx! {
-        Lobby { view }
+        Lobby { view, refresh }
     }
 }
 
@@ -285,7 +352,7 @@ pub const STYLES: &str = r##"
 /// Pure lobby rendering. `App` resolves the server view and delegates here so
 /// every view is renderable without a server.
 #[component]
-fn Lobby(view: ConsoleView) -> Element {
+fn Lobby(view: ConsoleView, refresh: EventHandler<()>) -> Element {
     let accent = orange();
     let account = match &view {
         ConsoleView::SignedOut => None,
@@ -349,6 +416,7 @@ fn Lobby(view: ConsoleView) -> Element {
                 }
                 CardGrid {
                     GameCard { data: data.as_ref().clone() }
+                    SessionCard { data: data.as_ref().clone(), refresh }
                     if data.role != Role::Player {
                         InviteCard { join_url: data.join_url.clone() }
                     }
@@ -456,6 +524,124 @@ fn GameCard(data: ConsoleData) -> Element {
     }
 }
 
+/// One lobby button press, mapped to the matching server function.
+enum SessionCall {
+    Start,
+    Setup(String),
+    Stop(String),
+}
+
+#[component]
+fn SessionCard(data: ConsoleData, refresh: EventHandler<()>) -> Element {
+    let error = use_signal(|| None::<String>);
+    let body = match (&data.session, data.role) {
+        (None, _) if data.unmanaged_world => rsx! {
+            p { class: "tartan-muted",
+                "A world is running outside any session. An operator must stop it in Foundry before a session can start."
+            }
+        },
+        (None, Role::Player) => rsx! {
+            p { class: "tartan-muted", "No session is open right now. Check back soon." }
+        },
+        (None, _) => rsx! {
+            p { class: "tartan-muted",
+                "A session reserves the one GM slot and opens Foundry Setup for the holder."
+            }
+            button {
+                class: "tartan-button",
+                r#type: "button",
+                onclick: move |_| apply(SessionCall::Start, error, refresh),
+                "Start session"
+            }
+        },
+        (Some(session), _) => {
+            let is_holder = session.is_holder;
+            let is_admin = data.role == Role::Admin;
+            let phase = session.phase;
+            let holder = session.holder.name.clone();
+            let setup_id = session.id.clone();
+            let stop_id = session.id.clone();
+            rsx! {
+                p { class: "tartan-muted", "Session held by {holder}." }
+                p { class: "tartan-tag", {phase_label(phase)} }
+                div { class: "tartan-metrics",
+                    if is_holder && phase == SessionPhase::Running {
+                        button {
+                            class: "tartan-button",
+                            r#type: "button",
+                            onclick: move |_| apply(SessionCall::Setup(setup_id.clone()), error, refresh),
+                            "Return to Setup"
+                        }
+                    }
+                    if (is_holder || is_admin) && phase != SessionPhase::Ending {
+                        button {
+                            class: "tartan-button",
+                            r#type: "button",
+                            onclick: move |_| apply(SessionCall::Stop(stop_id.clone()), error, refresh),
+                            "End session"
+                        }
+                    }
+                }
+            }
+        }
+    };
+    rsx! {
+        article { class: "tartan-card",
+            p { class: "tartan-eyebrow", "Game session" }
+            h2 { "One table at a time" }
+            if let Some(message) = error() {
+                FeedbackBanner { feedback: Feedback { kind: FeedbackKind::Error, message } }
+            }
+            {body}
+        }
+    }
+}
+
+/// Buttons share one path: run the server function, reload the view on
+/// success, or show why it was refused.
+fn apply(call: SessionCall, error: Signal<Option<String>>, refresh: EventHandler<()>) {
+    let mut error = error;
+    spawn(async move {
+        let result = match call {
+            SessionCall::Start => start_session().await,
+            SessionCall::Setup(id) => return_to_setup(id).await,
+            SessionCall::Stop(id) => end_session(id).await,
+        };
+        let code = match result {
+            Ok(None) => {
+                refresh.call(());
+                return;
+            }
+            Ok(Some(code)) => code,
+            Err(_) => "unavailable".into(),
+        };
+        error.set(Some(session_error_message(&code).to_owned()));
+    });
+}
+
+fn phase_label(phase: SessionPhase) -> &'static str {
+    match phase {
+        SessionPhase::Setup => "The GM is in Foundry Setup.",
+        SessionPhase::Running => "The world is running.",
+        SessionPhase::Ending => "The session is ending.",
+    }
+}
+
+fn session_error_message(code: &str) -> &'static str {
+    match code {
+        "session_in_progress" => "Another GM already holds the session.",
+        "unmanaged_world" => {
+            "A world is already running outside a session; an operator must stop it in Foundry first."
+        }
+        "permission_denied" => "Only the session holder or an admin can do that.",
+        "session_not_found" => "That session has already ended.",
+        "session_phase_conflict" => "The session is not in a state that allows that.",
+        "foundry_unavailable" => "Foundry did not answer; try again in a moment.",
+        "lease_not_configured" => "Session controls are not configured on this server.",
+        _ => "That did not work; try again in a moment.",
+    }
+}
+
 #[component]
 fn InviteCard(join_url: Option<String>) -> Element {
     rsx! {
@@ -488,6 +674,26 @@ mod tests {
             setup_url: (role != Role::Player).then(|| "https://play.example.test/setup".into()),
             world_state: driver::WorldState::WorldStopped,
             database: true,
+            session: None,
+            can_start_session: role != Role::Player,
+            unmanaged_world: false,
+        }
+    }
+
+    fn held(role: Role, phase: SessionPhase, is_holder: bool) -> ConsoleData {
+        ConsoleData {
+            session: Some(SessionView {
+                id: "0b6f4c2e-0000-4000-8000-000000000000".into(),
+                phase,
+                holder: SessionHolder {
+                    name: "Piotr".into(),
+                },
+                world_id: Some("canary".into()),
+                started_at: "2026-11-12T18:00:00+00:00".into(),
+                is_holder,
+            }),
+            can_start_session: false,
+            ..data(role, LiveGame::None)
         }
     }
 
@@ -504,8 +710,16 @@ mod tests {
     }
 
     fn render(view: ConsoleView) -> String {
+        // `EventHandler::new` needs a Dioxus runtime, which a component has.
+        #[component]
+        fn Harness(view: ConsoleView) -> Element {
+            let refresh = EventHandler::new(|()| ());
+            rsx! {
+                Lobby { view, refresh }
+            }
+        }
         dioxus::ssr::render_element(rsx! {
-            Lobby { view }
+            Harness { view }
         })
     }
 
@@ -554,5 +768,90 @@ mod tests {
         assert!(html.contains("Broker state"));
         assert!(html.contains("World stopped"));
         assert!(!html.contains("WorldStopped"));
+    }
+
+    #[test]
+    fn a_gm_without_a_session_can_start_one() {
+        let html = render(ConsoleView::Console(Box::new(data(
+            Role::Gm,
+            LiveGame::None,
+        ))));
+        assert!(html.contains("Start session"));
+    }
+
+    #[test]
+    fn a_player_cannot_start_a_session() {
+        let html = render(ConsoleView::Console(Box::new(data(
+            Role::Player,
+            LiveGame::None,
+        ))));
+        assert!(!html.contains("Start session"));
+    }
+
+    #[test]
+    fn an_unmanaged_world_blocks_starting() {
+        let mut console = data(Role::Gm, live());
+        console.can_start_session = false;
+        console.unmanaged_world = true;
+        let html = render(ConsoleView::Console(Box::new(console)));
+        assert!(!html.contains("Start session"));
+        assert!(html.contains("outside any session"));
+    }
+
+    #[test]
+    fn the_holder_can_return_to_setup_and_end_a_running_session() {
+        let html = render(ConsoleView::Console(Box::new(held(
+            Role::Gm,
+            SessionPhase::Running,
+            true,
+        ))));
+        assert!(html.contains("Session held by Piotr"));
+        assert!(html.contains("Return to Setup"));
+        assert!(html.contains("End session"));
+    }
+
+    #[test]
+    fn the_holder_in_setup_can_only_end_the_session() {
+        let html = render(ConsoleView::Console(Box::new(held(
+            Role::Gm,
+            SessionPhase::Setup,
+            true,
+        ))));
+        assert!(!html.contains("Return to Setup"));
+        assert!(html.contains("End session"));
+    }
+
+    #[test]
+    fn a_non_holder_gm_only_sees_who_holds_the_session() {
+        let html = render(ConsoleView::Console(Box::new(held(
+            Role::Gm,
+            SessionPhase::Running,
+            false,
+        ))));
+        assert!(html.contains("Session held by Piotr"));
+        assert!(!html.contains("Return to Setup"));
+        assert!(!html.contains("End session"));
+    }
+
+    #[test]
+    fn an_admin_may_end_a_session_they_do_not_hold() {
+        let html = render(ConsoleView::Console(Box::new(held(
+            Role::Admin,
+            SessionPhase::Running,
+            false,
+        ))));
+        assert!(html.contains("End session"));
+        assert!(!html.contains("Return to Setup"));
+    }
+
+    #[test]
+    fn a_player_sees_the_holder_without_controls() {
+        let html = render(ConsoleView::Console(Box::new(held(
+            Role::Player,
+            SessionPhase::Running,
+            false,
+        ))));
+        assert!(html.contains("Session held by Piotr"));
+        assert!(!html.contains("End session"));
     }
 }

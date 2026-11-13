@@ -34,6 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
     let driver_config = DriverConfig::from_env()?;
     let console = ConsoleLinks::from_env(&driver_config.base_url);
+    let lease = foundry_circle::http::session::Lease::from_env(&driver_config.base_url);
     let driver = LiveFoundryDriver::start(driver_config);
 
     let state = FullstackState::new(ServeConfig::new(), foundry_circle::App);
@@ -48,7 +49,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         database,
         auth: Some(oidc),
         console,
+        lease: lease.clone(),
     };
+    foundry_circle::http::session::spawn_reconciler(app_state.database.clone(), lease);
     let app: Router = api_router_with_state(app_state.clone())
         .merge(pages.layer(from_fn_with_state(
             app_state.clone(),

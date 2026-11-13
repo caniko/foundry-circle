@@ -298,7 +298,10 @@
                 systemd.services.foundryvtt.serviceConfig.BindReadOnlyPaths = [
                   "${config.services.foundry-circle.assets.directory}:${config.services.foundryvtt.dataDir}/Data/${config.services.foundry-circle.assets.prefix}"
                 ];
+                # `Data` is created explicitly: otherwise tmpfiles would make it
+                # root-owned on a fresh dataDir and Foundry could not write there.
                 systemd.tmpfiles.rules = [
+                  "d ${config.services.foundryvtt.dataDir}/Data - foundryvtt foundryvtt"
                   "d ${config.services.foundryvtt.dataDir}/Data/${config.services.foundry-circle.assets.prefix} 0755 foundryvtt foundryvtt"
                 ];
               };

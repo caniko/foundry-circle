@@ -148,7 +148,10 @@ pub fn store_asset(
     }
     let directory = config.directory.join(kind.dir());
     std::fs::create_dir_all(&directory).map_err(store_error)?;
+    // Foundry runs as another user: the umask must not hide what it serves.
+    readable_by_others(&directory, 0o755).map_err(store_error)?;
     let (temp, mut file) = Temp::create(&directory).map_err(store_error)?;
+    readable_by_others(temp.path(), 0o644).map_err(store_error)?;
     file.write_all(body).map_err(store_error)?;
     file.sync_all().map_err(store_error)?;
     drop(file);
@@ -169,6 +172,18 @@ fn octet_stream(value: &str) -> bool {
         .split(';')
         .next()
         .is_some_and(|value| value.trim().eq_ignore_ascii_case(UPLOAD_CONTENT_TYPE))
+}
+
+/// Set `mode` explicitly; creation modes are filtered by the process umask.
+fn readable_by_others(path: &Path, mode: u32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
+    Ok(())
 }
 
 fn store_error(error: std::io::Error) -> AssetError {
@@ -259,6 +274,22 @@ mod tests {
 
     fn svg(inner: &str) -> Vec<u8> {
         format!("<svg xmlns=\"http://www.w3.org/2000/svg\">{inner}</svg>").into_bytes()
+    }
+
+    /// Foundry reads as another user, so a restrictive umask or an existing
+    /// private directory must not leave the asset unreadable to it.
+    #[cfg(unix)]
+    #[test]
+    fn published_assets_are_readable_by_the_foundry_user() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = Scratch::new();
+        let tokens = scratch.0.join("tokens");
+        std::fs::create_dir(&tokens).unwrap();
+        std::fs::set_permissions(&tokens, std::fs::Permissions::from_mode(0o700)).unwrap();
+        store_asset(&scratch.config(), "token", "guard.webp", OCTET, &webp()).unwrap();
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&tokens), 0o755);
+        assert_eq!(mode(&tokens.join("guard.webp")), 0o644);
     }
 
     #[test]

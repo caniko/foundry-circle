@@ -74,6 +74,11 @@
           pname = "foundryvtt-fetch";
           cargoExtraArgs = "-p foundryvtt-fetch --bins";
         }));
+      uploadPackage = cacheRust (toolchain.craneLib.buildPackage (commonArgs
+        // {
+          pname = "foundry-circle-upload";
+          cargoExtraArgs = "-p foundry-circle-upload --bins";
+        }));
       # The release ships one portable archive for the Dioxus server and the
       # three fetch binaries. The server is not a static ELF (it carries the
       # web assets and its runtime), so nix-bundle backs the release contract.
@@ -89,6 +94,7 @@
               foundryvtt-fetch.package = fetchPackage;
               foundryvtt-fetchd.package = fetchPackage;
               foundryvtt-fetch-hook.package = fetchPackage;
+              foundry-circle-upload.package = uploadPackage;
             };
           }
         else null;
@@ -159,6 +165,7 @@
           default = dioxusPackage;
           foundry-circle = dioxusPackage;
           foundry-circle-cli = cargoPackage;
+          foundry-circle-upload = uploadPackage;
           foundryvtt-fetch = fetchPackage;
           foundryvtt-fetchd = fetchPackage;
           foundryvtt-fetch-hook = fetchPackage;
@@ -258,7 +265,7 @@
         default = devShell;
         msrv = pkgs.mkShell {
           inputsFrom = [(devShell.overrideAttrs (_: {shellHook = "";}))];
-          packages = [pkgs.rust-bin.stable."1.88.0".minimal];
+          packages = [pkgs.rust-bin.stable."1.93.0".minimal];
           RUSTFLAGS = "";
           CARGO_ENCODED_RUSTFLAGS = "";
           RUSTC_WRAPPER = "";

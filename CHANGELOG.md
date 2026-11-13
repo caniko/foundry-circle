@@ -4,6 +4,11 @@ All notable changes to Foundry Circle are documented here.
 
 ## Unreleased
 
+- Add `foundry-circle-upload`: browser PKCE sign-in, stored broker session, and
+  `push` to convert images and audio with ffmpeg and upload them as Foundry
+  tokens, maps, tiles, artwork, and audio.
+- Raise the minimum Rust version to 1.93, which `media-oxide` requires for its
+  Foundry conversion policy.
 - Implement typed world document reads with SHA-256 ETags and the chat, dice, scene, combat, and playlist commands; events and JSON-patch mutations stay unsupported.
 - Add credential-safe Foundry VTT account, signed-URL, archive, and offline-cache acquisition.
 - Validate Foundry v13/v14 package metadata and emit SHA-256 plus Nix SRI provenance.

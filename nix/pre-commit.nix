@@ -29,8 +29,8 @@
   cargo-msrv = {
     enable = true;
     name = "cargo check MSRV";
-    entry = "${pkgs.rust-bin.stable."1.88.0".default}/bin/cargo check --workspace --all-features";
-    extraPackages = [pkgs.rust-bin.stable."1.88.0".default];
+    entry = "${pkgs.rust-bin.stable."1.93.0".default}/bin/cargo check --workspace --all-features";
+    extraPackages = [pkgs.rust-bin.stable."1.93.0".default];
     pass_filenames = false;
     stages = ["pre-push" "manual"];
   };

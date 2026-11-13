@@ -387,6 +387,17 @@ async fn login_runs_the_loopback_flow_with_pkce() {
         login_with(&base, |url| {
             let url = url.to_string();
             tokio::spawn(async move {
+                // Browsers preconnect: an idle connection to the loopback
+                // must not keep the real callback from being answered.
+                let port: u16 = url
+                    .split("port=")
+                    .nth(1)
+                    .and_then(|rest| rest.split('&').next())
+                    .and_then(|port| port.parse().ok())
+                    .expect("loopback port in the authorize URL");
+                let _idle = TcpStream::connect(("127.0.0.1", port))
+                    .await
+                    .expect("idle preconnection");
                 let _ = reqwest::get(url).await;
             });
         }),

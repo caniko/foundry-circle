@@ -204,6 +204,9 @@ async fn push_files(push: Push) -> Result<ExitCode> {
                 }
             },
         }
+        // Inputs that normalize to the same name each reach the broker, which
+        // decides about duplicates; the staged copy is no longer needed.
+        let _ = std::fs::remove_file(&converted);
     }
     if failed > 0 {
         eprintln!("{failed} of {} files failed", push.files.len());

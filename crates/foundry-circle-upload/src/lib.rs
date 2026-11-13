@@ -43,6 +43,9 @@ pub use media_oxide::foundry::{AssetKind, AudioCodec, Options};
 pub const MAX_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
 
 /// How long a [`login`] waits for the browser callback.
+/// How long one loopback connection may take to send its request line.
+const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Connect timeout for every request; a slow 100 MiB upload gets no total
@@ -504,8 +507,13 @@ fn callback_code(
 async fn accept_callback(listener: &TcpListener, expected_state: &str) -> Result<String> {
     loop {
         let (mut stream, _peer) = listener.accept().await?;
-        // A browser probe or a half-open connection is not our callback.
-        let line = read_request_line(&mut stream).await.unwrap_or_default();
+        // A browser probe or an idle preconnection is not our callback; bound
+        // each read so it cannot hold the listener until the login times out.
+        let line = tokio::time::timeout(REQUEST_READ_TIMEOUT, read_request_line(&mut stream))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default();
         match callback_code(&line, expected_state) {
             Ok(code) => {
                 let _ = respond(&mut stream, 200, "Signed in. You can close this tab.").await;
@@ -563,20 +571,23 @@ async fn respond(stream: &mut TcpStream, status: u16, message: &str) -> Result<(
     Ok(())
 }
 
+/// Start the opener and return at once: `xdg-open` can stay attached to the
+/// browser, and the callback listener must already be serving.
 fn open_browser(url: &str) -> std::io::Result<()> {
     browser_command()
         .arg(url)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-        .map(|_| ())
+        .spawn()
+        .map(drop)
 }
 
+/// No shell: `cmd /C start` would read the URL's `&` as a command separator.
 #[cfg(target_os = "windows")]
 fn browser_command() -> std::process::Command {
-    let mut command = std::process::Command::new("cmd");
-    // The empty title keeps `start` from treating the URL as one.
-    command.args(["/C", "start", ""]);
+    let mut command = std::process::Command::new("rundll32");
+    command.arg("url.dll,FileProtocolHandler");
     command
 }
 

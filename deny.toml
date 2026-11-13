@@ -32,4 +32,5 @@ allow-git = [
   "https://github.com/caniko/tartan-ui.git",
   "https://github.com/caniko/nix-theme-broker.git",
   "https://github.com/caniko/oidc-app-auth.git",
+  "https://github.com/caniko/media-oxide.git",
 ]

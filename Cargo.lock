@@ -1778,6 +1778,7 @@ name = "foundry-circle"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "chromiumoxide",
  "chrono",
  "dioxus",
@@ -1785,6 +1786,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hmac",
+ "media-oxide",
  "oidc-app-auth",
  "reqwest 0.12.28",
  "serde",
@@ -2835,6 +2837,11 @@ dependencies = [
  "cfg-if",
  "digest 0.10.7",
 ]
+
+[[package]]
+name = "media-oxide"
+version = "0.1.0"
+source = "git+https://github.com/caniko/media-oxide.git?rev=250ff2c6641d8847d244a9a0565bf9a9c991b5dd#250ff2c6641d8847d244a9a0565bf9a9c991b5dd"
 
 [[package]]
 name = "memchr"

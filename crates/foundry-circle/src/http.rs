@@ -2,17 +2,19 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{
     Extension, Json, Router,
-    extract::{Path, Query, State},
-    http::{HeaderValue, StatusCode, header},
+    body::Bytes,
+    extract::{DefaultBodyLimit, Path, Query, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::from_fn_with_state,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 use tokio::{sync::RwLock, time::sleep};
+use tower_http::{compression::CompressionLayer, limit::RequestBodyLimitLayer, trace::TraceLayer};
 use uuid::Uuid;
 
 use crate::{
@@ -29,6 +31,9 @@ pub mod session;
 #[path = "play.rs"]
 pub mod play;
 
+#[path = "assets.rs"]
+pub mod assets;
+
 #[derive(Clone)]
 pub struct AppState {
     pub driver: Arc<dyn FoundryDriver>,
@@ -36,6 +41,10 @@ pub struct AppState {
     pub auth: Option<auth::AuthState>,
     pub console: ConsoleLinks,
     pub lease: session::Lease,
+    /// Where asset uploads land; `None` answers 503, because the directory and
+    /// the Foundry-visible prefix are one setting an operator either made or
+    /// did not.
+    pub assets: Option<assets::AssetConfig>,
 }
 
 /// Origins the lobby links to and polls; all optional so a partially
@@ -184,6 +193,7 @@ impl AppState {
             auth: None,
             console: ConsoleLinks::default(),
             lease: session::Lease::default(),
+            assets: None,
         }
     }
 }
@@ -263,6 +273,31 @@ pub fn api_router() -> Router {
 }
 
 pub fn api_router_with_state(state: AppState) -> Router {
+    api_routes(state.clone()).merge(asset_router(state))
+}
+
+/// Every route but the asset upload keeps this ceiling; it is small enough that
+/// a command or a session body can never be a file.
+pub const BODY_LIMIT: usize = 2 * 1024 * 1024;
+
+/// One upload's ceiling.
+// ponytail: the upload body is buffered in memory, so this is per concurrent
+// upload. Stream it to the temp file if a 100 MiB burst ever matters.
+pub const ASSET_BODY_LIMIT: usize = 100 * 1024 * 1024;
+
+/// The full process router: the Dioxus pages plus the API, with the small body
+/// limit on everything except the asset upload route.
+pub fn app(state: AppState, pages: Router) -> Router {
+    api_routes(state.clone())
+        .merge(pages.layer(from_fn_with_state(state.clone(), auth::optional_session)))
+        .layer(RequestBodyLimitLayer::new(BODY_LIMIT))
+        .merge(asset_router(state))
+        .layer(CompressionLayer::new())
+        .layer(TraceLayer::new_for_http())
+}
+
+/// The API without the upload route: this is what the small body limit wraps.
+fn api_routes(state: AppState) -> Router {
     let protected = Router::new()
         .route("/api/v1", get(discovery))
         .route("/api/v1/me", get(me))
@@ -284,6 +319,8 @@ pub fn api_router_with_state(state: AppState) -> Router {
         .route("/api/v1/healthz", get(healthz))
         .route("/api/v1/readyz", get(readyz))
         .route("/api/auth/login", get(auth::login_start))
+        .route("/api/auth/native", get(auth::native_login_start))
+        .route("/api/auth/native/token", post(auth::native_token))
         .route("/api/auth/oidc/callback", get(auth::oidc_callback))
         .route("/api/auth/logout", post(auth::logout))
         // The play host's Caddy routes `/_circle/*` here without the gate;
@@ -296,6 +333,73 @@ pub fn api_router_with_state(state: AppState) -> Router {
         .route("/_circle/enter", get(play::enter))
         .merge(protected)
         .with_state(state)
+}
+
+/// The one route with a large body, gated exactly like the rest of the API.
+/// Both limits are needed: the layer refuses an oversized `Content-Length`
+/// before the body is read, the extractor limit stops a chunked body.
+fn asset_router(state: AppState) -> Router {
+    Router::new()
+        .route("/api/v1/assets/{kind}/{name}", put(upload_asset))
+        .layer(DefaultBodyLimit::max(ASSET_BODY_LIMIT))
+        .layer(RequestBodyLimitLayer::new(ASSET_BODY_LIMIT))
+        .layer(from_fn_with_state(state.clone(), auth::require_session))
+        .with_state(state)
+}
+
+/// `PUT /api/v1/assets/{kind}/{name}`: a GM or admin uploads one converted
+/// asset. The body is the file itself, so the content type is the request's
+/// CSRF guard: a cross-origin form cannot send `application/octet-stream`.
+async fn upload_asset(
+    State(state): State<AppState>,
+    Extension(principal): Extension<auth::Principal>,
+    Path((kind, name)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(auth) = state.auth.as_ref() else {
+        return oidc_not_configured();
+    };
+    if !session::may_start(principal.role(&auth.admin_group, auth.gm_group.as_deref())) {
+        return permission_denied();
+    }
+    let Some(config) = state.assets.clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "assets_not_configured"})),
+        )
+            .into_response();
+    };
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let subject = principal.subject.clone();
+    // Validation and the write are blocking filesystem work.
+    let stored = tokio::task::spawn_blocking(move || {
+        assets::store_asset(&config, &kind, &name, content_type.as_deref(), &body)
+    })
+    .await;
+    match stored {
+        Ok(Ok(path)) => {
+            tracing::info!(subject = %subject, path = %path, "stored Foundry asset");
+            (StatusCode::CREATED, Json(json!({"path": path}))).into_response()
+        }
+        Ok(Err(error)) => {
+            if error.status().is_server_error() {
+                tracing::warn!(subject = %subject, error = %error, "Foundry asset upload failed");
+            }
+            (error.status(), Json(json!({"error": error.code()}))).into_response()
+        }
+        Err(error) => {
+            tracing::error!(subject = %subject, %error, "Foundry asset upload task failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "asset_store_failed"})),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn healthz() -> impl IntoResponse {
@@ -1304,6 +1408,7 @@ mod tests {
             auth: None,
             console: ConsoleLinks::default(),
             lease: session::Lease::default(),
+            assets: None,
         };
         let response = readyz(State(state.clone())).await.into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -1602,5 +1707,35 @@ mod tests {
         assert!(!same_origin(Some("https://play.vtt.example"), platform));
         assert!(!same_origin(Some("https://vtt.example.evil"), platform));
         assert!(!same_origin(Some("https://vtt.example"), None));
+    }
+
+    /// The composed app, as `main` builds it: 3 MiB is fine for one upload and
+    /// refused for every other route, before any handler sees the body.
+    #[tokio::test]
+    async fn only_the_asset_route_accepts_a_large_body() {
+        use axum::{body::Body, http::Request};
+        use tower::ServiceExt;
+
+        let three_mib = 3 * 1024 * 1024;
+        let app = app(AppState::unconfigured(), Router::new());
+
+        let upload = Request::put("/api/v1/assets/map/cave-1.webp")
+            .header("content-type", "application/octet-stream")
+            .header("content-length", three_mib.to_string())
+            .body(Body::from(vec![0_u8; three_mib]))
+            .unwrap();
+        let response = app.clone().oneshot(upload).await.unwrap();
+        // It reaches the session gate, which has no OIDC configuration here.
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let command = Request::post("/api/v1/world/commands")
+            .header("content-type", "application/json")
+            .header("content-length", three_mib.to_string())
+            .body(Body::from(vec![b' '; three_mib]))
+            .unwrap();
+        assert_eq!(
+            app.oneshot(command).await.unwrap().status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
     }
 }

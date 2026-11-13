@@ -10,15 +10,10 @@ fn main() {
 #[cfg(feature = "server")]
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use axum::{Router, middleware::from_fn_with_state, routing::get};
+    use axum::{Router, routing::get};
     use dioxus::server::{DioxusRouterExt, FullstackState, ServeConfig};
     use foundry_circle::driver::{DriverConfig, LiveFoundryDriver};
-    use foundry_circle::http::{
-        AppState, ConsoleLinks, DatabaseState, api_router_with_state, auth,
-    };
-    use tower_http::compression::CompressionLayer;
-    use tower_http::limit::RequestBodyLimitLayer;
-    use tower_http::trace::TraceLayer;
+    use foundry_circle::http::{AppState, ConsoleLinks, DatabaseState, assets, auth};
 
     tracing_subscriber::fmt::init();
 
@@ -50,6 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         auth: Some(oidc),
         console,
         lease: lease.clone(),
+        assets: assets::AssetConfig::from_env(),
     };
     foundry_circle::http::session::spawn_reconciler(
         app_state.database.clone(),
@@ -57,14 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         driver,
         driver_config,
     );
-    let app: Router = api_router_with_state(app_state.clone())
-        .merge(pages.layer(from_fn_with_state(
-            app_state.clone(),
-            auth::optional_session,
-        )))
-        .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024))
-        .layer(CompressionLayer::new())
-        .layer(TraceLayer::new_for_http());
+    let app = foundry_circle::http::app(app_state, pages);
 
     let bind =
         std::env::var("FOUNDRY_CIRCLE_BIND").unwrap_or_else(|_| "127.0.0.1:8032".to_string());

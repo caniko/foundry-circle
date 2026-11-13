@@ -1,0 +1,72 @@
+[site]
+title = "Foundry Circle"
+description = "A private, invite-only Foundry VTT table for a small group."
+base_url = "/"
+# Public origin: the static landing page at the root, the broker-owned
+# sign-in and console routes under /api on the same host.
+canonical_domain = "vtt.tartanoglu.com"
+footer_note = "A private Foundry VTT table."
+
+# Blackbox dark palette from the theme broker (web-theme-blackbox-honey).
+# Nix copies the package's theme.css next to this file as broker-theme.css.
+[theme]
+broker_css = "broker-theme.css"
+
+[[nav]]
+label = "Sign in"
+href = "/api/auth/login"
+
+[[nav]]
+label = "Lobby"
+href = "/api/console"
+
+[[footer_links]]
+label = "Source"
+href = "https://github.com/caniko/foundry-circle"
+
+[[pages]]
+slug = "index"
+title = "Private Foundry VTT table"
+description = "A private, invite-only Foundry VTT table for a small group."
+
+[[pages.sections]]
+type = "hero"
+eyebrow = "Foundry VTT"
+title = "A private table for a small group."
+tagline = "Foundry Circle is a private, invite-only Foundry VTT table for a small group."
+subtitle = ""
+
+[[pages.sections.ctas]]
+label = "Sign in"
+href = "/api/auth/login"
+primary = true
+
+[[pages.sections.ctas]]
+label = "Open the lobby"
+href = "/api/console"
+
+[[pages.sections]]
+type = "workflow_steps"
+id = "session"
+heading = "How a session works"
+intro = ""
+
+[[pages.sections.steps]]
+title = "The game master opens a session"
+description = "One game master at a time opens a session from the lobby and launches a world."
+
+[[pages.sections.steps]]
+title = "Players sign in and join"
+description = "Players sign in and join from the lobby while that world runs."
+
+[[pages.sections.steps]]
+title = "No separate Foundry password"
+description = "Nobody types a separate Foundry password."
+
+[[pages.sections]]
+type = "content"
+id = "access"
+heading = "Getting access"
+html = """
+<p>Accounts are invite-only. The invitation e-mail comes from the identity service at <a href="https://id.tartanoglu.com">id.tartanoglu.com</a>, and its link expires after 3 days; an unused invitation is re-sent later. Ask the person who runs the table for an invite.</p>
+"""

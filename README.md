@@ -70,6 +70,16 @@ refresh and revoke the subject. The client runs its own login instead:
 
 The client then sends `Cookie: foundry_circle_session=<token>` on every request.
 
+### Desktop uploader
+
+`foundry-circle-desktop` is that same client with a window: sign in through the
+browser, choose the asset kind and conversion options, then drop files in and
+upload them one at a time. It reuses `foundry-circle-upload` and adds no
+protocol of its own. `nix build .#foundry-circle-desktop` builds it on Linux,
+where the window needs webkitgtk; other platforms are wired with the release
+bundle. What stays manual is the same as for the CLI: token art faces south, and
+maps must not have the grid baked in.
+
 ## Development
 
 Rust 1.93 or newer is required to use the security-patched dependency graph;

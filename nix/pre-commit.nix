@@ -21,7 +21,11 @@
   cargo-clippy = {
     enable = true;
     name = "cargo clippy";
-    entry = "cargo clippy --all-targets --all-features -- --deny warnings";
+    # The desktop window embeds tartan-ui's stylesheet while the console pulls
+    # tartan-ui's `web` feature; in one `--all-features` resolve that pair is a
+    # deliberate compile_error. `checks.clippy-desktop` lints the window with
+    # its GTK inputs, so the shared hook excludes it.
+    entry = "cargo clippy --workspace --all-targets --all-features --exclude foundry-circle-desktop -- --deny warnings";
     extraPackages = pkgs.lib.optional (rustToolchain != null) rustToolchain;
     pass_filenames = false;
   };
@@ -29,7 +33,7 @@
   cargo-msrv = {
     enable = true;
     name = "cargo check MSRV";
-    entry = "${pkgs.rust-bin.stable."1.93.0".default}/bin/cargo check --workspace --all-features";
+    entry = "${pkgs.rust-bin.stable."1.93.0".default}/bin/cargo check --workspace --all-features --exclude foundry-circle-desktop";
     extraPackages = [pkgs.rust-bin.stable."1.93.0".default];
     pass_filenames = false;
     stages = ["pre-push" "manual"];

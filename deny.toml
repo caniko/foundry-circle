@@ -5,6 +5,8 @@ version = 2
 version = 2
 allow = [
   "Apache-2.0",
+  # target-lexicon arrives through the GTK sys crates' cfg-expr.
+  "Apache-2.0 WITH LLVM-exception",
   "BSD-2-Clause",
   "BSD-3-Clause",
   "BSL-1.0",
@@ -14,6 +16,11 @@ allow = [
   "ISC",
   "LicenseRef-UFL-1.0",
   "MIT",
+  # cssparser, selectors, dtoa-short and option-ext: the webkit/GTK stack the
+  # desktop window links, and file-level copyleft only.
+  "MPL-2.0",
+  # libfuzzer-sys, reached through rav1e's fuzz harness in the lockfile.
+  "NCSA",
   "OFL-1.1",
   "Unicode-3.0",
   "Unlicense",

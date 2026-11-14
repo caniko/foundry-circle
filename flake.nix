@@ -59,6 +59,25 @@
       };
       cacheRust = package: buildCache.withRustCache {inherit package;};
       cacheDioxus = package: buildCache.withDioxusCache {inherit package;};
+      # What a wry/webkitgtk window needs on Linux. `dbus` is for libdbus-sys
+      # at build time; `glib-networking` supplies the runtime TLS backends.
+      # Other platforms get their own wiring with the release bundle.
+      desktopBuildInputs =
+        if pkgs.stdenv.hostPlatform.isLinux
+        then
+          with pkgs; [
+            dbus
+            glib-networking
+            gtk3
+            libsoup_3
+            openssl
+            webkitgtk_4_1
+          ]
+        else [];
+      desktopNativeBuildInputs =
+        if pkgs.stdenv.hostPlatform.isLinux
+        then [pkgs.pkg-config]
+        else [];
       src = toolchain.craneLib.cleanCargoSource ./.;
       commonArgs = {
         inherit src;
@@ -70,7 +89,9 @@
       cargoPackage = cacheRust (toolchain.craneLib.buildPackage (commonArgs
         // {
           inherit cargoArtifacts;
-          cargoExtraArgs = "--workspace --all-features";
+          # The desktop window is a GTK binary of its own; keep it out of the
+          # headless CLI package and its dependency closure.
+          cargoExtraArgs = "--workspace --all-features --exclude foundry-circle-desktop";
         }));
       fetchPackage = cacheRust (toolchain.craneLib.buildPackage (commonArgs
         // {
@@ -81,6 +102,15 @@
         // {
           pname = "foundry-circle-upload";
           cargoExtraArgs = "-p foundry-circle-upload --bins";
+        }));
+      # The window links wry/webkitgtk, so it is built on its own target gate
+      # instead of inside the shared `--workspace` CLI build.
+      desktopPackage = cacheRust (toolchain.craneLib.buildPackage (commonArgs
+        // {
+          pname = "foundry-circle-desktop";
+          cargoExtraArgs = "-p foundry-circle-desktop --bins";
+          nativeBuildInputs = desktopNativeBuildInputs ++ [pkgs.wrapGAppsHook3];
+          buildInputs = desktopBuildInputs;
         }));
       # The release ships one portable archive for the Dioxus server and the
       # three fetch binaries. The server is not a static ELF (it carries the
@@ -160,7 +190,11 @@
         checks = self.checks.${system};
         packages = with pkgs;
           [cargo-deny cargo-nextest cargo-audit jq pre-commit rust-analyzer]
+          ++ desktopNativeBuildInputs
           ++ preCommit.enabledPackages;
+        # Building the workspace reaches the desktop crate, which needs the
+        # webkitgtk stack to link.
+        buildInputs = desktopBuildInputs;
         inherit (preCommit) shellHook;
       };
     in {
@@ -173,6 +207,11 @@
           foundryvtt-fetch = fetchPackage;
           foundryvtt-fetchd = fetchPackage;
           foundryvtt-fetch-hook = fetchPackage;
+        }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          # A webkitgtk window: Linux only until the release bundle wires the
+          # other platforms.
+          foundry-circle-desktop = desktopPackage;
         }
         // pkgs.lib.optionalAttrs (portableRelease != null) {
           release-bundle = portableRelease.releaseBundle;
@@ -229,7 +268,7 @@
           doctests = toolchain.craneLib.cargoTest (commonArgs
             // {
               inherit cargoArtifacts;
-              cargoTestExtraArgs = "--workspace --all-features --doc";
+              cargoTestExtraArgs = "--workspace --all-features --exclude foundry-circle-desktop --doc";
               preBuild = ''
                 # The RSA advisory waiver is valid only while SQLx's MySQL
                 # backend is absent from every enabled target's compiled graph.
@@ -244,7 +283,17 @@
           clippy = cacheRust (toolchain.craneLib.cargoClippy (commonArgs
             // {
               inherit cargoArtifacts;
-              cargoClippyExtraArgs = "--workspace --all-targets --all-features -- --deny warnings";
+              # The desktop crate embeds tartan-ui's stylesheet and the console
+              # pulls tartan-ui's `web` feature: in one resolve that pair is a
+              # `compile_error`, so the GUI is linted by `clippy-desktop`.
+              cargoClippyExtraArgs = "--workspace --all-targets --all-features --exclude foundry-circle-desktop -- --deny warnings";
+            }));
+          clippy-desktop = cacheRust (toolchain.craneLib.cargoClippy (commonArgs
+            // {
+              inherit cargoArtifacts;
+              cargoClippyExtraArgs = "-p foundry-circle-desktop --all-targets -- --deny warnings";
+              nativeBuildInputs = desktopNativeBuildInputs;
+              buildInputs = desktopBuildInputs;
             }));
           foundry-package-fixture = packageFixture;
           foundry-module = import ./nix/tests/module.nix {

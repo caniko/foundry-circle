@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "crates/foundry-circle",
+  "crates/foundry-circle-desktop",
   "crates/foundry-circle-upload",
   "crates/foundryvtt-fetch",
 ]

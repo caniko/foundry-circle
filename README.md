@@ -7,7 +7,7 @@
 <!-- simit:badges:end -->
 
 Foundry Circle is a Rust/Axum broker for the active Foundry VTT world, with a
-Dioxus 0.7 operator console using tartan-ui. PostgreSQL stores control-plane
+Dioxus 0.8 operator console using tartan-ui. PostgreSQL stores control-plane
 state only; Foundry remains authoritative for world documents.
 
 The repository provides health, discovery, a typed driver seam, OIDC login,

@@ -4,6 +4,10 @@ All notable changes to Foundry Circle are documented here.
 
 ## Unreleased
 
+- Target Dioxus 0.8.0-alpha.3 (tartan-ui pinned to its 0.8 branch) and build
+  `dioxus-cli` 0.8.0-alpha.3 plus the matching `wasm-bindgen-cli` 0.2.130 in this
+  flake: nixpkgs' 0.7 `dx` cannot build the 0.8 crates and ships no wasm-bindgen
+  for the ABI pair the lockfile needs.
 - Add GM/admin asset upload at `PUT /api/v1/assets/{kind}/{name}`, re-validating the media-oxide Foundry asset policy server side (kind, normalised name, extension, magic bytes, safe SVG), writing without ever replacing an existing file, and serving the result from a Foundry-mounted directory.
 - Add native client sign-in (RFC 8252 loopback + PKCE): `GET /api/auth/native` starts the Rauthy login, the callback hands a single-use code to the client's loopback listener, and `POST /api/auth/native/token` exchanges it for the client's own session.
 - Add `foundry-circle-upload`: browser PKCE sign-in, stored broker session, and

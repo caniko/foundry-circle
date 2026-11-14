@@ -14,7 +14,7 @@ license = "MIT OR Apache-2.0"
 authors = ["Can H. Tartanoglu <canhtart@gmail.com>"]
 
 [workspace.dependencies]
-dioxus = { version = "=0.7.9", default-features = false, features = [
+dioxus = { version = "=0.8.0-alpha.3", default-features = false, features = [
   "asset",
   "fullstack",
   "html",
@@ -22,9 +22,9 @@ dioxus = { version = "=0.7.9", default-features = false, features = [
   "macro",
   "router",
 ] }
-dioxus-router = "=0.7.9"
-tartan-ui-core = { git = "https://github.com/caniko/tartan-ui.git", rev = "d8f994da26846b6785194e7969a5d31d9fc050f1" }
-tartan-ui-dioxus = { git = "https://github.com/caniko/tartan-ui.git", rev = "d8f994da26846b6785194e7969a5d31d9fc050f1", default-features = false }
+dioxus-router = "=0.8.0-alpha.3"
+tartan-ui-core = { git = "https://github.com/caniko/tartan-ui.git", rev = "c9e401b670f0f1ad33124567f496b7492ef32da7" }
+tartan-ui-dioxus = { git = "https://github.com/caniko/tartan-ui.git", rev = "c9e401b670f0f1ad33124567f496b7492ef32da7", default-features = false }
 theme-broker = { git = "https://github.com/caniko/nix-theme-broker.git", rev = "483595220b0c5c07fe2010ec596020d0b73d13a1" }
 
 axum = { version = "0.8", features = ["macros"] }

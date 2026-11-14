@@ -42,6 +42,9 @@
         extensions = ["rustfmt" "clippy" "rust-src"];
       };
       wasmToolchain = rs-harbor.lib.mkWasmToolchain {inherit pkgs;};
+      # Dioxus 0.8 needs a matching dx and wasm-bindgen CLI; nixpkgs has
+      # neither, so both are built from crates.io (see nix/dioxus-pins.nix).
+      dioxusPins = import ./nix/dioxus-pins.nix {inherit pkgs;};
       sccachePackage = rs-harbor.packages.${system}.sccache;
       buildCache = rs-harbor.lib.mkBuildCachePolicy {
         inherit pkgs sccachePackage;
@@ -102,6 +105,7 @@
         inherit pkgs src;
         inherit (wasmToolchain) craneLib;
         inherit (wasmToolchain) rustToolchain;
+        inherit (dioxusPins) dioxusCli wasmBindgenCli;
         cargoLock = ./Cargo.lock;
         pname = "foundry-circle";
         package = "foundry-circle";

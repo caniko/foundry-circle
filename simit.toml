@@ -22,9 +22,12 @@ target_branch = "trunk"
 
 # Versioned harbor-rs bundle assets (including the cargo-binstall archive)
 # replace the former hand-made unversioned `release/foundry-circle.tar.gz`.
+# `platforms` names the bundle matrix: the x86_64-linux job ships the portable
+# Linux archives and cross-builds the Windows zip, and macos-15 builds the
+# aarch64-darwin archive natively.
 [release.artifacts]
 runner = "ubuntu-24.04"
-prebuild_binaries = true
+platforms = ["linux", "macos", "windows"]
 sign = false
 substituters = ["https://attic.candee.baby/canix", "https://cache.nixos.org"]
 trusted_public_keys = [

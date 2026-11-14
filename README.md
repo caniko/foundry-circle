@@ -76,9 +76,26 @@ The client then sends `Cookie: foundry_circle_session=<token>` on every request.
 browser, choose the asset kind and conversion options, then drop files in and
 upload them one at a time. It reuses `foundry-circle-upload` and adds no
 protocol of its own. `nix build .#foundry-circle-desktop` builds it on Linux,
-where the window needs webkitgtk; other platforms are wired with the release
-bundle. What stays manual is the same as for the CLI: token art faces south, and
-maps must not have the grid baked in.
+where the window needs webkitgtk, and on macOS, where it uses WKWebView. What
+stays manual is the same as for the CLI: token art faces south, and maps must
+not have the grid baked in.
+
+### Release artifacts
+
+Each signed GitHub release carries one archive per platform; the release
+workflow builds `packages.<system>.release-bundle` on that platform's runner
+and merges the archives into the single release:
+
+| Archive                                                   | Built on                     | Contents                                                                                                                                                                 |
+| --------------------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `foundry-circle-<version>-x86_64-linux-nix-bundle.tar.gz` | `ubuntu-24.04`               | `foundry-circle`, `foundryvtt-fetch`, `foundryvtt-fetchd`, `foundryvtt-fetch-hook`, `foundry-circle-upload`, `foundry-circle-desktop`, self-contained through nix-bundle |
+| `foundry-circle-<version>-x86_64-windows.zip`             | `ubuntu-24.04` (MinGW cross) | `foundry-circle-upload.exe`, `foundry-circle-desktop.exe`, `WebView2Loader.dll`                                                                                          |
+| `foundry-circle-<version>-aarch64-darwin.tar.gz`          | `macos-15`                   | `foundry-circle-upload`, `foundry-circle-desktop`                                                                                                                        |
+
+The Windows zip needs no MinGW runtime: Rust's `x86_64-pc-windows-gnu` target
+links the MinGW startup objects statically, and the WebView2 runtime itself
+ships with Windows 10/11. The server and the fetch tools are Linux-only and are
+not part of the Windows or macOS archives.
 
 ## Development
 

@@ -4,6 +4,14 @@ All notable changes to Foundry Circle are documented here.
 
 ## Unreleased
 
+- Ship the game-master tools on every platform: `foundry-circle-upload` and
+  `foundry-circle-desktop` join the portable Linux archive, a MinGW-crossed
+  Windows zip carries both `.exe` files and the WebView2 loader, and a native
+  macOS arm64 archive holds both binaries. The release workflow builds
+  `packages.<system>.release-bundle` on `ubuntu-24.04` and `macos-15` and merges
+  the archives into the single signed GitHub release; `[release.artifacts]
+platforms` names the matrix, and the `binstall-metadata` checks carry the
+  three platforms' target triples.
 - Target Dioxus 0.8.0-alpha.3 (tartan-ui pinned to its 0.8 branch) and build
   `dioxus-cli` 0.8.0-alpha.3 plus the matching `wasm-bindgen-cli` 0.2.130 in this
   flake: nixpkgs' 0.7 `dx` cannot build the 0.8 crates and ships no wasm-bindgen

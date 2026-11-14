@@ -137,3 +137,7 @@ grid drawn in).
 - Arbitrary JavaScript/evaluate endpoints are not part of the production
   feature set.
 - Licensed Foundry archives must not be published to the shared Attic cache.
+
+## License
+
+Licensed under `EUPL-1.2`. See `LICENSE`.

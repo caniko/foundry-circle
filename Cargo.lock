@@ -3861,7 +3861,7 @@ dependencies = [
 [[package]]
 name = "media-oxide"
 version = "0.1.0"
-source = "git+https://github.com/caniko/media-oxide.git?rev=250ff2c6641d8847d244a9a0565bf9a9c991b5dd#250ff2c6641d8847d244a9a0565bf9a9c991b5dd"
+source = "git+https://github.com/caniko/media-oxide.git?rev=230b30f022c671e65021603c5e9859a8005721c0#230b30f022c671e65021603c5e9859a8005721c0"
 
 [[package]]
 name = "memchr"

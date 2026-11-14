@@ -13,6 +13,8 @@ allow = [
   "bzip2-1.0.6",
   "CC0-1.0",
   "CDLA-Permissive-2.0",
+  # Foundry Circle itself.
+  "EUPL-1.2",
   "ISC",
   "LicenseRef-UFL-1.0",
   "MIT",
@@ -26,12 +28,6 @@ allow = [
   "Unlicense",
   "Zlib",
 ]
-
-# media-oxide owns the Foundry asset conversion policy and is AGPL-3.0-only.
-# Scoped to that crate instead of widening the global allow list.
-[[licenses.exceptions]]
-crate = "media-oxide"
-allow = ["AGPL-3.0-only"]
 
 [bans]
 multiple-versions = "warn"

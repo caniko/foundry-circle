@@ -4,6 +4,8 @@ All notable changes to Foundry Circle are documented here.
 
 ## Unreleased
 
+- Foundry Circle is now licensed `EUPL-1.2` (see `LICENSE`), and `media-oxide`
+  is consumed under its new `MIT OR Apache-2.0` crate license.
 - Ship the game-master tools on every platform: `foundry-circle-upload` and
   `foundry-circle-desktop` join the portable Linux archive, a MinGW-crossed
   Windows zip carries both `.exe` files and the WebView2 loader, and a native

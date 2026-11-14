@@ -11,7 +11,7 @@ members = [
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.93"
-license = "MIT OR Apache-2.0"
+license = "EUPL-1.2"
 authors = ["Can H. Tartanoglu <canhtart@gmail.com>"]
 
 [workspace.dependencies]
@@ -68,7 +68,7 @@ uuid = { version = "1", features = ["serde", "v4"] }
 oidc-app-auth = { version = "0.1.0", git = "https://github.com/caniko/oidc-app-auth.git", rev = "cc83fde58f45872c65271bf71024dd028610d89d" }
 # The DM's local converter (upload client) and this server share one asset
 # contract: kinds, allowed names, and magic sniffing. The server re-validates.
-media-oxide = { git = "https://github.com/caniko/media-oxide.git", rev = "250ff2c6641d8847d244a9a0565bf9a9c991b5dd", default-features = false, features = [
+media-oxide = { git = "https://github.com/caniko/media-oxide.git", rev = "230b30f022c671e65021603c5e9859a8005721c0", default-features = false, features = [
   "foundry",
 ] }
 getrandom = "0.3"

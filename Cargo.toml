@@ -1,16 +1,21 @@
 [workspace]
 resolver = "2"
-members = ["crates/foundry-circle", "crates/foundryvtt-fetch"]
+members = [
+  "crates/foundry-circle",
+  "crates/foundry-circle-desktop",
+  "crates/foundry-circle-upload",
+  "crates/foundryvtt-fetch",
+]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
-license = "MIT OR Apache-2.0"
+rust-version = "1.93"
+license = "EUPL-1.2"
 authors = ["Can H. Tartanoglu <canhtart@gmail.com>"]
 
 [workspace.dependencies]
-dioxus = { version = "=0.7.9", default-features = false, features = [
+dioxus = { version = "=0.8.0-alpha.3", default-features = false, features = [
   "asset",
   "fullstack",
   "html",
@@ -18,13 +23,15 @@ dioxus = { version = "=0.7.9", default-features = false, features = [
   "macro",
   "router",
 ] }
-dioxus-router = "=0.7.9"
-tartan-ui-core = { git = "https://github.com/caniko/tartan-ui.git", rev = "d8f994da26846b6785194e7969a5d31d9fc050f1" }
-tartan-ui-dioxus = { git = "https://github.com/caniko/tartan-ui.git", rev = "d8f994da26846b6785194e7969a5d31d9fc050f1", default-features = false }
+dioxus-router = "=0.8.0-alpha.3"
+tartan-ui-core = { git = "https://github.com/caniko/tartan-ui.git", rev = "c9e401b670f0f1ad33124567f496b7492ef32da7" }
+tartan-ui-dioxus = { git = "https://github.com/caniko/tartan-ui.git", rev = "c9e401b670f0f1ad33124567f496b7492ef32da7", default-features = false }
 theme-broker = { git = "https://github.com/caniko/nix-theme-broker.git", rev = "483595220b0c5c07fe2010ec596020d0b73d13a1" }
 
 axum = { version = "0.8", features = ["macros"] }
 tokio = { version = "1", features = [
+  "fs",
+  "io-util",
   "macros",
   "net",
   "process",
@@ -59,6 +66,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 # Keep the integration reproducible before the first crates.io publication.
 oidc-app-auth = { version = "0.1.0", git = "https://github.com/caniko/oidc-app-auth.git", rev = "cc83fde58f45872c65271bf71024dd028610d89d" }
+# The DM's local converter (upload client) and this server share one asset
+# contract: kinds, allowed names, and magic sniffing. The server re-validates.
+media-oxide = { git = "https://github.com/caniko/media-oxide.git", rev = "230b30f022c671e65021603c5e9859a8005721c0", default-features = false, features = [
+  "foundry",
+] }
+getrandom = "0.3"
 
 # The downloader is deliberately independent of the Dioxus application so it
 # can be published and used by Nix/systemd without shipping the operator UI.

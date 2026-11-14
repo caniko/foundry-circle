@@ -21,6 +21,7 @@
         listenPort = 8032;
         openFirewall = true;
         database.createLocally = true;
+        assets.enable = true;
         foundryWorld = {
           baseUrl = "https://vtt.example";
           passwordSecretFile = "/run/agenix/foundry-circle-password-secret";
@@ -62,5 +63,9 @@ in
   assert builtins.elem "foundry_circle" enabled.config.services.postgresql.ensureDatabases;
   assert pkgs.lib.any (user: user.name == "foundry-circle") enabled.config.services.postgresql.ensureUsers;
   assert builtins.elem 8032 enabled.config.networking.firewall.allowedTCPPorts;
+  assert enabled.config.systemd.services.foundry-circle.environment.FOUNDRY_CIRCLE_ASSETS_DIR == "/var/lib/foundry-circle/assets";
+  assert enabled.config.systemd.services.foundry-circle.environment.FOUNDRY_CIRCLE_ASSETS_PREFIX == "circle";
+  assert builtins.elem "/var/lib/foundry-circle/assets" enabled.config.systemd.services.foundry-circle.serviceConfig.ReadWritePaths;
+  assert builtins.elem "d /var/lib/foundry-circle/assets 0755 foundry-circle foundry-circle" enabled.config.systemd.tmpfiles.rules;
   assert !(builtins.hasAttr "foundry-circle" disabled.config.systemd.services);
     pkgs.runCommand "foundry-circle-module-shape" {} "touch $out"

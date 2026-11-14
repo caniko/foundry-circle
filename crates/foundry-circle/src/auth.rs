@@ -6,11 +6,13 @@ use std::{
 };
 
 use axum::{
+    Json,
     extract::{Query, State},
     http::{HeaderMap, StatusCode, header},
     middleware::Next,
     response::{AppendHeaders, IntoResponse, Redirect, Response},
 };
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use oidc_app_auth::{
     AuthError, Callback, LoginTransaction, OidcClient, OidcConfig, SessionToken, TokenSet,
@@ -18,6 +20,7 @@ use oidc_app_auth::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
@@ -268,6 +271,76 @@ impl Principal {
 #[derive(Debug, Deserialize)]
 pub struct LoginQuery {
     pub return_to: Option<String>,
+}
+
+/// `GET /api/auth/native`: a native client asks the system browser to sign in
+/// and prove the result with a loopback redirect and PKCE (RFC 8252).
+#[derive(Debug, Deserialize)]
+pub struct NativeQuery {
+    pub port: Option<String>,
+    pub state: Option<String>,
+    pub challenge: Option<String>,
+}
+
+/// A validated native login request. The port is the client's loopback
+/// listener, the state its CSRF value, and the challenge
+/// `base64url(sha256(verifier))` from RFC 7636 S256.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NativeLogin {
+    pub port: u16,
+    pub state: String,
+    pub challenge: String,
+}
+
+/// The loopback port must be one a client process could really own, the state
+/// must comfortably fit a query string, and the challenge must be a canonical
+/// 32-byte S256 digest.
+pub(crate) fn native_login(query: &NativeQuery) -> Option<NativeLogin> {
+    let port = query.port.as_deref()?.trim().parse::<u16>().ok()?;
+    if port < 1024 {
+        return None;
+    }
+    let state = query.state.as_deref()?;
+    if !(16..=128).contains(&state.len()) || !state.bytes().all(is_base64url) {
+        return None;
+    }
+    let challenge = query.challenge.as_deref()?;
+    if challenge.len() != 43 || URL_SAFE_NO_PAD.decode(challenge).ok()?.len() != 32 {
+        return None;
+    }
+    Some(NativeLogin {
+        port,
+        state: state.to_owned(),
+        challenge: challenge.to_owned(),
+    })
+}
+
+fn is_base64url(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+}
+
+/// `base64url(sha256(verifier))`, the RFC 7636 S256 challenge.
+pub(crate) fn verifier_challenge(verifier: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
+}
+
+/// Whether `verifier` produces the `challenge` the login recorded. The
+/// comparison is constant time, so a wrong verifier reveals nothing about how
+/// much of the digest it matched.
+pub(crate) fn verifier_matches(challenge: &str, verifier: &str) -> bool {
+    constant_time_eq(
+        challenge.as_bytes(),
+        verifier_challenge(verifier).as_bytes(),
+    )
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .fold(0_u8, |mismatch, (left, right)| mismatch | (left ^ right))
+            == 0
 }
 
 /// The session row behind one request: the identity the console renders and the
@@ -547,7 +620,20 @@ pub async fn login_start(
     State(state): State<AppState>,
     Query(query): Query<LoginQuery>,
 ) -> Response {
-    start_login(state, LoginHost::Platform, query.return_to).await
+    start_login(state, LoginHost::Platform, query.return_to, None).await
+}
+
+/// `GET /api/auth/native`: the platform login with the browser handing the
+/// result to a native client's loopback listener instead of setting a cookie.
+/// No session is required, exactly like `login_start`.
+pub async fn native_login_start(
+    State(state): State<AppState>,
+    Query(query): Query<NativeQuery>,
+) -> Response {
+    let Some(native) = native_login(&query) else {
+        return (StatusCode::BAD_REQUEST, "invalid native login request").into_response();
+    };
+    start_login(state, LoginHost::Platform, None, Some(&native)).await
 }
 
 /// `GET /_circle/login`: the same flow with the play host's callback and
@@ -556,10 +642,15 @@ pub async fn play_login_start(
     State(state): State<AppState>,
     Query(query): Query<LoginQuery>,
 ) -> Response {
-    start_login(state, LoginHost::Play, query.return_to).await
+    start_login(state, LoginHost::Play, query.return_to, None).await
 }
 
-async fn start_login(state: AppState, host: LoginHost, return_to: Option<String>) -> Response {
+async fn start_login(
+    state: AppState,
+    host: LoginHost,
+    return_to: Option<String>,
+    native: Option<&NativeLogin>,
+) -> Response {
     let Some(auth) = state.auth.as_ref() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "OIDC is not configured").into_response();
     };
@@ -581,7 +672,7 @@ async fn start_login(state: AppState, host: LoginHost, return_to: Option<String>
         Ok(request) => request,
         Err(error) => return auth_error_response(error),
     };
-    if let Err(error) = save_transaction(&pool, &request.transaction).await {
+    if let Err(error) = save_transaction(&pool, &request.transaction, native).await {
         tracing::error!(%error, "failed to save OIDC login transaction");
         return (StatusCode::INTERNAL_SERVER_ERROR, "login transaction error").into_response();
     }
@@ -659,7 +750,7 @@ async fn complete_login(
         )
             .into_response();
     }
-    let transaction = match take_transaction(&pool, state_value).await {
+    let (transaction, native) = match take_transaction(&pool, state_value).await {
         Ok(Some(transaction)) => transaction,
         Ok(None) => {
             return (StatusCode::BAD_REQUEST, "invalid or replayed login flow").into_response();
@@ -699,6 +790,18 @@ async fn complete_login(
         tracing::error!(%error, "failed to create Foundry Circle session");
         return (StatusCode::INTERNAL_SERVER_ERROR, "session error").into_response();
     }
+    if let Some(native) = native {
+        // The browser keeps no session: the native client that started this
+        // flow receives its own one-time code instead, and the binding cookie
+        // is cleared as on every callback.
+        return match complete_native(&pool, &native, &token).await {
+            Ok(redirect) => Redirect::to(&redirect).into_response(),
+            Err(error) => {
+                tracing::error!(%error, "failed to record a Foundry Circle native handoff");
+                (StatusCode::INTERNAL_SERVER_ERROR, "session error").into_response()
+            }
+        };
+    }
     (
         AppendHeaders([(
             header::SET_COOKIE,
@@ -707,6 +810,126 @@ async fn complete_login(
         Redirect::to(&return_to),
     )
         .into_response()
+}
+
+/// Record the one-time code a native client redeems for the session just
+/// created (RFC 8252 loopback). Only the code's hash is stored, and only for
+/// two minutes; the session token itself is in the row because the client has
+/// not received it yet.
+async fn complete_native(
+    pool: &PgPool,
+    native: &NativeLogin,
+    token: &SessionToken,
+) -> Result<String, sqlx::Error> {
+    let code = SessionToken::generate();
+    sqlx::query(
+        "INSERT INTO native_handoffs (code_hash, challenge, session_token, expires_at) VALUES ($1, $2, $3, now() + interval '2 minutes')",
+    )
+    .bind(code.hash())
+    .bind(&native.challenge)
+    .bind(token.as_str())
+    .execute(pool)
+    .await?;
+    Ok(format!(
+        "http://127.0.0.1:{}/callback?code={}&state={}",
+        native.port,
+        code.as_str(),
+        native.state
+    ))
+}
+
+/// `POST /api/auth/native/token`: redeem the one-time code and prove the PKCE
+/// verifier. The `Json` body is the CSRF guard, like every other POST here; the
+/// code is single use even when the exchange fails.
+#[derive(Debug, Deserialize)]
+pub struct NativeTokenRequest {
+    pub code: String,
+    pub verifier: String,
+}
+
+#[derive(Debug, Serialize)]
+struct NativeGrant {
+    token: String,
+    cookie: String,
+    expires_at: String,
+}
+
+pub async fn native_token(
+    State(state): State<AppState>,
+    Json(request): Json<NativeTokenRequest>,
+) -> Response {
+    let Some(pool) = state.database.pool().await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "database_unavailable"})),
+        )
+            .into_response();
+    };
+    match exchange_native_code(&pool, &request).await {
+        Ok(grant) => (StatusCode::OK, Json(grant)).into_response(),
+        Err(error) => {
+            if let Some(error) = error {
+                tracing::warn!(%error, "Foundry Circle native sign-in exchange failed");
+            }
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "invalid_grant"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Consume one handoff and return the session it carries. `Err(None)` is a
+/// refused grant (unknown, expired, replayed, wrong verifier or a session that
+/// is already gone); `Err(Some(_))` is a database failure.
+async fn exchange_native_code(
+    pool: &PgPool,
+    request: &NativeTokenRequest,
+) -> Result<NativeGrant, Option<sqlx::Error>> {
+    // Opportunistic cleanup: an expired code is useless to everyone.
+    sqlx::query("DELETE FROM native_handoffs WHERE expires_at <= now()")
+        .execute(pool)
+        .await
+        .map_err(Some)?;
+    // DELETE ... RETURNING makes the code single use: the row is gone whatever
+    // the verifier turns out to be.
+    let row = sqlx::query(
+        "DELETE FROM native_handoffs WHERE code_hash = $1 RETURNING challenge, session_token, expires_at",
+    )
+    .bind(SessionToken::hash_value(&request.code))
+    .fetch_optional(pool)
+    .await
+    .map_err(Some)?;
+    let Some(row) = row else {
+        return Err(None);
+    };
+    let expires_at: DateTime<Utc> = row.try_get("expires_at").map_err(Some)?;
+    if expires_at <= Utc::now() {
+        return Err(None);
+    }
+    let challenge: String = row.try_get("challenge").map_err(Some)?;
+    if !verifier_matches(&challenge, &request.verifier) {
+        return Err(None);
+    }
+    let token: String = row.try_get("session_token").map_err(Some)?;
+    // A revoked or expired session has nothing left to hand out; report the
+    // session's own expiry so the client knows when to sign in again.
+    let session_expires: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT expires_at FROM sessions WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > now()",
+    )
+    .bind(SessionToken::hash_value(&token))
+    .fetch_optional(pool)
+    .await
+    .map_err(Some)?;
+    let Some(expires_at) = session_expires else {
+        return Err(None);
+    };
+    Ok(NativeGrant {
+        token,
+        cookie: LoginHost::Platform.cookie_name().to_owned(),
+        expires_at: expires_at.to_rfc3339(),
+    })
 }
 
 pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -1133,26 +1356,32 @@ async fn revalidate_serial(
 async fn save_transaction(
     pool: &PgPool,
     transaction: &LoginTransaction,
+    native: Option<&NativeLogin>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO oidc_transactions (state, code_verifier, nonce, redirect_uri, return_to, expires_at) VALUES ($1, $2, $3, $4, $5, now() + interval '10 minutes')",
+        "INSERT INTO oidc_transactions (state, code_verifier, nonce, redirect_uri, return_to, expires_at, native_port, native_state, native_challenge) VALUES ($1, $2, $3, $4, $5, now() + interval '10 minutes', $6, $7, $8)",
     )
     .bind(&transaction.csrf_state)
     .bind(transaction.pkce_verifier.as_bytes())
     .bind(&transaction.nonce)
     .bind("")
     .bind(&transaction.return_to)
+    .bind(native.map(|native| i32::from(native.port)))
+    .bind(native.map(|native| native.state.as_str()))
+    .bind(native.map(|native| native.challenge.as_str()))
     .execute(pool)
     .await
     .map(|_| ())
 }
 
+/// Consume one login transaction, with the native handoff it carries when the
+/// flow was started by a native client.
 async fn take_transaction(
     pool: &PgPool,
     state: &str,
-) -> Result<Option<LoginTransaction>, sqlx::Error> {
+) -> Result<Option<(LoginTransaction, Option<NativeLogin>)>, sqlx::Error> {
     let mut transaction: Transaction<'_, Postgres> = pool.begin().await?;
-    let row = sqlx::query("SELECT code_verifier, nonce, return_to, expires_at FROM oidc_transactions WHERE state = $1 FOR UPDATE")
+    let row = sqlx::query("SELECT code_verifier, nonce, return_to, expires_at, native_port, native_state, native_challenge FROM oidc_transactions WHERE state = $1 FOR UPDATE")
         .bind(state)
         .fetch_optional(&mut *transaction)
         .await?;
@@ -1169,14 +1398,34 @@ async fn take_transaction(
     if expires_at <= Utc::now() {
         return Ok(None);
     }
-    Ok(Some(LoginTransaction {
-        pkce_verifier: String::from_utf8(row.try_get::<Vec<u8>, _>("code_verifier")?)
-            .unwrap_or_default(),
-        csrf_state: state.to_owned(),
-        nonce: row.try_get("nonce")?,
-        issued_at: unix_timestamp(expires_at - chrono::Duration::minutes(10)),
-        return_to: row.try_get("return_to")?,
-    }))
+    // A transaction missing any of the three native columns is a browser flow,
+    // and an out-of-range port is treated the same way: no loopback handoff.
+    let native = match (
+        row.try_get::<Option<i32>, _>("native_port")?,
+        row.try_get::<Option<String>, _>("native_state")?,
+        row.try_get::<Option<String>, _>("native_challenge")?,
+    ) {
+        (Some(port), Some(state), Some(challenge)) => u16::try_from(port)
+            .ok()
+            .filter(|port| *port >= 1024)
+            .map(|port| NativeLogin {
+                port,
+                state,
+                challenge,
+            }),
+        _ => None,
+    };
+    Ok(Some((
+        LoginTransaction {
+            pkce_verifier: String::from_utf8(row.try_get::<Vec<u8>, _>("code_verifier")?)
+                .unwrap_or_default(),
+            csrf_state: state.to_owned(),
+            nonce: row.try_get("nonce")?,
+            issued_at: unix_timestamp(expires_at - chrono::Duration::minutes(10)),
+            return_to: row.try_get("return_to")?,
+        },
+        native,
+    )))
 }
 
 async fn save_principal_and_session(
@@ -1761,6 +2010,86 @@ mod tests {
         assert_eq!(play_return_to(Some("//evil.invalid/game")), "/join");
         assert_eq!(play_return_to(Some("/game\\@evil.invalid")), "/join");
         assert_eq!(play_return_to(Some("game")), "/join");
+    }
+
+    /// RFC 7636 appendix B: the verifier and the S256 challenge it must meet.
+    const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
+    fn native(
+        port: Option<&str>,
+        state: Option<&str>,
+        challenge: Option<&str>,
+    ) -> Option<NativeLogin> {
+        native_login(&NativeQuery {
+            port: port.map(str::to_owned),
+            state: state.map(str::to_owned),
+            challenge: challenge.map(str::to_owned),
+        })
+    }
+
+    #[test]
+    fn a_native_login_needs_a_loopback_port_a_state_and_an_s256_challenge() {
+        let expected = NativeLogin {
+            port: 8787,
+            state: "0123456789abcdef".into(),
+            challenge: CHALLENGE.into(),
+        };
+        assert_eq!(
+            native(Some("8787"), Some("0123456789abcdef"), Some(CHALLENGE)),
+            Some(expected)
+        );
+        // Ports below 1024 are privileged, and a port that is not one is not a
+        // loopback listener.
+        for port in [Some("80"), Some("0"), Some("70000"), Some("http"), None] {
+            assert_eq!(
+                native(port, Some("0123456789abcdef"), Some(CHALLENGE)),
+                None,
+                "{port:?}"
+            );
+        }
+        // The state must fit a query string and stay URL-safe.
+        for state in [Some("too-short"), Some("0123456789abcde+"), None] {
+            assert_eq!(
+                native(Some("8787"), state, Some(CHALLENGE)),
+                None,
+                "{state:?}"
+            );
+        }
+        // The challenge is a canonical 32-byte digest: no padding, no short cut.
+        for challenge in [
+            Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-c"),
+            Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM="),
+            None,
+        ] {
+            assert_eq!(
+                native(Some("8787"), Some("0123456789abcdef"), challenge),
+                None,
+                "{challenge:?}"
+            );
+        }
+        // Every RFC 7636 verifier is 43..=128 characters; a longer state is fine.
+        let long_state = "a".repeat(128);
+        assert!(native(Some("8787"), Some(&long_state), Some(CHALLENGE)).is_some());
+        assert_eq!(
+            native(Some("8787"), Some(&"a".repeat(129)), Some(CHALLENGE)),
+            None
+        );
+    }
+
+    #[test]
+    fn the_pkce_verifier_must_produce_the_recorded_challenge() {
+        assert_eq!(verifier_challenge(VERIFIER), CHALLENGE);
+        assert!(verifier_matches(CHALLENGE, VERIFIER));
+        // A verifier that differs in one byte is refused.
+        assert!(!verifier_matches(
+            CHALLENGE,
+            "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXj"
+        ));
+        assert!(!verifier_matches(CHALLENGE, ""));
+        // A challenge that is not base64url is refused rather than panicking.
+        assert!(!verifier_matches("not a challenge", VERIFIER));
+        assert_eq!(verifier_challenge(VERIFIER).len(), 43);
     }
 
     fn stored_row() -> SessionRow {

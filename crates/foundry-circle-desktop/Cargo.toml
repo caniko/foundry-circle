@@ -1,0 +1,32 @@
+[package]
+name = "foundry-circle-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Desktop asset uploader window for Foundry Circle"
+publish = false
+
+[dependencies]
+# A desktop window, not the fullstack console: no router, no server features.
+dioxus = { version = "=0.8.0-alpha.3", default-features = false, features = [
+  "desktop",
+  "launch",
+  "lib",
+] }
+# The uploader library is the only protocol client; this window adds none.
+foundry-circle-upload = { path = "../foundry-circle-upload" }
+serde_json.workspace = true
+tartan-ui-core.workspace = true
+# `native-embedded` inlines the shared stylesheet so a plain `cargo run` needs no
+# Dioxus asset linker; `desktop` selects the renderer.
+tartan-ui-dioxus = { workspace = true, features = [
+  "desktop",
+  "native-embedded",
+] }
+tokio.workspace = true
+
+[[bin]]
+name = "foundry-circle-desktop"
+path = "src/main.rs"

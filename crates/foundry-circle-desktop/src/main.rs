@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use dioxus::html::HasFileData;
 use dioxus::prelude::*;
 use foundry_circle_upload::{
-    AudioCodec, Error, Session, convert, forget_session, load_session, login, save_session,
-    staged_asset, upload, whoami,
+    AudioCodec, Error, Session, convert, forget_session, load_session, login, open_browser,
+    save_session, staged_asset, upload, whoami,
 };
 use tartan_ui_core::{Feedback, FeedbackKind};
 use tartan_ui_dioxus::{DashboardHeader, FeedbackBanner, Field, Panel, SHARED_STYLES};
@@ -20,9 +20,10 @@ use tartan_ui_dioxus::{DashboardHeader, FeedbackBanner, Field, Panel, SHARED_STY
 mod model;
 
 use model::{
-    AUDIO_KBPS_MAX, AUDIO_KBPS_MIN, GRID_PX_DEFAULT, Job, JobStatus, KindChoice, TOKEN_PX_MAX,
-    TOKEN_PX_MIN, UiOptions, account_label, clamp_audio_kbps, clamp_token_px, codec_from_value,
-    codec_label, codec_value, describe_error, server_prefill,
+    AUDIO_KBPS_MAX, AUDIO_KBPS_MIN, GRID_PX_DEFAULT, Job, JobStatus, KindChoice, MessagePart,
+    SessionGeneration, TOKEN_PX_MAX, TOKEN_PX_MIN, UiOptions, account_label, clamp_audio_kbps,
+    clamp_token_px, codec_from_value, codec_label, codec_value, describe_error, message_parts,
+    server_prefill,
 };
 
 fn main() {
@@ -45,6 +46,9 @@ fn main() {
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Uploader {
     session: Signal<Option<Session>>,
+    /// Bumped whenever the session changes, so in-flight work can tell that it
+    /// no longer speaks for the signed-in account.
+    generation: Signal<SessionGeneration>,
     account: Signal<Option<String>>,
     message: Signal<Option<Feedback>>,
     options: Signal<UiOptions>,
@@ -58,6 +62,10 @@ struct Uploader {
 impl Uploader {
     fn session(&self) -> Option<Session> {
         (self.session)()
+    }
+
+    fn generation(&self) -> SessionGeneration {
+        (self.generation)()
     }
 
     fn account(&self) -> Option<String> {
@@ -93,19 +101,26 @@ impl Uploader {
     }
 
     /// One file at a time: conversion calls ffmpeg, uploads are async.
+    ///
+    /// The run belongs to the session it started under. Signing in, out, or
+    /// letting the session expire bumps the generation, so this loop stops
+    /// handing out work and a job whose conversion finishes afterwards is
+    /// never uploaded with the replacement session.
     async fn drain(mut self) {
+        let generation = self.generation();
         while let Some(index) = self.next_queued() {
-            let path = self.jobs.read()[index].path.clone();
-            let options = self.options();
+            if !generation.is_current(self.generation()) {
+                break;
+            }
+            // Each job carries the options and kind it was queued with.
+            let job = self.jobs.read()[index].clone();
+            let (path, options, kind) = (job.path, job.options, job.kind);
             let staging = self.staging();
-            let kind = options.kind.kind();
 
             self.update(index, JobStatus::Converting, None);
             // `convert` spawns ffmpeg and writes the file: never on the UI thread.
-            let converted = tokio::task::spawn_blocking(move || {
-                convert(&path, kind, &options.conversion(), &staging)
-            })
-            .await;
+            let converted =
+                tokio::task::spawn_blocking(move || convert(&path, kind, &options, &staging)).await;
             let converted = match converted {
                 Ok(Ok(converted)) => converted,
                 Ok(Err(error)) => {
@@ -135,11 +150,21 @@ impl Uploader {
                 continue;
             };
 
-            let Some(session) = self.session() else {
+            // The session may have changed during the conversion: skipping the
+            // upload is the whole point of binding the run to its generation.
+            let session = if generation.is_current(self.generation()) {
+                self.session()
+            } else {
+                None
+            };
+            let Some(session) = session else {
                 self.update(
                     index,
                     JobStatus::Failed,
-                    Some("signed out before the upload started".to_string()),
+                    Some(
+                        "the session changed before the upload started; add the file again"
+                            .to_string(),
+                    ),
                 );
                 let _ = std::fs::remove_file(&converted);
                 break;
@@ -166,8 +191,19 @@ impl Uploader {
                 }
             }
             let _ = std::fs::remove_file(&converted);
+            // ponytail: an upload already on the wire is not aborted — it began
+            // under its own session and only its result is recorded; the run
+            // stops here instead of starting the next job under a new account.
+            if !generation.is_current(self.generation()) {
+                break;
+            }
         }
         self.running.set(false);
+        // A sign-in during this run found a live worker and left the queue to
+        // it; pick the queue up now under the session it signed in with.
+        if self.next_queued().is_some() {
+            self.start_worker();
+        }
     }
 
     fn next_queued(&self) -> Option<usize> {
@@ -190,11 +226,15 @@ impl Uploader {
 
     /// Queue dropped or picked files. Nothing runs while signed out: the files
     /// wait, and the next sign-in starts the worker.
+    ///
+    /// The conversion options and kind are snapshotted per file here, which is
+    /// what "applied to files added from now on" means. A path that no longer
+    /// exists is left to conversion, which reports the real error.
     fn enqueue(mut self, paths: Vec<PathBuf>) {
+        let options = self.options();
         let jobs: Vec<Job> = paths
             .into_iter()
-            .filter(|path| path.is_file())
-            .map(Job::new)
+            .map(|path| Job::new(path, options))
             .collect();
         if jobs.is_empty() {
             return;
@@ -227,7 +267,14 @@ impl Uploader {
             self.busy.set(false);
             match result {
                 Ok(session) => {
-                    let saved = save_session(&session);
+                    // A fresh session is a new generation: work queued under the
+                    // previous one stops uploading with these credentials.
+                    self.generation.set(self.generation().bumped());
+                    // `save_session` writes and `sync_all`s: keep it off the UI thread.
+                    let to_save = session.clone();
+                    let saved = tokio::task::spawn_blocking(move || save_session(&to_save))
+                        .await
+                        .unwrap_or_else(|error| Err(Error::Io(std::io::Error::other(error))));
                     self.server.set(session.server.clone());
                     self.session.set(Some(session));
                     self.account.set(None);
@@ -249,22 +296,34 @@ impl Uploader {
 
     /// Drop the session locally; the server's copy stays valid until it expires.
     fn sign_out(self) {
-        let result = forget_session();
         self.expire(None);
-        self.note(match result {
-            Ok(()) => feedback_info("Signed out. The server session stays valid until it expires."),
-            Err(error) => feedback_error(format!("signed out locally, but {error}")),
-        });
     }
 
-    /// Forget the in-memory session, keeping whatever message the caller sets.
+    /// Forget the in-memory session and the stored copy, keeping whatever
+    /// message the caller sets.
     fn expire(mut self, message: Option<String>) {
+        // Everything captured under the old session is now stale.
+        self.generation.set(self.generation().bumped());
         self.session.set(None);
         self.account.set(None);
-        let _ = forget_session();
-        if let Some(message) = message {
-            self.note(feedback_error(message));
-        }
+        // Deleting the file is disk I/O; report it only when the caller has no
+        // message of its own to show.
+        spawn(async move {
+            let failure = match tokio::task::spawn_blocking(forget_session).await {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(format!("signed out locally, but {error}")),
+                Err(error) => Some(format!(
+                    "signed out locally, but the disk task stopped: {error}"
+                )),
+            };
+            match (message, failure) {
+                (Some(message), _) => self.note(feedback_error(message)),
+                (None, Some(failure)) => self.note(feedback_error(failure)),
+                (None, None) => self.note(feedback_info(
+                    "Signed out. The server session stays valid until it expires.",
+                )),
+            }
+        });
     }
 }
 
@@ -293,6 +352,7 @@ fn App() -> Element {
 
     let mut uploader = Uploader {
         session: use_signal(|| startup.session.clone()),
+        generation: use_signal(SessionGeneration::default),
         account: use_signal(|| None::<String>),
         message: use_signal(|| startup.message.clone()),
         options: use_signal(UiOptions::default),
@@ -312,8 +372,17 @@ fn App() -> Element {
     use_effect(move || match uploader.session() {
         None => uploader.account.set(None),
         Some(session) => {
+            // `peek` keeps the effect keyed to the session itself, not to the
+            // counter this spawn is about to read.
+            let generation = *uploader.generation.peek();
             spawn(async move {
-                match whoami(&session).await {
+                let result = whoami(&session).await;
+                // A late answer for a session that is gone must not name the
+                // old account over the new one, nor expire its replacement.
+                if !generation.is_current(uploader.generation()) {
+                    return;
+                }
+                match result {
                     Ok(principal) => uploader.account.set(Some(account_label(&principal))),
                     Err(error) => {
                         let (text, expired) = describe_error(&error);
@@ -572,7 +641,7 @@ fn files_panel(uploader: Uploader, signed_in: bool) -> Element {
                                     {job.status_label()}
                                     if job.status == JobStatus::Failed {
                                         if let Some(reason) = job.detail.clone() {
-                                            div { class: "uploader-reason", {reason} }
+                                            div { class: "uploader-reason", {reason_text(&reason)} }
                                         }
                                     }
                                 }
@@ -585,6 +654,36 @@ fn files_panel(uploader: Uploader, signed_in: bool) -> Element {
 
             p { class: "tartan-muted uploader-help",
                 "Still manual: token art faces south, and maps have no baked-in grid."
+            }
+        }
+    }
+}
+
+/// A failure reason, with any URL it carries as a link to the system browser.
+///
+/// media-oxide's missing-ffmpeg message ends in its download page; inside the
+/// webview that must open in the real browser, not replace the window.
+fn reason_text(reason: &str) -> Element {
+    rsx! {
+        for (index, part) in message_parts(reason).into_iter().enumerate() {
+            match part {
+                MessagePart::Text(text) => rsx! { span { key: "{index}", {text} } },
+                MessagePart::Url(url) => {
+                    let label = url.clone();
+                    let target = url.clone();
+                    rsx! {
+                        a {
+                            key: "{index}",
+                            class: "uploader-link",
+                            href: "{url}",
+                            onclick: move |event| {
+                                event.prevent_default();
+                                let _ = open_browser(&target);
+                            },
+                            {label}
+                        }
+                    }
+                }
             }
         }
     }
@@ -695,6 +794,7 @@ const STYLES: &str = r#"
 .uploader-queue td .tartan-button { margin-right: .5rem; }
 .uploader-path, .uploader-foundry-path { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .uploader-reason { color: var(--tartan-danger); font-size: .85rem; }
+.uploader-link { color: var(--tartan-accent); }
 .uploader-help { margin: 0; }
 @media (prefers-reduced-motion: reduce) { .uploader :where(*) { transition-duration: .01ms; animation-duration: .01ms; } }
 "#;

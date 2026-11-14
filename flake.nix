@@ -85,7 +85,22 @@
         strictDeps = true;
       };
       foundryVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
-      cargoArtifacts = cacheRust (toolchain.craneLib.buildDepsOnly commonArgs);
+      # The shared artifact set is the headless one: the desktop window is
+      # excluded here, exactly as the packages and checks that reuse it exclude
+      # it, so this build never needs the webkitgtk stack.
+      cargoArtifacts = cacheRust (toolchain.craneLib.buildDepsOnly (commonArgs
+        // {
+          cargoExtraArgs = "--locked --workspace --exclude foundry-circle-desktop";
+        }));
+      # The window links wry/webkitgtk, so its dependencies are built once, on
+      # their own, with the GTK inputs available.
+      desktopCargoArtifacts = cacheRust (toolchain.craneLib.buildDepsOnly (commonArgs
+        // {
+          pname = "foundry-circle-desktop";
+          cargoExtraArgs = "--locked -p foundry-circle-desktop";
+          nativeBuildInputs = desktopNativeBuildInputs;
+          buildInputs = desktopBuildInputs;
+        }));
       cargoPackage = cacheRust (toolchain.craneLib.buildPackage (commonArgs
         // {
           inherit cargoArtifacts;
@@ -109,6 +124,7 @@
         // {
           pname = "foundry-circle-desktop";
           cargoExtraArgs = "-p foundry-circle-desktop --bins";
+          cargoArtifacts = desktopCargoArtifacts;
           nativeBuildInputs = desktopNativeBuildInputs ++ [pkgs.wrapGAppsHook3];
           buildInputs = desktopBuildInputs;
         }));
@@ -290,7 +306,7 @@
             }));
           clippy-desktop = cacheRust (toolchain.craneLib.cargoClippy (commonArgs
             // {
-              inherit cargoArtifacts;
+              cargoArtifacts = desktopCargoArtifacts;
               cargoClippyExtraArgs = "-p foundry-circle-desktop --all-targets -- --deny warnings";
               nativeBuildInputs = desktopNativeBuildInputs;
               buildInputs = desktopBuildInputs;

@@ -152,6 +152,27 @@ pub fn clamp_audio_kbps(value: u32) -> u32 {
     value.clamp(AUDIO_KBPS_MIN, AUDIO_KBPS_MAX)
 }
 
+/// Names the signed-in session.
+///
+/// Every sign-in, sign-out and expiry takes the next value, so background work
+/// can capture the generation it started under and refuse to act for a later
+/// session: a conversion or `whoami` that outlives its session must not upload
+/// with the replacement credentials or expire them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionGeneration(u64);
+
+impl SessionGeneration {
+    /// The generation every earlier capture is no longer current with.
+    pub fn bumped(self) -> Self {
+        Self(self.0.wrapping_add(1))
+    }
+
+    /// Whether work that captured `self` still belongs to `current`.
+    pub fn is_current(self, current: Self) -> bool {
+        self == current
+    }
+}
+
 /// One file's place in the queue.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JobStatus {
@@ -168,13 +189,18 @@ pub enum JobStatus {
 pub struct Job {
     pub path: PathBuf,
     pub name: String,
+    /// The conversion options as they were when the file was added: the panel
+    /// promises later edits apply to newly added files only.
+    pub options: Options,
+    /// The asset kind that came with those options; `None` is auto.
+    pub kind: Option<AssetKind>,
     pub status: JobStatus,
     /// The Foundry path once `Done`, or why it failed.
     pub detail: Option<String>,
 }
 
 impl Job {
-    pub fn new(path: PathBuf) -> Self {
+    pub fn new(path: PathBuf, options: UiOptions) -> Self {
         let name = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -183,6 +209,8 @@ impl Job {
         Self {
             path,
             name,
+            options: options.conversion(),
+            kind: options.kind.kind(),
             status: JobStatus::Queued,
             detail: None,
         }
@@ -242,6 +270,45 @@ pub fn describe_error(error: &Error) -> (String, bool) {
         Error::Forbidden => ("this account is not a GM or admin".to_string(), false),
         other => (other.to_string(), false),
     }
+}
+
+/// A run of a reason: plain text, or a URL worth opening in the browser.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MessagePart {
+    Text(String),
+    Url(String),
+}
+
+/// Split a message into text and the links it mentions.
+///
+/// media-oxide points a missing-ffmpeg failure at its download page, and the
+/// window shows that as a link to the system browser instead of text to
+/// transcribe. Only `http(s)://` words count, and a sentence's trailing
+/// punctuation stays in the text.
+pub fn message_parts(message: &str) -> Vec<MessagePart> {
+    let mut parts = Vec::new();
+    let mut text = String::new();
+    for word in message.split_inclusive(char::is_whitespace) {
+        let core = word.trim_end();
+        let trailing = &word[core.len()..];
+        let is_url = core.starts_with("https://") || core.starts_with("http://");
+        if !is_url {
+            text.push_str(word);
+            continue;
+        }
+        let end = core.trim_end_matches([',', ';', ')', ']', '.']).len();
+        let (url, rest) = core.split_at(end);
+        if !text.is_empty() {
+            parts.push(MessagePart::Text(std::mem::take(&mut text)));
+        }
+        parts.push(MessagePart::Url(url.to_string()));
+        text.push_str(rest);
+        text.push_str(trailing);
+    }
+    if !text.is_empty() {
+        parts.push(MessagePart::Text(text));
+    }
+    parts
 }
 
 #[cfg(test)]
@@ -331,7 +398,7 @@ mod tests {
 
     #[test]
     fn jobs_name_themselves_and_expose_only_finished_paths() {
-        let job = Job::new(PathBuf::from("/tmp/guard-red.png"));
+        let job = Job::new(PathBuf::from("/tmp/guard-red.png"), UiOptions::default());
         assert_eq!(job.name, "guard-red.png");
         assert_eq!(job.status_label(), "Queued");
         assert_eq!(job.foundry_path(), None);
@@ -351,5 +418,69 @@ mod tests {
         };
         assert_eq!(failed.status_label(), "Failed");
         assert_eq!(failed.foundry_path(), None);
+    }
+
+    #[test]
+    fn a_job_keeps_the_options_it_was_queued_with() {
+        let queued = UiOptions {
+            kind: KindChoice::Token,
+            token_px: 300,
+            ..UiOptions::default()
+        };
+        let job = Job::new(PathBuf::from("/tmp/guard-red.png"), queued);
+        assert_eq!(job.options, queued.conversion());
+        assert_eq!(job.kind, Some(AssetKind::Token));
+
+        // Editing the panel afterwards only reaches files added afterwards.
+        let edited = UiOptions {
+            kind: KindChoice::Audio,
+            token_px: 200,
+            ..UiOptions::default()
+        };
+        assert_ne!(job.options, edited.conversion());
+        assert_ne!(job.kind, edited.kind.kind());
+    }
+
+    #[test]
+    fn a_generation_bump_makes_earlier_captures_stale() {
+        let signed_in = SessionGeneration::default();
+        assert!(signed_in.is_current(signed_in));
+
+        let resigned_in = signed_in.bumped();
+        assert!(!signed_in.is_current(resigned_in));
+        assert!(resigned_in.is_current(resigned_in));
+        assert!(!resigned_in.is_current(resigned_in.bumped()));
+    }
+
+    #[test]
+    fn a_reason_splits_its_links_out_of_the_text() {
+        let message = "media conversion failed: failed to run ffmpeg: not found; \
+            install ffmpeg (with ffprobe) from https://ffmpeg.org/download.html";
+        let parts = message_parts(message);
+        assert_eq!(
+            parts.last(),
+            Some(&MessagePart::Url(
+                "https://ffmpeg.org/download.html".to_string()
+            ))
+        );
+        assert!(
+            matches!(parts.first(), Some(MessagePart::Text(text)) if text.contains("install ffmpeg"))
+        );
+
+        // Nothing URL-shaped, and a trailing period stays with the sentence.
+        assert_eq!(
+            message_parts("this account is not a GM or admin"),
+            vec![MessagePart::Text(
+                "this account is not a GM or admin".to_string()
+            )]
+        );
+        assert_eq!(
+            message_parts("see https://example.test/x."),
+            vec![
+                MessagePart::Text("see ".to_string()),
+                MessagePart::Url("https://example.test/x".to_string()),
+                MessagePart::Text(".".to_string()),
+            ]
+        );
     }
 }

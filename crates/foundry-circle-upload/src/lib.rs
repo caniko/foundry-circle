@@ -571,9 +571,11 @@ async fn respond(stream: &mut TcpStream, status: u16, message: &str) -> Result<(
     Ok(())
 }
 
-/// Start the opener and return at once: `xdg-open` can stay attached to the
-/// browser, and the callback listener must already be serving.
-fn open_browser(url: &str) -> std::io::Result<()> {
+/// Open `url` in the system browser, detached from this process.
+///
+/// Used for the sign-in redirect and for links a caller renders — a desktop
+/// window must open them in the real browser, not inside its own webview.
+pub fn open_browser(url: &str) -> std::io::Result<()> {
     browser_command()
         .arg(url)
         .stdin(std::process::Stdio::null())

@@ -36,8 +36,10 @@
     # Upstream's tests need the wasm-bindgen monorepo and network access.
     doCheck = false;
     postFixup = ''
+      # `--prefix`: the pinned wasm-bindgen and esbuild must win over anything
+      # an older toolchain left on the inherited PATH.
       wrapProgram $out/bin/dx \
-        --suffix PATH : ${pkgs.lib.makeBinPath [
+        --prefix PATH : ${pkgs.lib.makeBinPath [
         pkgs.esbuild
         wasmBindgenCli
       ]}

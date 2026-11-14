@@ -184,7 +184,12 @@ impl Uploader {
                     }
                     if expired {
                         // Remaining files stay queued so a new sign-in resumes them.
-                        self.expire(Some("Signed out: the server session expired.".to_string()));
+                        // Only this run's session: a replacement signed in
+                        // meanwhile is not the one the server refused.
+                        self.expire(
+                            generation,
+                            Some("Signed out: the server session expired.".to_string()),
+                        );
                         let _ = std::fs::remove_file(&converted);
                         break;
                     }
@@ -264,17 +269,20 @@ impl Uploader {
         self.note(feedback_info("Waiting for the browser sign-in…"));
         spawn(async move {
             let result = login(&server).await;
-            self.busy.set(false);
             match result {
                 Ok(session) => {
-                    // A fresh session is a new generation: work queued under the
-                    // previous one stops uploading with these credentials.
-                    self.generation.set(self.generation().bumped());
-                    // `save_session` writes and `sync_all`s: keep it off the UI thread.
+                    // `save_session` writes and `sync_all`s: keep it off the UI
+                    // thread, and behind any deletion queued before it.
                     let to_save = session.clone();
-                    let saved = tokio::task::spawn_blocking(move || save_session(&to_save))
-                        .await
-                        .unwrap_or_else(|error| Err(Error::Io(std::io::Error::other(error))));
+                    let saved = {
+                        let _file = SESSION_FILE.lock().await;
+                        tokio::task::spawn_blocking(move || save_session(&to_save))
+                            .await
+                            .unwrap_or_else(|error| Err(Error::Io(std::io::Error::other(error))))
+                    };
+                    // Install and bump together, with no await between: work
+                    // captured under any earlier session is stale from here on.
+                    self.generation.set(self.generation().bumped());
                     self.server.set(session.server.clone());
                     self.session.set(Some(session));
                     self.account.set(None);
@@ -291,41 +299,65 @@ impl Uploader {
                     self.note(feedback_error(text));
                 }
             }
+            // Busy until the session is installed, so a second sign-in cannot
+            // overlap this one's persistence.
+            self.busy.set(false);
         });
     }
 
     /// Drop the session locally; the server's copy stays valid until it expires.
     fn sign_out(self) {
-        self.expire(None);
+        self.expire(self.generation(), None);
     }
 
-    /// Forget the in-memory session and the stored copy, keeping whatever
-    /// message the caller sets.
-    fn expire(mut self, message: Option<String>) {
-        // Everything captured under the old session is now stale.
-        self.generation.set(self.generation().bumped());
+    /// Forget the session captured as `captured`, in memory and on disk.
+    ///
+    /// A stale capture is ignored: an expiry reported for an earlier session
+    /// must not sign out its replacement or delete its saved copy.
+    fn expire(mut self, captured: SessionGeneration, message: Option<String>) {
+        if !captured.is_current(self.generation()) {
+            return;
+        }
+        let current = self.generation().bumped();
+        self.generation.set(current);
         self.session.set(None);
         self.account.set(None);
-        // Deleting the file is disk I/O; report it only when the caller has no
-        // message of its own to show.
         spawn(async move {
-            let failure = match tokio::task::spawn_blocking(forget_session).await {
-                Ok(Ok(())) => None,
-                Ok(Err(error)) => Some(format!("signed out locally, but {error}")),
-                Err(error) => Some(format!(
-                    "signed out locally, but the disk task stopped: {error}"
-                )),
+            // Queued on the same lock as saves, so a later sign-in's save runs
+            // after this deletion instead of being undone by it.
+            let failure = {
+                let _file = SESSION_FILE.lock().await;
+                match tokio::task::spawn_blocking(forget_session).await {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => Some(format!("the saved session was not removed: {error}")),
+                    Err(error) => Some(format!(
+                        "the saved session was not removed, the disk task stopped: {error}"
+                    )),
+                }
             };
-            match (message, failure) {
-                (Some(message), _) => self.note(feedback_error(message)),
-                (None, Some(failure)) => self.note(feedback_error(failure)),
-                (None, None) => self.note(feedback_info(
-                    "Signed out. The server session stays valid until it expires.",
-                )),
+            // A sign-in since then owns the message line.
+            if !current.is_current(self.generation()) {
+                return;
             }
+            self.note(match (message, failure) {
+                (Some(message), Some(failure)) => {
+                    feedback_error(format!("{message} Also, {failure}"))
+                }
+                (Some(message), None) => feedback_error(message),
+                (None, Some(failure)) => {
+                    feedback_error(format!("Signed out locally, but {failure}"))
+                }
+                (None, None) => {
+                    feedback_info("Signed out. The server session stays valid until it expires.")
+                }
+            });
         });
     }
 }
+
+/// Serializes the saved-session file: saves and deletions run in the order
+/// they were requested (tokio's mutex is FIFO).
+static SESSION_FILE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[component]
 fn App() -> Element {
@@ -388,7 +420,10 @@ fn App() -> Element {
                         let (text, expired) = describe_error(&error);
                         uploader.account.set(Some(text.clone()));
                         if expired {
-                            uploader.expire(Some("Signed out: the server session expired.".into()));
+                            uploader.expire(
+                                generation,
+                                Some("Signed out: the server session expired.".into()),
+                            );
                         }
                     }
                 }

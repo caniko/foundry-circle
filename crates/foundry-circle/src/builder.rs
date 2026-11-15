@@ -3,7 +3,10 @@
 //! Everything here is I/O-free so the wasm bundle and the server agree on the
 //! rules; `builder_store` owns the SQL and `builder_ui` the pages.
 
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::Role;
 
@@ -155,12 +158,55 @@ pub struct Rolls {
     pub sets: [AbilityRoll; 6],
 }
 
-/// Everything a player has decided so far. Only the slice-one fields exist yet.
+/// Everything a player has decided so far.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct DraftChoices {
     pub method: Option<AbilityMethod>,
     pub base: Option<Scores>,
+    /// The chosen compendium uuids.
+    pub class: Option<String>,
+    pub species: Option<String>,
+    pub background: Option<String>,
+    /// Decision key → trait keys or item uuids.
+    pub picks: BTreeMap<String, Vec<String>>,
+}
+
+impl DraftChoices {
+    /// Point a slot at another document. The picks the old root opened are the
+    /// caller's to drop with `prune_picks`: a nested decision's key carries the
+    /// granted feature's uuid, not the root's.
+    pub fn select(&mut self, slot: Slot, uuid: Option<String>) {
+        *slot.field(self) = uuid;
+    }
+}
+
+/// The three documents a draft roots on.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum Slot {
+    Class,
+    Species,
+    Background,
+}
+
+impl Slot {
+    /// The item type a document must have to fill this slot.
+    pub fn item_type(self) -> &'static str {
+        match self {
+            Self::Class => "class",
+            Self::Species => "race",
+            Self::Background => "background",
+        }
+    }
+
+    fn field(self, choices: &mut DraftChoices) -> &mut Option<String> {
+        match self {
+            Self::Class => &mut choices.class,
+            Self::Species => &mut choices.species,
+            Self::Background => &mut choices.background,
+        }
+    }
 }
 
 /// One change the builder sends; the server re-validates all of it.
@@ -169,14 +215,54 @@ pub struct DraftChoices {
 pub enum DraftPatch {
     Name(String),
     Abilities { method: AbilityMethod, base: Scores },
+    Select { slot: Slot, uuid: Option<String> },
+    Pick { key: String, values: Vec<String> },
 }
 
 /// Where an unfinished draft needs the player.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum Step {
-    Details,
+    Class,
+    Origin,
     Abilities,
+    Equipment,
+    Details,
+    Review,
+}
+
+impl Step {
+    pub const ALL: [Self; 6] = [
+        Self::Class,
+        Self::Origin,
+        Self::Abilities,
+        Self::Equipment,
+        Self::Details,
+        Self::Review,
+    ];
+
+    /// The in-page anchor the step nav and the "to do" list link to.
+    pub fn anchor(self) -> &'static str {
+        match self {
+            Self::Class => "class",
+            Self::Origin => "origin",
+            Self::Abilities => "abilities",
+            Self::Equipment => "equipment",
+            Self::Details => "details",
+            Self::Review => "review",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Class => "Class",
+            Self::Origin => "Origin",
+            Self::Abilities => "Abilities",
+            Self::Equipment => "Equipment",
+            Self::Details => "Details",
+            Self::Review => "Review",
+        }
+    }
 }
 
 /// One open item in the "To do" list.
@@ -258,6 +344,838 @@ pub struct CatalogItem {
     pub traits: serde_json::Value,
 }
 
+/// The enabled sources' cached documents: the class step and every decision the
+/// walker resolves read only this. Foundry stays the authority behind it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Catalog {
+    /// The enabled packs, by label; the item's uuid names which one it is.
+    pub packs: Vec<PackInfo>,
+    pub items: Vec<CatalogItem>,
+}
+
+impl Catalog {
+    pub fn get(&self, uuid: &str) -> Option<&CatalogItem> {
+        self.items.iter().find(|item| item.uuid == uuid)
+    }
+
+    /// The label of the pack a document's uuid names, for grouping by source.
+    pub fn source(&self, uuid: &str) -> String {
+        let id = pack_id(uuid).unwrap_or_default();
+        self.packs
+            .iter()
+            .find(|pack| pack.id == id)
+            .map_or(id, |pack| pack.label.clone())
+    }
+}
+
+/// The `<package>.<pack>` collection a compendium uuid names.
+fn pack_id(uuid: &str) -> Option<String> {
+    let mut parts = uuid.split('.');
+    if parts.next()? != "Compendium" {
+        return None;
+    }
+    Some(format!("{}.{}", parts.next()?, parts.next()?))
+}
+
+/// One class the enabled sources offer, as the class step lists it.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassOption {
+    pub uuid: String,
+    pub name: String,
+    /// The pack's label, which is how the list groups its classes.
+    pub source: String,
+}
+
+/// The chosen class as its step shows it.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassDetails {
+    pub uuid: String,
+    pub name: String,
+    pub source: String,
+    pub hit_die: String,
+    pub primary_ability: String,
+    /// The features the class grants, with their descriptions.
+    pub features: Vec<Feature>,
+    pub decisions: Vec<Decision>,
+}
+
+/// One granted feature: its name and plain-text description.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Feature {
+    pub name: String,
+    pub text: String,
+}
+
+/// One choice a decision offers; `value` is the trait key or the item uuid.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Opt {
+    #[serde(alias = "key")]
+    pub value: String,
+    pub label: String,
+}
+
+/// One Trait pool: how many of its options the player picks.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Pool {
+    pub count: u8,
+    pub options: Vec<Opt>,
+}
+
+/// What a Trait advancement does with the keys it takes, as
+/// `DND5E.traitModes` names them.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TraitMode {
+    /// Gain the trait.
+    #[default]
+    Default,
+    /// Gain expertise in a trait the draft is already proficient with.
+    Expertise,
+    /// Gain expertise regardless of proficiency.
+    ForcedExpertise,
+    /// Gain proficiency, or expertise when it is already proficient.
+    Upgrade,
+    /// Gain mastery with a weapon the draft is proficient with.
+    Mastery,
+}
+
+impl TraitMode {
+    /// The mode an advancement's configuration names; an unknown one is the
+    /// system's default.
+    fn parse(key: &str) -> Self {
+        match key {
+            "expertise" => Self::Expertise,
+            "forcedExpertise" => Self::ForcedExpertise,
+            "upgrade" => Self::Upgrade,
+            "mastery" => Self::Mastery,
+            _ => Self::Default,
+        }
+    }
+
+    /// The mode's index in the system's `traitModes`, which orders a Trait
+    /// advancement against the others at its level.
+    fn order(self) -> u16 {
+        match self {
+            Self::Default => 0,
+            Self::Expertise => 1,
+            Self::ForcedExpertise => 2,
+            Self::Upgrade => 3,
+            Self::Mastery => 4,
+        }
+    }
+
+    /// Whether the draft can still take this pool key in this mode, from what it
+    /// is proficient with and what it already holds expertise in.
+    fn offers(
+        self,
+        option: &Opt,
+        proficient: &BTreeSet<String>,
+        expert: &BTreeSet<String>,
+    ) -> bool {
+        match self {
+            Self::Default => true,
+            Self::Expertise => {
+                proficient.contains(&option.value) && !expert.contains(&option.value)
+            }
+            Self::ForcedExpertise | Self::Upgrade => !expert.contains(&option.value),
+            // A mastery key counts when the weapon itself or its category is
+            // proficient: `weapon:sim:dagger` or `weapon:sim`.
+            Self::Mastery => {
+                let category = option
+                    .value
+                    .rsplit_once(':')
+                    .map_or(option.value.as_str(), |(category, _)| category);
+                proficient.contains(category) || proficient.contains(&option.value)
+            }
+        }
+    }
+
+    /// The system's own one-line hint for a mode, as its labels file words it.
+    pub fn hint(self) -> Option<&'static str> {
+        match self {
+            Self::Default => None,
+            Self::Expertise => {
+                Some("Gain expertise in a trait in which you already have proficiency.")
+            }
+            Self::ForcedExpertise => {
+                Some("Gain expertise in a trait regardless of your previous proficiency level.")
+            }
+            Self::Upgrade => Some(
+                "Gain proficiency in a trait unless you already have it, otherwise gain expertise.",
+            ),
+            Self::Mastery => {
+                Some("Gain mastery with a weapon in which you already have proficiency.")
+            }
+        }
+    }
+}
+
+/// What kind of answer a decision wants.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum DecisionKind {
+    Trait {
+        /// What the advancement does with the keys it takes; the pools already
+        /// hold only what it can still offer.
+        #[serde(default)]
+        mode: TraitMode,
+        grants: Vec<Opt>,
+        choices: Vec<Pool>,
+    },
+    Items {
+        count: u8,
+        options: Vec<Opt>,
+    },
+    Asi {
+        points: u8,
+        cap: u8,
+        open: Vec<String>,
+    },
+    Size {
+        options: Vec<String>,
+    },
+    Unsupported {
+        kind: String,
+    },
+}
+
+/// One choice a document's advancement opens at the draft's level.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Decision {
+    /// `<item uuid>#<advancement id>#<level>`; what `DraftPatch::Pick` names.
+    pub key: String,
+    /// The document that opens it, for example "Divine Order".
+    pub owner_name: String,
+    pub title: String,
+    /// The advancement's own hint, as plain text.
+    pub hint: String,
+    /// The step of the root that leads here; a nested grant keeps its root's.
+    pub step: Step,
+    pub kind: DecisionKind,
+}
+
+impl Decision {
+    /// Nothing to answer: a Trait advancement that only grants something.
+    pub fn is_automatic(&self) -> bool {
+        matches!(&self.kind, DecisionKind::Trait { choices, .. } if choices.is_empty())
+    }
+}
+
+/// An advancement's hint is HTML; the pages show text.
+///
+/// ponytail: tags only; decode entities if a real hint carries one.
+fn plain(html: &str) -> String {
+    let mut text = String::new();
+    let mut inside = false;
+    for character in html.chars() {
+        match character {
+            '<' => inside = true,
+            '>' => inside = false,
+            _ if !inside => text.push(character),
+            _ => {}
+        }
+    }
+    text.trim().to_owned()
+}
+
+/// How deep a chain of granted items may nest before the walker gives up.
+const WALK_DEPTH: u8 = 8;
+
+fn advancement_kind(advancement: &Value) -> &str {
+    advancement["type"].as_str().unwrap_or_default()
+}
+
+/// `CONFIG.DND5E.traits` order, which a Trait advancement sorts by its first
+/// represented type after its own type's order (`module/config.mjs`).
+const TRAITS: [&str; 11] = [
+    "saves",
+    "skills",
+    "languages",
+    "armor",
+    "weapon",
+    "tool",
+    "di",
+    "dr",
+    "dv",
+    "dm",
+    "ci",
+];
+
+/// The key dnd5e sorts one item's advancements at a level by, from each type's
+/// `metadata.order` and `sortingValueForLevel`
+/// (`module/documents/advancement/*.mjs`, `item.mjs`): a Trait adds the order
+/// of the trait type it represents and of its mode, then every type adds its
+/// title.
+fn sort_key(advancement: &Value) -> String {
+    let kind = advancement_kind(advancement);
+    let order = match kind {
+        "HitPoints" => 10,
+        "AbilityScoreImprovement" => 20,
+        "Size" => 25,
+        "Trait" => 30,
+        "ItemGrant" => 40,
+        "ItemChoice" => 50,
+        "ModifyItem" => 55,
+        "ScaleValue" => 60,
+        "Subclass" => 70,
+        _ => 100,
+    };
+    let title = advancement["name"].as_str().unwrap_or_default();
+    if kind != "Trait" {
+        return format!("{order:04} {title}");
+    }
+    // The first key the advancement represents, grants before pools: its
+    // prefix is the trait type.
+    let configuration = &advancement["configuration"];
+    let trait_type = configuration["grants"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(
+            configuration["choices"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|choice| choice["pool"].as_array()?.first()),
+        )
+        .find_map(Value::as_str)
+        .and_then(|key| key.split(':').next())
+        .unwrap_or_default();
+    let trait_order = TRAITS
+        .iter()
+        .position(|name| *name == trait_type)
+        .unwrap_or(TRAITS.len()) as u16;
+    let mode = TraitMode::parse(configuration["mode"].as_str().unwrap_or_default());
+    format!("{order:04} {:04} {title}", trait_order + mode.order() * 100)
+}
+
+/// The levels an advancement applies at, as dnd5e's `levels` getter reports
+/// them: ItemChoice keys its own, Size is always level 0, the rest carry one.
+fn advancement_levels(advancement: &Value) -> Vec<u8> {
+    match advancement_kind(advancement) {
+        "ItemChoice" => advancement["configuration"]["choices"]
+            .as_object()
+            .map(|choices| choices.keys().filter_map(|key| key.parse().ok()).collect())
+            .unwrap_or_default(),
+        "Size" => vec![0],
+        _ => advancement["level"]
+            .as_u64()
+            .and_then(|level| u8::try_from(level).ok())
+            .map(|level| vec![level])
+            .unwrap_or_default(),
+    }
+}
+
+/// A Trait advancement's labelled grants and pools, as the module resolved
+/// them; a document the module could not resolve reads as empty.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct TraitData {
+    grants: Vec<Opt>,
+    choices: Vec<Pool>,
+}
+
+fn trait_data(item: &CatalogItem, id: &str) -> TraitData {
+    serde_json::from_value(item.traits.get(id).cloned().unwrap_or_default()).unwrap_or_default()
+}
+
+/// An ItemChoice's offers: the pool's documents the catalog holds plus, for a
+/// dropping choice, every document whose type matches its restriction. An
+/// offer whose prerequisites the draft does not meet is not offered.
+fn item_choice_options(
+    catalog: &Catalog,
+    advancement: &Value,
+    level: u8,
+    held: &BTreeSet<String>,
+) -> Vec<Opt> {
+    let configuration = &advancement["configuration"];
+    let mut options: Vec<Opt> = Vec::new();
+    for entry in configuration["pool"].as_array().into_iter().flatten() {
+        if let Some(item) = entry["uuid"].as_str().and_then(|uuid| catalog.get(uuid)) {
+            push_option(&mut options, item, level, held);
+        }
+    }
+    let restriction = &configuration["restriction"];
+    let subtype = restriction["subtype"].as_str().unwrap_or_default();
+    if configuration["allowDrops"].as_bool().unwrap_or(false) && !subtype.is_empty() {
+        let value = restriction["type"].as_str().unwrap_or_default();
+        for item in &catalog.items {
+            let kind = &item.system["type"];
+            if kind["value"].as_str() == Some(value) && kind["subtype"].as_str() == Some(subtype) {
+                push_option(&mut options, item, level, held);
+            }
+        }
+    }
+    options
+}
+
+fn push_option(options: &mut Vec<Opt>, item: &CatalogItem, level: u8, held: &BTreeSet<String>) {
+    if prerequisite_met(item, level, held)
+        && !options.iter().any(|option| option.value == item.uuid)
+    {
+        options.push(Opt {
+            value: item.uuid.clone(),
+            label: item.name.clone(),
+        });
+    }
+}
+
+/// Whether an item's feat prerequisites hold at `level`: its level is at most
+/// the character's, and when it names required identifiers the draft holds at
+/// least one of them, since the system's warning reads them as a disjunction.
+/// `held` carries each item's identifier both plain and `type:identifier`.
+fn prerequisite_met(item: &CatalogItem, level: u8, held: &BTreeSet<String>) -> bool {
+    let prerequisites = &item.system["prerequisites"];
+    if prerequisites["level"]
+        .as_u64()
+        .is_some_and(|required| required > u64::from(level))
+    {
+        return false;
+    }
+    let required: Vec<&str> = prerequisites["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    required.is_empty() || required.iter().any(|identifier| held.contains(*identifier))
+}
+
+/// What one root's walk found: the items it grants and the choices it opens.
+#[derive(Default)]
+struct Walk {
+    features: Vec<Feature>,
+    decisions: Vec<Decision>,
+    /// Trait keys the draft holds proficiently and at expertise, plus the
+    /// identifiers of the items it holds: the state dnd5e applies one
+    /// advancement at a time and later advancements read.
+    proficient: BTreeSet<String>,
+    expert: BTreeSet<String>,
+    held: BTreeSet<String>,
+}
+
+impl Walk {
+    /// Note an item as held, in the two forms a prerequisite can name it.
+    fn hold(&mut self, item: &CatalogItem) {
+        if let Some(identifier) = item.system["identifier"]
+            .as_str()
+            .filter(|identifier| !identifier.is_empty())
+        {
+            self.held.insert(identifier.to_owned());
+            self.held.insert(format!("{}:{identifier}", item.item_type));
+        }
+    }
+
+    /// Fold one Trait advancement's grants and answers into what the draft
+    /// holds; the system applies every mode but default as expertise.
+    fn record_traits(&mut self, mode: TraitMode, grants: &[Opt], chosen: &[String]) {
+        let keys = grants
+            .iter()
+            .map(|option| option.value.clone())
+            .chain(chosen.iter().cloned());
+        match mode {
+            TraitMode::Default => self.proficient.extend(keys),
+            _ => self.expert.extend(keys),
+        }
+    }
+}
+
+/// Walk one root item and, after it, every item its advancements grant or pick
+/// at this level: dnd5e applies a level's root steps first, then synthesises
+/// steps for the items they added, in the order they were added
+/// (`advancement-manager.mjs`).
+fn walk(
+    catalog: &Catalog,
+    root: &CatalogItem,
+    choices: &DraftChoices,
+    level: u8,
+    step: Step,
+    found: &mut Walk,
+) {
+    let mut queue = VecDeque::from([(root, 0)]);
+    while let Some((item, depth)) = queue.pop_front() {
+        if depth >= WALK_DEPTH {
+            continue;
+        }
+        found.hold(item);
+        let mut advancements: Vec<(&String, &Value)> = item.system["advancement"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .collect();
+        advancements.sort_by_cached_key(|(_, advancement)| sort_key(advancement));
+        for (id, advancement) in advancements {
+            // A secondary-class advancement belongs to a multiclass dip, not here.
+            if advancement["classRestriction"].as_str() == Some("secondary") {
+                continue;
+            }
+            // ponytail: spell ItemChoices are slice 8's data; skipping them keeps a
+            // spell picker from arriving as an unanswerable step.
+            let configuration = &advancement["configuration"];
+            if advancement_kind(advancement) == "ItemChoice"
+                && (configuration["type"].as_str() == Some("spell")
+                    || configuration["restriction"]["type"].as_str() == Some("spell"))
+            {
+                continue;
+            }
+            let Some(at) = advancement_levels(advancement)
+                .into_iter()
+                .filter(|at| *at <= level)
+                .max()
+            else {
+                continue;
+            };
+            let key = format!("{}#{id}#{at}", item.uuid);
+            let mut title = advancement["name"]
+                .as_str()
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned);
+            let hint = plain(advancement["hint"].as_str().unwrap_or_default());
+            let mut chosen: Vec<&String> = Vec::new();
+            let kind = match advancement_kind(advancement) {
+                "Trait" => {
+                    let data = trait_data(item, id);
+                    let mode = TraitMode::parse(configuration["mode"].as_str().unwrap_or_default());
+                    let configured = configuration["choices"]
+                        .as_array()
+                        .is_some_and(|choices| !choices.is_empty());
+                    let kind = if configured && data.choices.is_empty() {
+                        // Nothing resolved the pools, so do not offer an empty choice.
+                        DecisionKind::Unsupported {
+                            kind: "Trait".into(),
+                        }
+                    } else {
+                        DecisionKind::Trait {
+                            mode,
+                            grants: data.grants.clone(),
+                            choices: data
+                                .choices
+                                .iter()
+                                .map(|pool| Pool {
+                                    count: pool.count,
+                                    options: pool
+                                        .options
+                                        .iter()
+                                        .filter(|option| {
+                                            mode.offers(option, &found.proficient, &found.expert)
+                                        })
+                                        .cloned()
+                                        .collect(),
+                                })
+                                .collect(),
+                        }
+                    };
+                    // The offers above are what this advancement can still take, so
+                    // its own answers count only for the advancements after it.
+                    let answers: &[String] = choices.picks.get(&key).map_or(&[], Vec::as_slice);
+                    found.record_traits(mode, &data.grants, answers);
+                    Some(kind)
+                }
+                "ItemChoice" => {
+                    let count = configuration["choices"][at.to_string()]["count"]
+                        .as_u64()
+                        .and_then(|count| u8::try_from(count).ok())
+                        .unwrap_or(0);
+                    let options = item_choice_options(catalog, advancement, level, &found.held);
+                    chosen = choices
+                        .picks
+                        .get(&key)
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>();
+                    Some(if options.len() < usize::from(count) {
+                        // The enabled sources cannot satisfy this pool yet.
+                        DecisionKind::Unsupported {
+                            kind: "ItemChoice".into(),
+                        }
+                    } else {
+                        DecisionKind::Items { count, options }
+                    })
+                }
+                "ItemGrant" => {
+                    if !configuration["optional"].as_bool().unwrap_or(false) {
+                        for entry in configuration["items"].as_array().into_iter().flatten() {
+                            if entry["optional"].as_bool().unwrap_or(false) {
+                                continue;
+                            }
+                            let Some(granted) =
+                                entry["uuid"].as_str().and_then(|uuid| catalog.get(uuid))
+                            else {
+                                continue;
+                            };
+                            found.features.push(Feature {
+                                name: granted.name.clone(),
+                                text: granted.text.clone(),
+                            });
+                            queue.push_back((granted, depth + 1));
+                        }
+                    }
+                    None
+                }
+                "Size" => {
+                    let options: Vec<String> = advancement["configuration"]["sizes"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|size| size.as_str().map(str::to_owned))
+                        .collect();
+                    // One size is no choice; the actor takes it by default.
+                    if options.len() > 1 {
+                        title = Some("Size".into());
+                        Some(DecisionKind::Size { options })
+                    } else {
+                        None
+                    }
+                }
+                "AbilityScoreImprovement" if at == 0 => {
+                    let locked: Vec<&str> = configuration["locked"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .collect();
+                    Some(DecisionKind::Asi {
+                        points: configuration["points"]
+                            .as_u64()
+                            .map_or(0, |points| u8::try_from(points).unwrap_or(u8::MAX)),
+                        cap: configuration["cap"]
+                            .as_u64()
+                            .map_or(0, |cap| u8::try_from(cap).unwrap_or(u8::MAX)),
+                        open: Scores::LABELS
+                            .iter()
+                            .map(|(key, _)| *key)
+                            .filter(|key| !locked.contains(key))
+                            .map(str::to_owned)
+                            .collect(),
+                    })
+                }
+                "Subclass" | "AbilityScoreImprovement" => Some(DecisionKind::Unsupported {
+                    kind: advancement_kind(advancement).into(),
+                }),
+                "ScaleValue" | "HitPoints" | "ModifyItem" => None,
+                other => Some(DecisionKind::Unsupported { kind: other.into() }),
+            };
+            if let Some(kind) = kind {
+                found.decisions.push(Decision {
+                    key,
+                    owner_name: item.name.clone(),
+                    title: title.unwrap_or_else(|| item.name.clone()),
+                    hint,
+                    step,
+                    kind,
+                });
+            }
+            for uuid in chosen {
+                if let Some(item) = catalog.get(uuid) {
+                    found.features.push(Feature {
+                        name: item.name.clone(),
+                        text: item.text.clone(),
+                    });
+                    queue.push_back((item, depth + 1));
+                }
+            }
+        }
+    }
+}
+
+/// Every decision the draft's chosen roots open at `level`.
+pub fn decisions(catalog: &Catalog, choices: &DraftChoices, level: u8) -> Vec<Decision> {
+    let mut found = Walk::default();
+    // dnd5e applies level 0 (species, then background, with their grants) before
+    // level 1 (the class), so Expertise sees background skills. ponytail: each root
+    // walks all its levels at once; interleave by level when slice 9 adds levels.
+    for (root, step) in [
+        (&choices.species, Step::Origin),
+        (&choices.background, Step::Origin),
+        (&choices.class, Step::Class),
+    ] {
+        if let Some(item) = root.as_deref().and_then(|uuid| catalog.get(uuid)) {
+            walk(catalog, item, choices, level, step, &mut found);
+        }
+    }
+    found.decisions
+}
+
+/// Drop every pick the draft's roots no longer open: a replaced root's own and
+/// nested decisions, and the sub-decisions of an item it no longer picks. The
+/// walker produces keys only for the current roots, so this is the one rule.
+pub fn prune_picks(catalog: &Catalog, choices: &mut DraftChoices, level: u8) {
+    let keys: BTreeSet<String> = decisions(catalog, choices, level)
+        .into_iter()
+        .map(|decision| decision.key)
+        .collect();
+    choices.picks.retain(|key, _| keys.contains(key));
+}
+
+/// The classes the enabled sources offer, by source then name.
+pub fn classes(catalog: &Catalog) -> Vec<ClassOption> {
+    let mut classes: Vec<ClassOption> = catalog
+        .items
+        .iter()
+        .filter(|item| item.item_type == "class")
+        .map(|item| ClassOption {
+            uuid: item.uuid.clone(),
+            name: item.name.clone(),
+            source: catalog.source(&item.uuid),
+        })
+        .collect();
+    classes.sort_by(|a, b| a.source.cmp(&b.source).then(a.name.cmp(&b.name)));
+    classes
+}
+
+/// The chosen class as its step shows it: hit die, primary ability, features
+/// and the decisions they open.
+pub fn class_details(catalog: &Catalog, choices: &DraftChoices, level: u8) -> Option<ClassDetails> {
+    let class = choices
+        .class
+        .as_deref()
+        .and_then(|uuid| catalog.get(uuid))?;
+    // Walk the origin first, as `decisions` does, so class offers (Expertise)
+    // see background proficiencies; then keep only what the class opened.
+    let mut found = Walk::default();
+    for root in [&choices.species, &choices.background] {
+        if let Some(item) = root.as_deref().and_then(|uuid| catalog.get(uuid)) {
+            walk(catalog, item, choices, level, Step::Origin, &mut found);
+        }
+    }
+    let (features_from, decisions_from) = (found.features.len(), found.decisions.len());
+    walk(catalog, class, choices, level, Step::Class, &mut found);
+    let primary_ability = class.system["primaryAbility"]["value"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(ability_label)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(ClassDetails {
+        uuid: class.uuid.clone(),
+        name: class.name.clone(),
+        source: catalog.source(&class.uuid),
+        hit_die: class.system["hd"]["denomination"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+        primary_ability,
+        features: found.features.split_off(features_from),
+        decisions: found.decisions.split_off(decisions_from),
+    })
+}
+
+fn ability_label(key: &str) -> Option<&'static str> {
+    Scores::LABELS
+        .iter()
+        .find(|(field, _)| *field == key)
+        .map(|(_, label)| *label)
+}
+
+/// What a draft may store for one decision: offered values only, each once,
+/// and never more than it asks for. A shorter list is an unfinished answer, so
+/// `is_answered` is what closes the decision.
+pub fn validate_pick(decision: &Decision, values: &[String]) -> Result<(), &'static str> {
+    if values
+        .iter()
+        .enumerate()
+        .any(|(index, value)| values[..index].contains(value))
+    {
+        return Err("pick_duplicate");
+    }
+    match &decision.kind {
+        DecisionKind::Trait { choices, .. } => {
+            if values.iter().any(|value| {
+                !choices
+                    .iter()
+                    .any(|pool| pool.options.iter().any(|option| &option.value == value))
+            }) {
+                return Err("pick_not_offered");
+            }
+            for pool in choices {
+                let taken = values
+                    .iter()
+                    .filter(|value| pool.options.iter().any(|option| &option.value == *value))
+                    .count();
+                if taken > usize::from(pool.count) {
+                    return Err("pick_count");
+                }
+            }
+            Ok(())
+        }
+        DecisionKind::Items { count, options } => {
+            if values
+                .iter()
+                .any(|value| !options.iter().any(|option| &option.value == value))
+            {
+                return Err("pick_not_offered");
+            }
+            if values.len() > usize::from(*count) {
+                return Err("pick_count");
+            }
+            Ok(())
+        }
+        DecisionKind::Size { options } => {
+            if !values.iter().all(|value| options.contains(value)) {
+                return Err("pick_not_offered");
+            }
+            if values.len() > 1 {
+                return Err("pick_count");
+            }
+            Ok(())
+        }
+        DecisionKind::Asi { .. } | DecisionKind::Unsupported { .. } => Err("pick_unsupported"),
+    }
+}
+
+/// Whether a decision is answered: every pool holds its count and, for a size
+/// or an item choice, exactly what it asks for.
+pub fn is_answered(decision: &Decision, values: &[String]) -> bool {
+    validate_pick(decision, values).is_ok()
+        && match &decision.kind {
+            DecisionKind::Trait { choices, .. } => choices.iter().all(|pool| {
+                values
+                    .iter()
+                    .filter(|value| pool.options.iter().any(|option| &option.value == *value))
+                    .count()
+                    == usize::from(pool.count)
+            }),
+            DecisionKind::Items { count, .. } => values.len() == usize::from(*count),
+            DecisionKind::Size { .. } => values.len() == 1,
+            DecisionKind::Asi { .. } | DecisionKind::Unsupported { .. } => false,
+        }
+}
+
+/// Every trait key the draft already holds: what its decisions grant plus what
+/// the player picked.
+pub fn granted_traits(decisions: &[Decision], choices: &DraftChoices) -> BTreeSet<String> {
+    let mut granted = BTreeSet::new();
+    for decision in decisions {
+        if let DecisionKind::Trait { grants, .. } = &decision.kind {
+            granted.extend(grants.iter().map(|option| option.value.clone()));
+            granted.extend(
+                choices
+                    .picks
+                    .get(&decision.key)
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            );
+        }
+    }
+    granted
+}
+
+fn decision_label(decision: &Decision) -> String {
+    match &decision.kind {
+        DecisionKind::Unsupported { .. } => format!("{} (not supported yet)", decision.title),
+        _ => decision.title.clone(),
+    }
+}
+
 /// The attribution the SRD 5.2.1 licence requires wherever its content shows.
 pub const SRD_ATTRIBUTION: &str = "This work includes material from the System Reference Document 5.2.1 (\"SRD 5.2.1\") by Wizards of the Coast LLC, available at https://www.dndbeyond.com/srd. The SRD 5.2.1 is licensed under the Creative Commons Attribution 4.0 International License, available at https://creativecommons.org/licenses/by/4.0/legalcode.";
 
@@ -323,6 +1241,12 @@ pub struct BuilderData {
     pub dm_note: Option<String>,
     /// An enabled source is SRD 5.2 content, so the page must credit it.
     pub srd_attribution: bool,
+    /// The classes the enabled sources offer.
+    pub classes: Vec<ClassOption>,
+    /// The chosen class's features and the decisions they open.
+    pub class: Option<ClassDetails>,
+    /// The trait keys the draft already holds, for "already have" marks.
+    pub granted: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -411,13 +1335,35 @@ pub fn validate_scores(
 }
 
 /// The open steps of one draft, in the order the player should visit them.
-pub fn pending(choices: &DraftChoices, name: &str, rolls: Option<&Rolls>) -> Vec<Pending> {
+/// `catalog` is what tells a chosen class the enabled sources still offer; a
+/// caller without one cannot see a class fall out of the sources.
+pub fn pending(
+    catalog: Option<&Catalog>,
+    choices: &DraftChoices,
+    name: &str,
+    rolls: Option<&Rolls>,
+    decisions: &[Decision],
+) -> Vec<Pending> {
     let mut pending = Vec::new();
     if name.trim().is_empty() {
         pending.push(Pending {
             step: Step::Details,
             key: "name".into(),
             label: "Name your character".into(),
+        });
+    }
+    let offered = match (choices.class.as_deref(), catalog) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (Some(uuid), Some(catalog)) => catalog
+            .get(uuid)
+            .is_some_and(|item| item.item_type == Slot::Class.item_type()),
+    };
+    if !offered {
+        pending.push(Pending {
+            step: Step::Class,
+            key: "class".into(),
+            label: "Choose a class".into(),
         });
     }
     let abilities = match (choices.method, choices.base) {
@@ -433,6 +1379,16 @@ pub fn pending(choices: &DraftChoices, name: &str, rolls: Option<&Rolls>) -> Vec
             label: label.into(),
         });
     }
+    for decision in decisions {
+        let values: &[String] = choices.picks.get(&decision.key).map_or(&[], Vec::as_slice);
+        if !is_answered(decision, values) {
+            pending.push(Pending {
+                step: decision.step,
+                key: decision.key.clone(),
+                label: decision_label(decision),
+            });
+        }
+    }
     pending
 }
 
@@ -440,6 +1396,65 @@ pub fn pending(choices: &DraftChoices, name: &str, rolls: Option<&Rolls>) -> Vec
 mod tests {
     use super::*;
     use serde_json::Map;
+
+    const CLERIC: &str = "Compendium.dnd5e.classes24.Item.phbclcCleric0000";
+    const DIVINE_ORDER: &str = "Compendium.dnd5e.classes24.Item.phbclcDivineOrde";
+    const HUMAN: &str = "Compendium.dnd5e.origins24.Item.phbspHuman000000";
+    const MAGIC_INITIATE: &str = "Compendium.dnd5e.feats24.Item.phbftMagicInitia";
+    const PROTECTOR: &str = "Compendium.dnd5e.classes24.Item.phbDivineOrderPr";
+    const THAUMATURGE: &str = "Compendium.dnd5e.classes24.Item.phbDivineOrderTh";
+    const BARD: &str = "Compendium.dnd5e.classes24.Item.phbbrdBard000000";
+    const ROGUE: &str = "Compendium.dnd5e.classes24.Item.phbrgeRogue00000";
+    const WARLOCK: &str = "Compendium.dnd5e.classes24.Item.phbwlkWarlock000";
+    const PACT_OF_THE_BLADE: &str = "Compendium.dnd5e.classes24.Item.phbinvPactBlade0";
+    const THIRSTING_BLADE: &str = "Compendium.dnd5e.classes24.Item.phbinvThirstingB";
+
+    /// The transcribed packs as one campaign's enabled sources.
+    fn catalog() -> Catalog {
+        let mut catalog = Catalog::default();
+        for (id, label, file) in [
+            (
+                "dnd5e.classes24",
+                "Character Classes",
+                include_str!("../tests/fixtures/catalog/classes24.json"),
+            ),
+            (
+                "dnd5e.origins24",
+                "Character Origins",
+                include_str!("../tests/fixtures/catalog/origins24.json"),
+            ),
+            (
+                "dnd5e.feats24",
+                "Feats",
+                include_str!("../tests/fixtures/catalog/feats24.json"),
+            ),
+        ] {
+            let items: Vec<CatalogItem> = serde_json::from_str(file).expect("fixture parses");
+            catalog.packs.push(PackInfo {
+                id: id.into(),
+                label: label.into(),
+                source_book: Some("SRD 5.2".into()),
+                rules_version: Some("modern".into()),
+                count: items.len() as u32,
+            });
+            catalog.items.extend(items);
+        }
+        catalog
+    }
+
+    fn with_class(class: &str) -> DraftChoices {
+        DraftChoices {
+            class: Some(class.into()),
+            ..DraftChoices::default()
+        }
+    }
+
+    fn decision<'a>(decisions: &'a [Decision], title: &str) -> &'a Decision {
+        decisions
+            .iter()
+            .find(|decision| decision.title == title)
+            .unwrap_or_else(|| panic!("{title} in {decisions:?}"))
+    }
 
     fn scores(str: u8, dex: u8, con: u8, int: u8, wis: u8, cha: u8) -> Scores {
         Scores {
@@ -593,7 +1608,7 @@ mod tests {
                 .iter()
                 .map(|item| item.name.as_str())
                 .collect::<Vec<_>>(),
-            ["Acolyte", "Human"]
+            ["Acolyte", "Human", "Versatile"]
         );
 
         let cleric = &classes[0];
@@ -635,38 +1650,571 @@ mod tests {
             origins[1].system["advancement"].as_object().map(Map::len),
             Some(2)
         );
+
+        // The origin feat the Human's Versatile pool can offer.
+        let feats: Vec<CatalogItem> =
+            serde_json::from_str(include_str!("../tests/fixtures/catalog/feats24.json"))
+                .expect("feats24 fixture parses");
+        assert_eq!(feats[0].name, "Magic Initiate");
+        assert_eq!(feats[0].system["type"]["subtype"], "origin");
     }
 
     #[test]
-    fn pending_lists_name_and_abilities() {
-        let empty = pending(&DraftChoices::default(), "  ", None);
-        assert_eq!(empty.len(), 2);
+    fn pending_lists_name_abilities_and_class() {
+        let catalog = catalog();
+        let empty = pending(Some(&catalog), &DraftChoices::default(), "  ", None, &[]);
+        assert_eq!(empty.len(), 3, "{empty:?}");
         assert_eq!(empty[0].step, Step::Details);
         assert_eq!(empty[0].key, "name");
-        assert_eq!(empty[1].step, Step::Abilities);
-        assert_eq!(empty[1].key, "method");
+        assert_eq!(empty[1].step, Step::Class);
+        assert_eq!(empty[1].key, "class");
+        assert_eq!(empty[2].step, Step::Abilities);
+        assert_eq!(empty[2].key, "method");
 
         let rolling = pending(
+            Some(&catalog),
             &DraftChoices {
                 method: Some(AbilityMethod::Roll),
                 base: None,
+                ..DraftChoices::default()
             },
             "Al",
             None,
+            &[],
         );
-        assert_eq!(rolling.len(), 1);
-        assert_eq!(rolling[0].key, "roll");
+        assert_eq!(rolling.len(), 2, "{rolling:?}");
+        assert_eq!(rolling[1].key, "roll");
 
         let done = pending(
+            Some(&catalog),
             &DraftChoices {
                 method: Some(AbilityMethod::StandardArray),
                 base: Some(scores(15, 14, 13, 12, 10, 8)),
+                class: Some(CLERIC.into()),
+                ..DraftChoices::default()
             },
             "Al",
             None,
+            &[],
         );
         assert!(done.is_empty(), "{done:?}");
         assert_eq!(modifier(8), -1);
         assert_eq!(modifier(15), 2);
+
+        // A class the enabled sources no longer offer opens the step again,
+        // instead of losing every decision it made in silence.
+        let stale = DraftChoices {
+            method: Some(AbilityMethod::StandardArray),
+            base: Some(scores(15, 14, 13, 12, 10, 8)),
+            class: Some("Compendium.dnd5e.classes24.Item.phbclcGone0000".into()),
+            ..DraftChoices::default()
+        };
+        let lost = pending(Some(&catalog), &stale, "Al", None, &[]);
+        assert_eq!(lost.len(), 1, "{lost:?}");
+        assert_eq!(lost[0].step, Step::Class);
+        assert_eq!(lost[0].label, "Choose a class");
+
+        // A class's open decisions join the same list, on the class step.
+        let classed = DraftChoices {
+            method: Some(AbilityMethod::StandardArray),
+            base: Some(scores(15, 14, 13, 12, 10, 8)),
+            class: Some(CLERIC.into()),
+            ..DraftChoices::default()
+        };
+        let to_do = pending(
+            Some(&catalog),
+            &classed,
+            "Al",
+            None,
+            &decisions(&catalog, &classed, 1),
+        );
+        assert_eq!(to_do.len(), 2, "{to_do:?}");
+        assert!(
+            to_do.iter().all(|item| item.step == Step::Class),
+            "{to_do:?}"
+        );
+        assert!(to_do.iter().any(|item| item.label == "Divine Order Choice"));
+        assert!(to_do.iter().any(|item| item.label == "Skill Proficiencies"));
+    }
+
+    #[test]
+    fn cleric_level_one_decisions() {
+        let catalog = catalog();
+        let decisions = decisions(&catalog, &with_class(CLERIC), 1);
+
+        // The class's own skill pool, two of the five.
+        let skills = decision(&decisions, "Skill Proficiencies");
+        assert_eq!(skills.owner_name, "Cleric");
+        assert_eq!(skills.key, format!("{CLERIC}#2wUNkQzS4vL9nR6D#1"));
+        let DecisionKind::Trait { choices, .. } = &skills.kind else {
+            panic!("{skills:?}")
+        };
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].count, 2);
+        assert_eq!(
+            choices[0]
+                .options
+                .iter()
+                .map(|option| option.label.as_str())
+                .collect::<Vec<_>>(),
+            ["History", "Insight", "Medicine", "Perception", "Religion"]
+        );
+
+        // Divine Order's choice arrives through the class's ItemGrant.
+        let order = decision(&decisions, "Divine Order Choice");
+        assert_eq!(order.owner_name, "Divine Order");
+        assert_eq!(
+            order.key,
+            "Compendium.dnd5e.classes24.Item.phbclcDivineOrde#V8GfnoZYTe1PLXPI#1"
+        );
+        let DecisionKind::Items { count, options } = &order.kind else {
+            panic!("{order:?}")
+        };
+        assert_eq!(*count, 1);
+        assert_eq!(
+            options
+                .iter()
+                .map(|option| option.value.as_str())
+                .collect::<Vec<_>>(),
+            [PROTECTOR, THAUMATURGE]
+        );
+
+        // A Trait that only grants is no choice, but its keys still count as had.
+        let armor = decision(&decisions, "Armor Training");
+        assert!(armor.is_automatic());
+        assert!(granted_traits(&decisions, &with_class(CLERIC)).contains("armor:med"));
+    }
+
+    #[test]
+    fn restriction_pool_lists_origin_feats_and_drops_missing_uuids() {
+        let catalog = catalog();
+        let choices = DraftChoices {
+            species: Some(HUMAN.into()),
+            ..DraftChoices::default()
+        };
+        let decisions = decisions(&catalog, &choices, 1);
+
+        // Versatile's pool names a package the world lacks, so only the
+        // restriction's own match survives: the origin feat in the catalog.
+        let versatile = decision(&decisions, "Versatile");
+        let DecisionKind::Items { count, options } = &versatile.kind else {
+            panic!("{versatile:?}")
+        };
+        assert_eq!(*count, 1);
+        assert_eq!(
+            options
+                .iter()
+                .map(|option| option.value.as_str())
+                .collect::<Vec<_>>(),
+            [MAGIC_INITIATE]
+        );
+
+        // Human picks one of two sizes.
+        let size = decision(&decisions, "Size");
+        let DecisionKind::Size { options } = &size.kind else {
+            panic!("{size:?}")
+        };
+        assert_eq!(options, &["sm".to_owned(), "med".to_owned()]);
+    }
+
+    #[test]
+    fn validate_pick_enforces_count_and_pool() {
+        let catalog = catalog();
+        let decisions = decisions(&catalog, &with_class(CLERIC), 1);
+        let skills = decision(&decisions, "Skill Proficiencies");
+        let picked = ["skills:ins".to_owned(), "skills:rel".to_owned()];
+        assert_eq!(validate_pick(skills, &picked), Ok(()));
+        assert!(is_answered(skills, &picked));
+        // One of two is storable while the player edits, but not answered.
+        assert_eq!(validate_pick(skills, &picked[..1]), Ok(()));
+        assert!(!is_answered(skills, &picked[..1]));
+        // Three of two never is.
+        assert_eq!(
+            validate_pick(
+                skills,
+                &[
+                    "skills:ins".to_owned(),
+                    "skills:rel".to_owned(),
+                    "skills:his".to_owned()
+                ]
+            ),
+            Err("pick_count")
+        );
+        assert_eq!(
+            validate_pick(skills, &["skills:ins".to_owned(), "armor:med".to_owned()]),
+            Err("pick_not_offered")
+        );
+        assert_eq!(
+            validate_pick(skills, &["skills:ins".to_owned(), "skills:ins".to_owned()]),
+            Err("pick_duplicate")
+        );
+
+        let order = decision(&decisions, "Divine Order Choice");
+        assert_eq!(validate_pick(order, &[]), Ok(()));
+        assert!(!is_answered(order, &[]));
+        assert_eq!(
+            validate_pick(order, &[PROTECTOR.to_owned(), THAUMATURGE.to_owned()]),
+            Err("pick_count")
+        );
+        assert_eq!(validate_pick(order, &[PROTECTOR.to_owned()]), Ok(()));
+        assert!(is_answered(order, &[PROTECTOR.to_owned()]));
+        assert_eq!(
+            validate_pick(order, &[MAGIC_INITIATE.to_owned()]),
+            Err("pick_not_offered")
+        );
+
+        // A grants-only Trait offers nothing to pick, so it is always answered.
+        let armor = decision(&decisions, "Armor Training");
+        assert_eq!(validate_pick(armor, &[]), Ok(()));
+        assert!(is_answered(armor, &[]));
+        assert_eq!(
+            validate_pick(armor, &["armor:hvy".to_owned()]),
+            Err("pick_not_offered")
+        );
+    }
+
+    #[test]
+    fn changing_class_clears_its_picks() {
+        let catalog = catalog();
+        let key = format!("{CLERIC}#2wUNkQzS4vL9nR6D#1");
+        let mut choices = DraftChoices {
+            class: Some(CLERIC.into()),
+            picks: BTreeMap::from([(key.clone(), vec!["skills:ins".to_owned()])]),
+            ..DraftChoices::default()
+        };
+
+        // Another class takes its decisions with it.
+        let other = "Compendium.other.classes.Item.phbclcWizard000";
+        choices.select(Slot::Class, Some(other.into()));
+        prune_picks(&catalog, &mut choices, 1);
+        assert_eq!(choices.class.as_deref(), Some(other));
+        assert!(choices.picks.is_empty());
+
+        // Re-selecting the class that is already chosen keeps the picks.
+        choices.select(Slot::Class, Some(CLERIC.into()));
+        choices.picks.insert(key, vec!["skills:ins".to_owned()]);
+        choices.select(Slot::Class, Some(CLERIC.into()));
+        prune_picks(&catalog, &mut choices, 1);
+        assert_eq!(choices.picks.len(), 1);
+    }
+
+    #[test]
+    fn changing_class_drops_nested_picks() {
+        let catalog = catalog();
+        let skills = format!("{CLERIC}#2wUNkQzS4vL9nR6D#1");
+        let order = format!("{DIVINE_ORDER}#V8GfnoZYTe1PLXPI#1");
+        let mut choices = DraftChoices {
+            class: Some(CLERIC.into()),
+            picks: BTreeMap::from([
+                (
+                    skills.clone(),
+                    vec!["skills:ins".to_owned(), "skills:rel".to_owned()],
+                ),
+                (order.clone(), vec![PROTECTOR.to_owned()]),
+            ]),
+            ..DraftChoices::default()
+        };
+        // Divine Order's key carries the granted feature, not the class, so a
+        // prefix rule on the slot's uuid would keep it.
+        assert!(order.starts_with(DIVINE_ORDER) && !order.starts_with(CLERIC));
+
+        choices.select(Slot::Class, Some(BARD.into()));
+        prune_picks(&catalog, &mut choices, 1);
+        assert!(choices.picks.is_empty(), "{:?}", choices.picks);
+
+        // Coming back does not bring the old answer along.
+        choices.select(Slot::Class, Some(CLERIC.into()));
+        prune_picks(&catalog, &mut choices, 1);
+        assert!(choices.picks.is_empty(), "{:?}", choices.picks);
+        assert!(!is_answered(
+            decision(&decisions(&catalog, &choices, 1), "Divine Order Choice"),
+            &[]
+        ));
+    }
+
+    #[test]
+    fn secondary_class_advancements_are_skipped() {
+        let mut catalog = catalog();
+        let cleric = catalog
+            .items
+            .iter_mut()
+            .find(|item| item.uuid == CLERIC)
+            .expect("cleric");
+        // The same advancement as a multiclass dip's: not this draft's.
+        cleric.system["advancement"]["2wUNkQzS4vL9nR6D"]["classRestriction"] =
+            serde_json::json!("secondary");
+        let decisions = decisions(&catalog, &with_class(CLERIC), 1);
+        assert!(
+            decisions
+                .iter()
+                .all(|decision| decision.key != format!("{CLERIC}#2wUNkQzS4vL9nR6D#1")),
+            "{decisions:?}"
+        );
+        // The primary-class advancements are untouched.
+        assert!(
+            decisions
+                .iter()
+                .any(|decision| decision.title == "Armor Training")
+        );
+    }
+
+    #[test]
+    fn expertise_offers_only_proficient_traits() {
+        let catalog = catalog();
+        // A level-2 Bard is proficient in the three skills it picked at level 1.
+        let skills = format!("{BARD}#NGtmmsYBnIAGKUSn#1");
+        let choices = DraftChoices {
+            class: Some(BARD.into()),
+            picks: BTreeMap::from([(
+                skills,
+                ["skills:ins", "skills:prf", "skills:per"]
+                    .map(str::to_owned)
+                    .to_vec(),
+            )]),
+            ..DraftChoices::default()
+        };
+        let decisions = decisions(&catalog, &choices, 2);
+        let expertise = decision(&decisions, "Expertise");
+        let DecisionKind::Trait {
+            mode,
+            choices: pools,
+            ..
+        } = &expertise.kind
+        else {
+            panic!("{expertise:?}")
+        };
+        assert_eq!(*mode, TraitMode::Expertise);
+        assert_eq!(pools[0].count, 2);
+        assert_eq!(
+            pools[0]
+                .options
+                .iter()
+                .map(|option| option.value.as_str())
+                .collect::<Vec<_>>(),
+            ["skills:ins", "skills:per", "skills:prf"]
+        );
+        // An untrained skill is neither offered nor storable.
+        assert_eq!(
+            validate_pick(expertise, &["skills:arc".to_owned()]),
+            Err("pick_not_offered")
+        );
+        assert_eq!(
+            validate_pick(
+                expertise,
+                &["skills:ins".to_owned(), "skills:prf".to_owned()]
+            ),
+            Ok(())
+        );
+
+        // The other modes' offer rules, against the same two sets.
+        let proficient: BTreeSet<String> = ["skills:ins", "weapon:sim"].map(str::to_owned).into();
+        let expert: BTreeSet<String> = BTreeSet::from(["skills:ins".to_owned()]);
+        let option = |value: &str| Opt {
+            value: value.into(),
+            label: String::new(),
+        };
+        let offers =
+            |mode: TraitMode, value: &str| mode.offers(&option(value), &proficient, &expert);
+        // Expertise builds on proficiency and stops at it.
+        assert!(!offers(TraitMode::Expertise, "skills:arc"));
+        assert!(!offers(TraitMode::Expertise, "skills:ins"));
+        // Forced expertise and upgrade skip what is already expert.
+        assert!(offers(TraitMode::ForcedExpertise, "skills:arc"));
+        assert!(!offers(TraitMode::ForcedExpertise, "skills:ins"));
+        assert!(offers(TraitMode::Upgrade, "skills:arc"));
+        assert!(!offers(TraitMode::Upgrade, "skills:ins"));
+        // Mastery reads the weapon catalogue key and its category.
+        assert!(offers(TraitMode::Mastery, "weapon:sim:dagger"));
+        assert!(!offers(TraitMode::Mastery, "weapon:mar:longsword"));
+    }
+
+    #[test]
+    fn class_step_expertise_sees_background_skills() {
+        // An Acolyte's Insight and Religion come from the background (level 0),
+        // so the class step's Expertise must offer them, as `decisions` does.
+        let catalog = catalog();
+        let choices = DraftChoices {
+            class: Some(ROGUE.into()),
+            background: Some("Compendium.dnd5e.origins24.Item.phbbgAcolyte0000".into()),
+            ..DraftChoices::default()
+        };
+        let details = class_details(&catalog, &choices, 1).expect("rogue");
+        let expertise = decision(&details.decisions, "Expertise");
+        let DecisionKind::Trait { choices: pools, .. } = &expertise.kind else {
+            panic!("{expertise:?}")
+        };
+        let offered: Vec<&str> = pools[0].options.iter().map(|o| o.value.as_str()).collect();
+        assert_eq!(offered, ["skills:ins", "skills:rel"]);
+        assert!(details.decisions.iter().all(|d| d.step == Step::Class));
+        assert_eq!(
+            details.decisions,
+            decisions(&catalog, &choices, 1)
+                .into_iter()
+                .filter(|d| d.step == Step::Class)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn rogue_level_one_expertise_and_mastery_see_its_proficiencies() {
+        let catalog = catalog();
+        // A level-1 Rogue picks four of its ten skill proficiencies. Its item
+        // grant carries Expertise and Weapon Mastery, whose offers depend on
+        // what the class's own traits and those picks made it proficient with.
+        let skills = format!("{ROGUE}#xE00qAIjMdw63Kja#1");
+        let choices = DraftChoices {
+            class: Some(ROGUE.into()),
+            picks: BTreeMap::from([(
+                skills,
+                ["skills:ins", "skills:per", "skills:slt", "skills:ste"]
+                    .map(str::to_owned)
+                    .to_vec(),
+            )]),
+            ..DraftChoices::default()
+        };
+        let decisions = decisions(&catalog, &choices, 1);
+
+        // dnd5e applies the class's own steps before the features it grants:
+        // saving throws, skills, armor, weapons and tools, then the grant.
+        assert_eq!(
+            decisions
+                .iter()
+                .map(|decision| decision.title.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "Saving Throw Proficiencies",
+                "Skill Proficiencies",
+                "Armor Training",
+                "Weapon Proficiencies",
+                "Tool Proficiencies",
+                "Expertise",
+                "Weapon Mastery",
+            ]
+        );
+
+        // Expertise offers exactly the skills the draft is proficient with.
+        let expertise = decision(&decisions, "Expertise");
+        let DecisionKind::Trait {
+            mode,
+            choices: pools,
+            ..
+        } = &expertise.kind
+        else {
+            panic!("{expertise:?}")
+        };
+        assert_eq!(*mode, TraitMode::Expertise);
+        assert_eq!(pools[0].count, 2);
+        assert_eq!(
+            pools[0]
+                .options
+                .iter()
+                .map(|option| option.value.as_str())
+                .collect::<Vec<_>>(),
+            ["skills:ins", "skills:per", "skills:slt", "skills:ste"]
+        );
+
+        // Weapon Mastery offers the weapons the Rogue is proficient with: all
+        // simple weapons by category, plus the martial ones it names.
+        let mastery = decision(&decisions, "Weapon Mastery");
+        let DecisionKind::Trait {
+            mode,
+            choices: pools,
+            ..
+        } = &mastery.kind
+        else {
+            panic!("{mastery:?}")
+        };
+        assert_eq!(*mode, TraitMode::Mastery);
+        assert_eq!(pools[0].count, 2);
+        let named = [
+            "weapon:mar:handcrossbow",
+            "weapon:mar:rapier",
+            "weapon:mar:scimitar",
+            "weapon:mar:shortsword",
+            "weapon:mar:whip",
+        ];
+        let offered: Vec<&str> = pools[0]
+            .options
+            .iter()
+            .map(|option| option.value.as_str())
+            .collect();
+        assert_eq!(offered.len(), 19, "{offered:?}");
+        assert!(
+            offered
+                .iter()
+                .all(|value| value.starts_with("weapon:sim:") || named.contains(value)),
+            "{offered:?}"
+        );
+        assert!(!offered.contains(&"weapon:mar:longsword"));
+        assert_eq!(
+            validate_pick(mastery, &["weapon:mar:longsword".to_owned()]),
+            Err("pick_not_offered")
+        );
+    }
+
+    #[test]
+    fn feat_prerequisites_gate_item_choice_offers() {
+        let catalog = catalog();
+        // Level 1 offers only the invocations it can meet; a level-5 one waits.
+        let decisions = decisions(&catalog, &with_class(WARLOCK), 1);
+        let invocation = decision(&decisions, "Choose Eldritch Invocation");
+        let DecisionKind::Items { count, options } = &invocation.kind else {
+            panic!("{invocation:?}")
+        };
+        assert_eq!(*count, 1);
+        assert_eq!(
+            options
+                .iter()
+                .map(|option| option.value.as_str())
+                .collect::<Vec<_>>(),
+            [PACT_OF_THE_BLADE]
+        );
+        assert_eq!(
+            validate_pick(invocation, &[THIRSTING_BLADE.to_owned()]),
+            Err("pick_not_offered")
+        );
+
+        // Thirsting Blade's own level and item prerequisites, both real.
+        let thirsting = catalog.get(THIRSTING_BLADE).expect("thirsting blade");
+        let mut held = BTreeSet::from(["feat:pact-of-the-blade".to_owned()]);
+        assert!(!prerequisite_met(thirsting, 4, &held));
+        assert!(prerequisite_met(thirsting, 5, &held));
+        held.clear();
+        held.insert("pact-of-the-blade".to_owned());
+        assert!(!prerequisite_met(thirsting, 5, &held));
+    }
+
+    #[test]
+    fn spell_item_choices_are_skipped() {
+        let catalog = catalog();
+        // Versatile's origin feat carries two spell choices of the real shape.
+        let versatile = "Compendium.dnd5e.origins24.Item.phbsptVersatile0";
+        let key = format!("{versatile}#KB8IQLwyuL6SOFnv#0");
+        let choices = DraftChoices {
+            species: Some(HUMAN.into()),
+            picks: BTreeMap::from([(key, vec![MAGIC_INITIATE.to_owned()])]),
+            ..DraftChoices::default()
+        };
+        let decisions = decisions(&catalog, &choices, 1);
+        assert!(
+            decisions
+                .iter()
+                .all(|decision| decision.owner_name != "Magic Initiate"),
+            "{decisions:?}"
+        );
+        assert!(
+            decisions
+                .iter()
+                .all(|decision| decision.title != "Two Cantrips"
+                    && decision.title != "Level 1 Spell"),
+            "{decisions:?}"
+        );
+
+        // The pending list no longer asks for an unanswerable spell pick.
+        let to_do = pending(Some(&catalog), &choices, "Al", None, &decisions);
+        assert!(
+            to_do.iter().all(|item| !item.label.contains("Cantrip")),
+            "{to_do:?}"
+        );
     }
 }

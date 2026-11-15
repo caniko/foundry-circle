@@ -16,9 +16,9 @@ use crate::{
     ConsoleShell, Role, Route,
     builder::{
         AbilityMethod, AbilityRoll, BuilderView, CampaignRules, CampaignView, CharactersView,
-        ClassDetails, ClassOption, Decision, DecisionKind, DraftPatch, DraftSummary, Opt,
-        OriginDetails, POINT_BUY_BUDGET, PackInfo, Pending, Rolls, SRD_ATTRIBUTION, Scores, Slot,
-        Step, TraitMode, ability_label, modifier, point_buy_cost, size_label, validate_asi,
+        ClassDetails, ClassOption, Decision, DecisionKind, DraftPatch, DraftSummary, EquipmentPlan,
+        Opt, OriginDetails, POINT_BUY_BUDGET, PackInfo, Pending, Rolls, SRD_ATTRIBUTION, Scores,
+        Slot, Step, TraitMode, ability_label, modifier, point_buy_cost, size_label, validate_asi,
     },
 };
 
@@ -644,6 +644,15 @@ fn BuilderSheet(
                     }
                 }
             }
+            section { id: "equipment", class: "builder-step-body", aria_label: "Equipment",
+                h2 { "Equipment" }
+                EquipmentStep {
+                    plans: data.equipment.clone(),
+                    chosen: data.choices.equipment.clone(),
+                    editable,
+                    patch,
+                }
+            }
             div { id: "details",
                 Field { id: "draft-name".to_string(), label: "Character name".to_string(),
                     input {
@@ -807,6 +816,58 @@ fn PendingList(pending: Vec<Pending>) -> Element {
             for item in pending {
                 li { key: "{item.key}",
                     a { href: "#{item.step.anchor()}", "{item.label}" }
+                }
+            }
+        }
+    }
+}
+
+/// The class's and the background's starting equipment: one radio per option,
+/// the kit's contents in the option's line, and what the DM hands out.
+#[component]
+fn EquipmentStep(
+    plans: Vec<EquipmentPlan>,
+    chosen: BTreeMap<String, String>,
+    editable: bool,
+    patch: EventHandler<DraftPatch>,
+) -> Element {
+    rsx! {
+        if plans.is_empty() {
+            p { class: "tartan-muted",
+                "No starting equipment yet. Choose a class or a background that offers some."
+            }
+        }
+        for plan in plans {
+            section { key: "{plan.owner}", class: "builder-equipment",
+                h3 { "{plan.owner_name}" }
+                fieldset { class: "builder-decision",
+                    legend { "Starting equipment" }
+                    for option in plan.options {
+                        label { key: "{option.id}",
+                            input {
+                                r#type: "radio",
+                                name: "equipment-{plan.owner}",
+                                value: "{option.id}",
+                                checked: chosen.get(&plan.owner) == Some(&option.id),
+                                disabled: !editable,
+                                onchange: {
+                                    let (owner, id) = (plan.owner.clone(), option.id.clone());
+                                    move |_| {
+                                        patch.call(DraftPatch::Equipment {
+                                            owner: owner.clone(),
+                                            option: id.clone(),
+                                        })
+                                    }
+                                },
+                            }
+                            " {option.label}"
+                        }
+                        if !option.manual.is_empty() {
+                            p { class: "tartan-muted",
+                                "Ask your DM for: {option.manual.join(\", \")}"
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1602,6 +1663,7 @@ mod tests {
             backgrounds: Vec::new(),
             species_details: None,
             background_details: None,
+            equipment: Vec::new(),
             granted: Vec::new(),
             totals: Scores::default(),
         }
@@ -1916,6 +1978,47 @@ mod tests {
         assert!(html.contains("No classes here yet"));
         assert!(!html.contains("No classes match"));
         assert!(!html.contains("id=\"class-search\""));
+    }
+
+    #[test]
+    fn equipment_step_shows_both_options() {
+        let uuid = "Compendium.dnd5e.classes24.Item.phbclcCleric0000";
+        let mut data = builder_data(CampaignRules::default());
+        data.choices.class = Some(uuid.into());
+        data.class = Some(cleric_details(uuid));
+        // The Cleric's one kit and the gold that replaces it.
+        data.equipment = vec![EquipmentPlan {
+            owner: uuid.into(),
+            owner_name: "Cleric".into(),
+            options: vec![
+                crate::builder::EquipmentOption {
+                    id: "kit".into(),
+                    label: "Kit: Chain Shirt, Shield, Mace, any holy focus, 7 GP".into(),
+                    items: Vec::new(),
+                    gp: 7,
+                    wealth: None,
+                    manual: vec!["any holy focus".into()],
+                },
+                crate::builder::EquipmentOption {
+                    id: "gold".into(),
+                    label: "110 GP".into(),
+                    items: Vec::new(),
+                    gp: 0,
+                    wealth: Some("110".into()),
+                    manual: Vec::new(),
+                },
+            ],
+        }];
+        let html = render_sheet(BuilderView::Ready(Box::new(data)));
+
+        // One radio per option, under the owner's own name, and the manual line
+        // says what the DM hands out.
+        assert!(html.contains("Kit: Chain Shirt, Shield, Mace, any holy focus, 7 GP"));
+        assert!(html.contains("110 GP"));
+        assert!(html.contains(&format!("name=\"equipment-{uuid}\"")));
+        assert_eq!(html.matches("type=\"radio\"").count(), 2);
+        assert!(html.contains("Ask your DM for: any holy focus"));
+        assert!(!html.contains("checked"), "{html}");
     }
 
     #[test]

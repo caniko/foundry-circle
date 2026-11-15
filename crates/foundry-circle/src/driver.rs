@@ -3,6 +3,8 @@ use std::{future::Future, pin::Pin};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::builder::{PackInfo, Redirect};
+
 /// The lifecycle state exposed by the readiness endpoint and console.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -77,6 +79,17 @@ pub enum WorldOp {
         after: Option<String>,
         limit: u32,
     },
+}
+
+/// A `CatalogPacks` reply: the world's Item packs and the compendium uuid
+/// redirects it applies. A module older than `uuidRedirects()` sends no
+/// redirects, and the catalog still syncs against the documents it has.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogPacks {
+    pub packs: Vec<PackInfo>,
+    #[serde(default)]
+    pub redirects: Vec<Redirect>,
 }
 
 /// A broker-managed Foundry account operation. The password is only ever a
@@ -1292,7 +1305,10 @@ mod live {
         const api = game.modules.get("foundry-circle")?.api;
         if (!api) return { error: "unsupported", message: "module_missing" };
         if (api.apiVersion !== 1) return { error: "unsupported", message: "module_outdated" };
-        return { ok: { packs: await api.catalogPacks() } };
+        // A module that predates uuidRedirects() answers no redirects, which is
+        // a working world: the content names the packs it can resolve.
+        const redirects = typeof api.uuidRedirects === "function" ? await api.uuidRedirects() : [];
+        return { ok: { packs: await api.catalogPacks(), redirects } };
     }"#;
 
     const CATALOG_PAGE: &str = r#"async function() {
@@ -1501,6 +1517,7 @@ mod live {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::{builder::Redirect, driver::CatalogPacks};
 
         #[test]
         fn contract_validation_rejects_non_gm_and_mismatches() {
@@ -1731,6 +1748,8 @@ mod live {
                 items[0].traits["2wUNkQzS4vL9nR6D"]["choices"][0]["count"],
                 2
             );
+            // A module with no equipment labels parses to an empty map.
+            assert!(items[0].equipment.labels.is_empty());
 
             // The returned cursor is the pack index id, and the page after it is
             // the end of the pack.
@@ -1778,8 +1797,50 @@ mod live {
             assert!(CATALOG_PAGE.contains("__ARGS__"));
             assert!(CATALOG_PAGE.contains("api.catalogPage({ pack: args.pack"));
             // Both replies use the same `{ ok }` envelope as every other op.
-            assert!(CATALOG_PACKS.contains("return { ok: { packs: await api.catalogPacks() } };"));
+            assert!(CATALOG_PACKS.contains("packs: await api.catalogPacks()"));
             assert!(CATALOG_PAGE.contains("return { ok: reply };"));
+            // A module without the redirects function is not an error.
+            assert!(CATALOG_PACKS.contains(
+                r#"typeof api.uuidRedirects === "function" ? await api.uuidRedirects() : []"#
+            ));
+        }
+
+        #[test]
+        fn module_without_redirects_still_syncs() {
+            // The fake module predates uuidRedirects(): its reply carries packs
+            // only, and that parses to a complete answer with no redirects.
+            let reply = crate::driver::fake_call(WorldOp::CatalogPacks).unwrap();
+            assert!(reply.get("redirects").is_none());
+            let parsed: CatalogPacks = serde_json::from_value(reply).unwrap();
+            assert_eq!(parsed.packs.len(), 1);
+            assert_eq!(parsed.packs[0].id, "dnd5e.classes24");
+            assert!(parsed.redirects.is_empty());
+
+            // A module that does send them keeps its pairs, still under
+            // apiVersion 1.
+            let parsed: CatalogPacks = serde_json::from_value(json!({
+                "packs": [],
+                "redirects": [{
+                    "from": "Compendium.dnd-players-handbook.equipment",
+                    "to": "Compendium.dnd5e.equipment24"
+                }]
+            }))
+            .unwrap();
+            assert_eq!(
+                parsed.redirects,
+                [Redirect {
+                    from: "Compendium.dnd-players-handbook.equipment".into(),
+                    to: "Compendium.dnd5e.equipment24".into(),
+                }]
+            );
+            // Anything that is not a compendium pack prefix is dropped before
+            // it can reach the table.
+            let parsed: CatalogPacks = serde_json::from_value(json!({
+                "packs": [],
+                "redirects": [{"from": "dnd-players-handbook", "to": "Compendium.dnd5e.equipment24"}]
+            }))
+            .unwrap();
+            assert!(!parsed.redirects[0].valid());
         }
 
         #[test]

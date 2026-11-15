@@ -13,7 +13,7 @@ const ENRICHER = /@\w+\[[^\]]*\](?:\{([^}]*)\})?/g;
 
 Hooks.once("init", () => {
   const module = game.modules.get(MODULE_ID);
-  if ( module ) module.api = { apiVersion: API_VERSION, catalogPacks, catalogPage };
+  if ( module ) module.api = { apiVersion: API_VERSION, catalogPacks, catalogPage, uuidRedirects };
 });
 
 /** Every Item pack this world offers. */
@@ -58,7 +58,7 @@ async function catalogItem(document) {
   const description = system.description?.value ?? "";
   const traits = await traitOptions(system.advancement);
   delete system.description;
-  return {
+  const item = {
     uuid: document.uuid,
     name: document.name,
     type: document.type,
@@ -67,6 +67,41 @@ async function catalogItem(document) {
     system,
     traits
   };
+  // Additive: a broker older than this field ignores it, and an item without
+  // starting equipment sends none.
+  const equipment = equipmentLabels(document);
+  if ( equipment ) item.equipment = equipment;
+  return item;
+}
+
+/**
+ * dnd5e's own label for each starting-equipment entry, by entry id, so the
+ * broker never keeps a label table of its own. A linked entry's label is an
+ * HTML link to the document, which the broker replaces with the item's name.
+ * Other systems have no such entries.
+ */
+function equipmentLabels(document) {
+  if ( game.system.id !== "dnd5e" ) return null;
+  const entries = document.system?.startingEquipment;
+  if ( !Array.isArray(entries) || !entries.length ) return null;
+  const labels = {};
+  for ( const entry of entries ) {
+    if ( entry?._id && typeof entry.label === "string" ) labels[entry._id] = entry.label;
+  }
+  return { labels };
+}
+
+/**
+ * The world's compendium uuid redirects, as `{from, to}` pack prefixes: dnd5e
+ * points a premium module's packs at the SRD packs while that module is not
+ * active, and the broker applies them before any lookup.
+ */
+function uuidRedirects() {
+  const redirects = CONFIG.compendium?.uuidRedirects ?? {};
+  return Object.entries(redirects)
+    .filter(([from, to]) => from.startsWith("Compendium.") && typeof to === "string")
+    .map(([from, to]) => ({ from, to }))
+    .sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0));
 }
 
 /**

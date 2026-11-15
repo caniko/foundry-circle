@@ -4,6 +4,23 @@ All notable changes to Foundry Circle are documented here.
 
 ## Unreleased
 
+- Add the equipment step to the character builder: a draft chooses its class's
+  kit or gold and its background's, within the campaign's equipment mode. The
+  builder reads dnd5e's own `system.startingEquipment` and supports both a
+  single top-level `AND` and the 2024 classes' top-level `OR` (the fighter's two
+  kits, each with its own gold), treats `count: null` as one, adds a kit's own
+  currency to its gold, embeds each `linked` document with its count, and lists
+  a category such as a holy symbol — or a choice nested inside a kit — as a line
+  the DM hands out. Kit items resolve against every synced pack and through the
+  world's compendium uuid redirects, which the companion module's new
+  `uuidRedirects()` reports and the sync stores in `builder_redirects`: the
+  2024 kits name the premium Player's Handbook's pack, and dnd5e redirects that
+  prefix to the SRD pack while the module is inactive. Entry labels come from
+  the module's reading of dnd5e's own `EquipmentEntryData#label`, so no label
+  table lives in the broker; a module without either addition still syncs.
+  Answers live in `DraftChoices::equipment`, `update_draft` re-validates each
+  against the chosen owners' options, and a replaced class or background prunes
+  its answer like its picks.
 - Add the origin step to the character builder: a draft picks a species and a
   background from the campaign's enabled sources and the console walks their
   dnd5e advancements like it walks a class's, so a size with more than one

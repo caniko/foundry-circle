@@ -15,11 +15,11 @@ use crate::{
     builder::{
         AbilityMethod, BuilderData, BuilderView, CampaignRules, CampaignView, Catalog, CatalogItem,
         CharactersData, CharactersView, DraftChoices, DraftPatch, DraftStatus, DraftSummary,
-        PackInfo, Rolls, Scores, Slot, class_details, classes, decisions, granted_traits,
-        origin_details, origin_options, pending, prune_picks, roll_sets, totals, validate_asi,
-        validate_pick, validate_scores,
+        PackInfo, Redirect, Rolls, Scores, Slot, class_details, classes, decisions,
+        equipment_plans, granted_traits, origin_details, origin_options, pending, prune_picks,
+        roll_sets, totals, validate_asi, validate_equipment, validate_pick, validate_scores,
     },
-    driver::{FoundryDriver, WorldOp, WorldState},
+    driver::{CatalogPacks, FoundryDriver, WorldOp, WorldState},
 };
 
 /// An at most five drafts per player and world rule.
@@ -208,9 +208,18 @@ async fn summaries(pool: &PgPool, only: Option<&str>) -> Result<Vec<DraftSummary
                 name: name.clone(),
                 status: DraftStatus::from_db(row.try_get::<String, _>("status").ok()?.as_str())?,
                 player: row.try_get("player").ok()?,
-                // ponytail: the party count omits the class decisions; load
-                // each world's catalog here when the DM board needs them all.
-                pending: pending(None, &choices, &name, rolls.as_ref(), &[]).len() as u32,
+                // ponytail: the party count omits the class decisions and the
+                // equipment; load each world's catalog here when the DM board
+                // needs them all.
+                pending: pending(
+                    None,
+                    &CampaignRules::default(),
+                    &choices,
+                    &name,
+                    rolls.as_ref(),
+                    &[],
+                )
+                .len() as u32,
                 choices,
                 rolls,
             })
@@ -260,6 +269,15 @@ async fn read_ready(pool: &PgPool, id: Uuid, subject: &str, role: Role) -> Build
     };
     let level = draft.rules.starting_level;
     let decisions = decisions(&catalog, &draft.choices, level);
+    let to_do = pending(
+        Some(&catalog),
+        &draft.rules,
+        &draft.choices,
+        &draft.name,
+        draft.rolls.as_ref(),
+        &decisions,
+    );
+    let equipment = equipment_plans(&catalog, &draft.choices, &draft.rules);
     BuilderView::Ready(Box::new(BuilderData {
         id: id.to_string(),
         editable: draft.status == DraftStatus::Draft && draft.open && draft.subject == subject,
@@ -267,13 +285,7 @@ async fn read_ready(pool: &PgPool, id: Uuid, subject: &str, role: Role) -> Build
         status: draft.status,
         rules: draft.rules,
         rolls: draft.rolls.clone(),
-        pending: pending(
-            Some(&catalog),
-            &draft.choices,
-            &draft.name,
-            draft.rolls.as_ref(),
-            &decisions,
-        ),
+        pending: to_do,
         dm_note: draft.dm_note,
         srd_attribution: catalog
             .packs
@@ -289,37 +301,61 @@ async fn read_ready(pool: &PgPool, id: Uuid, subject: &str, role: Role) -> Build
         backgrounds: origin_options(&catalog, Slot::Background),
         species_details: origin_details(&catalog, &draft.choices, level, Slot::Species),
         background_details: origin_details(&catalog, &draft.choices, level, Slot::Background),
+        equipment,
         choices: draft.choices,
     }))
 }
 
-/// The enabled sources' cached documents, by pack label: the class step and the
-/// decision walker read only this.
+/// Every synced document of the world, the enabled sources' among them: the
+/// class step lists only the enabled packs' documents, while a kit's items and
+/// a feature a chosen document grants resolve in the world's other packs too.
 async fn catalog(
     executor: impl sqlx::PgExecutor<'_>,
     world_id: &str,
     sources: &[String],
 ) -> Result<Catalog, sqlx::Error> {
+    // ponytail: every pack of the world on each read; narrow it to the packs
+    // kits and grants name if a large licensed world ever makes this slow.
     let rows = sqlx::query(
-        "SELECT pack_id, label, source_book, rules_version,
-                jsonb_array_length(items) AS count, items
-           FROM builder_catalog
-          WHERE world_id = $1 AND pack_id = ANY($2)
-          ORDER BY label, pack_id",
+        "SELECT b.pack_id, b.label, b.source_book, b.rules_version,
+                jsonb_array_length(b.items) AS count, b.items,
+                b.pack_id = ANY($2) AS enabled, r.redirects
+           FROM builder_catalog b
+           CROSS JOIN (
+                SELECT COALESCE(jsonb_object_agg(from_prefix, to_prefix), '{}'::jsonb) AS redirects
+                  FROM builder_redirects WHERE world_id = $1
+           ) r
+          WHERE b.world_id = $1
+          ORDER BY b.label, b.pack_id",
     )
     .bind(world_id)
     .bind(sources)
     .fetch_all(executor)
     .await?;
-    let mut catalog = Catalog::default();
+    let redirects: Vec<Redirect> = rows
+        .first()
+        .and_then(|row| row.try_get::<Value, _>("redirects").ok())
+        .and_then(|value| {
+            serde_json::from_value::<std::collections::BTreeMap<String, String>>(value).ok()
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(from, to)| Redirect { from, to })
+        .collect();
+    let mut catalog = Catalog {
+        redirects,
+        ..Catalog::default()
+    };
     for row in &rows {
-        catalog.packs.push(PackInfo {
-            id: row.try_get("pack_id")?,
-            label: row.try_get("label")?,
-            source_book: row.try_get("source_book")?,
-            rules_version: row.try_get("rules_version")?,
-            count: row.try_get::<i32, _>("count").unwrap_or_default().max(0) as u32,
-        });
+        if row.try_get("enabled").unwrap_or(false) {
+            catalog.packs.push(PackInfo {
+                id: row.try_get("pack_id")?,
+                label: row.try_get("label")?,
+                source_book: row.try_get("source_book")?,
+                rules_version: row.try_get("rules_version")?,
+                count: row.try_get::<i32, _>("count").unwrap_or_default().max(0) as u32,
+            });
+        }
         let items: Vec<CatalogItem> = row
             .try_get::<Value, _>("items")
             .ok()
@@ -511,10 +547,18 @@ pub async fn sync_catalog(world_id: &str) -> Result<Vec<PackInfo>, String> {
         "the catalog pack list",
     )
     .await?;
-    let packs: Vec<PackInfo> = serde_json::from_value(reply["packs"].clone()).map_err(|error| {
+    let reply: CatalogPacks = serde_json::from_value(reply).map_err(|error| {
         tracing::warn!(%error, "the catalog pack list did not parse");
         "foundry_unavailable".to_owned()
     })?;
+    // Only compendium pack prefixes are stored; a module is not trusted to send
+    // anything else. A module older than `uuidRedirects()` sends none.
+    let redirects: Vec<Redirect> = reply
+        .redirects
+        .into_iter()
+        .filter(Redirect::valid)
+        .collect();
+    let packs = reply.packs;
 
     let mut synced: Vec<(PackInfo, Vec<CatalogItem>)> = Vec::with_capacity(packs.len());
     for pack in packs {
@@ -583,6 +627,25 @@ pub async fn sync_catalog(world_id: &str) -> Result<Vec<PackInfo>, String> {
         .execute(&mut *transaction)
         .await
         .map_err(database_code)?;
+    // The redirects belong to the same snapshot as the documents they rewrite.
+    sqlx::query("DELETE FROM builder_redirects WHERE world_id = $1")
+        .bind(world_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(database_code)?;
+    for redirect in &redirects {
+        sqlx::query(
+            "INSERT INTO builder_redirects (world_id, from_prefix, to_prefix)
+             VALUES ($1, $2, $3) ON CONFLICT (world_id, from_prefix)
+                DO UPDATE SET to_prefix = EXCLUDED.to_prefix",
+        )
+        .bind(world_id)
+        .bind(&redirect.from)
+        .bind(&redirect.to)
+        .execute(&mut *transaction)
+        .await
+        .map_err(database_code)?;
+    }
     if first == 0 {
         // The first sync proposes the 2024 rules; a GM may still turn them off.
         let modern: Vec<String> = synced
@@ -737,14 +800,11 @@ pub async fn update_draft(id: &str, patch: DraftPatch) -> Result<BuilderView, St
             (draft.name, choices)
         }
         DraftPatch::Select { slot, uuid } => {
-            // Only a document an enabled source holds may fill a slot.
-            if let Some(uuid) = &uuid {
-                let offered = catalog
-                    .get(uuid)
-                    .is_some_and(|item| item.item_type == slot.item_type());
-                if !offered {
-                    return Err("not_offered".into());
-                }
+            // Only a document an enabled source offers may fill a slot.
+            if let Some(uuid) = &uuid
+                && !catalog.offers(uuid, slot.item_type())
+            {
+                return Err("not_offered".into());
             }
             let mut choices = draft.choices;
             choices.select(slot, uuid);
@@ -786,6 +846,17 @@ pub async fn update_draft(id: &str, patch: DraftPatch) -> Result<BuilderView, St
                 .map_err(str::to_owned)?;
             choices.asi.insert(key, deltas);
             prune_picks(&catalog, &mut choices, level);
+            (draft.name, choices)
+        }
+        DraftPatch::Equipment { owner, option } => {
+            // Bounded before any plan walks the content.
+            if owner.len() > 200 || option.len() > 32 {
+                return Err("not_offered".into());
+            }
+            let mut choices = draft.choices;
+            let plans = equipment_plans(&catalog, &choices, &draft.rules);
+            validate_equipment(&plans, &owner, &option).map_err(str::to_owned)?;
+            choices.equipment.insert(owner, option);
             (draft.name, choices)
         }
     };

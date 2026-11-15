@@ -13,6 +13,9 @@ All notable changes to Foundry Circle are documented here.
   world is running and adopted; `foundry-circle-upload` exposes `join_url`
   using the stored session, and the window opens that URL in the system browser
   so the play host runs its own OIDC login and Foundry handoff.
+- Add the static landing page for `vtt.tartanoglu.com` as
+  `packages.<system>.site` (built with `plinth`), describing the table and
+  linking sign-in at `/api/auth/login` and the lobby at `/api/console`.
 - Foundry Circle is now licensed `EUPL-1.2` (see `LICENSE`), and `media-oxide`
   is consumed under its new `MIT OR Apache-2.0` crate license.
 - Ship the game-master tools on every platform: `foundry-circle-upload` and

@@ -18,6 +18,25 @@
     # first-class inputs makes the provenance and package boundaries explicit.
     nix-foundryvtt.url = "github:nix-foundryvtt/nix-foundryvtt";
     nix-provenance.url = "git+ssh://git@github.com/caniko/nix-provenance.git";
+
+    # Static landing page generator for vtt.tartanoglu.com. plinth rev-pins
+    # its own nixpkgs and asserts the dioxus-cli version against it; only the
+    # shared harbor-rs subtree follows this flake (the bekiper pin and follows).
+    plinth = {
+      url = "git+https://github.com/caniko/plinth.git?rev=ea54dc573ee8775fc558d3b5546670c8996bc20b";
+      inputs.nix-pklx.inputs.harbor-rs.follows = "rs-harbor";
+      inputs.nix-pklx.inputs.plinth.follows = "plinth";
+      inputs.nix-pklx.inputs.plinth.inputs.rs-harbor.follows = "rs-harbor";
+      inputs.nix-pklx.inputs.plinth.inputs.nix-cache-pin.inputs.rs-harbor.follows = "rs-harbor";
+      inputs.nix-pklx.inputs.plinth.inputs.nix-pklx.inputs.rs-harbor.follows = "rs-harbor";
+    };
+
+    # Blackbox dark web palette for the landing page; the lobby console reads
+    # the same palette from the theme-broker crate.
+    nix-theme-broker = {
+      url = "github:caniko/nix-theme-broker/0d3314be687d40f978d315d72293909b929e212d";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs = {
@@ -29,6 +48,8 @@
     treefmt-nix,
     git-hooks,
     nix-foundryvtt,
+    plinth,
+    nix-theme-broker,
     ...
   }:
     (flake-utils.lib.eachDefaultSystem (system: let
@@ -344,6 +365,23 @@
         wrapServer = false;
       });
       treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
+      # Public landing page at the deployment root; the broker owns every
+      # route under /api on the same host. plinth and the theme broker do not
+      # ship x86_64-darwin outputs, so that system gets no site attribute.
+      site =
+        if pkgs.lib.hasAttr system plinth.packages
+        then
+          (import "${plinth}/nix/project-site.nix" {
+            inherit pkgs;
+            inherit (pkgs) lib;
+            plinthProject = plinth.packages.${system}.plinth-project;
+          }).mkProjectSite {
+            pname = "foundry-circle-site";
+            domain = "vtt.tartanoglu.com";
+            configPath = ./website/plinth-project.toml;
+            brokerCss = nix-theme-broker.packages.${system}.web-theme-blackbox-honey;
+          }
+        else null;
       preCommit = git-hooks.lib.${system}.run {
         src = ./.;
         hooks = import ./nix/pre-commit.nix {
@@ -410,6 +448,10 @@
         }
         // pkgs.lib.optionalAttrs (releaseBundle != null) {
           release-bundle = releaseBundle;
+        }
+        // pkgs.lib.optionalAttrs (site != null) {
+          inherit site;
+          website = site;
         };
 
       apps =

@@ -507,7 +507,7 @@ pub const STYLES: &str = r##"
 
 .builder-ability {
   display: grid;
-  grid-template-columns: 8rem 6rem 3rem;
+  grid-template-columns: 8rem 6rem auto 3rem;
   align-items: center;
   gap: .5rem;
 }
@@ -517,9 +517,30 @@ pub const STYLES: &str = r##"
   padding: .25rem;
 }
 
+.builder-ability__math {
+  color: var(--tb-ui-foreground-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .builder-ability__modifier,
 .builder-points {
   color: var(--tb-ui-foreground-muted);
+}
+
+.builder-asi {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: .5rem .75rem;
+}
+
+.builder-asi label {
+  display: grid;
+  gap: .25rem;
+}
+
+.builder-asi select {
+  font: inherit;
+  padding: .25rem;
 }
 
 .builder-party {
@@ -562,7 +583,7 @@ pub const STYLES: &str = r##"
 
 @media (max-width: 30rem) {
   .builder-ability {
-    grid-template-columns: 1fr 5rem 2.5rem;
+    grid-template-columns: 1fr 5rem auto 2.5rem;
   }
 }
 "##;

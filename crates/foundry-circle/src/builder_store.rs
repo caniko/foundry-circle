@@ -15,8 +15,9 @@ use crate::{
     builder::{
         AbilityMethod, BuilderData, BuilderView, CampaignRules, CampaignView, Catalog, CatalogItem,
         CharactersData, CharactersView, DraftChoices, DraftPatch, DraftStatus, DraftSummary,
-        PackInfo, Rolls, Scores, class_details, classes, decisions, granted_traits, pending,
-        prune_picks, roll_sets, validate_pick, validate_scores,
+        PackInfo, Rolls, Scores, Slot, class_details, classes, decisions, granted_traits,
+        origin_details, origin_options, pending, prune_picks, roll_sets, totals, validate_asi,
+        validate_pick, validate_scores,
     },
     driver::{FoundryDriver, WorldOp, WorldState},
 };
@@ -278,11 +279,16 @@ async fn read_ready(pool: &PgPool, id: Uuid, subject: &str, role: Role) -> Build
             .packs
             .iter()
             .any(|pack| pack.source_book.as_deref() == Some("SRD 5.2")),
+        totals: totals(&decisions, &draft.choices, None),
         granted: granted_traits(&decisions, &draft.choices)
             .into_iter()
             .collect(),
         class: class_details(&catalog, &draft.choices, level),
         classes: classes(&catalog),
+        species: origin_options(&catalog, Slot::Species),
+        backgrounds: origin_options(&catalog, Slot::Background),
+        species_details: origin_details(&catalog, &draft.choices, level, Slot::Species),
+        background_details: origin_details(&catalog, &draft.choices, level, Slot::Background),
         choices: draft.choices,
     }))
 }
@@ -762,6 +768,23 @@ pub async fn update_draft(id: &str, patch: DraftPatch) -> Result<BuilderView, St
             validate_pick(decision, &values).map_err(str::to_owned)?;
             choices.picks.insert(key, values);
             // A dropped item takes its sub-decisions' answers with it.
+            prune_picks(&catalog, &mut choices, level);
+            (draft.name, choices)
+        }
+        DraftPatch::Asi { key, deltas } => {
+            let mut choices = draft.choices;
+            if deltas.len() > Scores::LABELS.len() {
+                return Err("asi_locked".into());
+            }
+            let level = draft.rules.starting_level;
+            let decisions = decisions(&catalog, &choices, level);
+            let decision = decisions
+                .iter()
+                .find(|decision| decision.key == key)
+                .ok_or_else(|| "unknown_decision".to_owned())?;
+            validate_asi(decision, &deltas, &totals(&decisions, &choices, Some(&key)))
+                .map_err(str::to_owned)?;
+            choices.asi.insert(key, deltas);
             prune_picks(&catalog, &mut choices, level);
             (draft.name, choices)
         }

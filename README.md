@@ -57,6 +57,19 @@ mastery only weapons whose kind it is proficient with), an item choice hides a
 feat whose level or named-item prerequisite it does not meet, and a saved class
 the enabled sources no longer hold puts the Class step back on the to do list.
 
+### Origin step
+
+A draft picks a species and a background from the enabled sources, and the same
+walker resolves what each one owes: a size with more than one option is a radio
+group, the background's ability bonus is the 2024 choice of +2 and +1 or +1 to
+all three of its abilities (only the abilities its configuration leaves open,
+never more than its cap each, and never a score above 20), and a feat the
+species grants opens its own choices. The abilities step shows each row as
+`base + bonus = total (modifier)`; the base alone is what the point buy or array
+rule validates. Answers live in `DraftChoices::asi` beside the picks and are
+pruned by the same rule, so changing a species or background asks again for
+whatever the new one owes.
+
 ### Rules content
 
 Content is the world's own compendium packs, cached per world in

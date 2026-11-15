@@ -3,19 +3,22 @@
 //! The pages are pure components over the views `builder_store` returns, so the
 //! SSR tests need neither a server nor a router.
 
+use std::collections::BTreeMap;
+
 use dioxus::prelude::*;
 use tartan_ui_core::{Feedback, FeedbackKind, FilterChoice, FilterOption, ResourceLink};
 use tartan_ui_dioxus::{
-    CardGrid, CheckboxFilterGroup, DashboardHeader, EmptyState, FeedbackBanner, Field, Panel,
-    ResourceCard, SelectField,
+    CardGrid, CheckboxFilterGroup, DashboardHeader, DetailDisclosure, EmptyState, FeedbackBanner,
+    Field, Panel, ResourceCard, SelectField,
 };
 
 use crate::{
     ConsoleShell, Role, Route,
     builder::{
         AbilityMethod, AbilityRoll, BuilderView, CampaignRules, CampaignView, CharactersView,
-        DraftPatch, DraftSummary, POINT_BUY_BUDGET, PackInfo, Pending, Rolls, SRD_ATTRIBUTION,
-        Scores, modifier, point_buy_cost,
+        ClassDetails, ClassOption, Decision, DecisionKind, DraftPatch, DraftSummary, Opt,
+        POINT_BUY_BUDGET, PackInfo, Pending, Rolls, SRD_ATTRIBUTION, Scores, Slot, Step, TraitMode,
+        modifier, point_buy_cost,
     },
 };
 
@@ -202,6 +205,12 @@ fn code_message(code: &str) -> &'static str {
         "invalid_scores" => "Those ability scores do not follow the method.",
         "already_rolled" => "These abilities are already rolled.",
         "invalid_name" => "Give the character a name of one to a hundred characters.",
+        "not_offered" => "The campaign's rules content does not hold that option.",
+        "unknown_decision" => "That choice is not open on this draft; reload the page.",
+        "pick_count" => "Choose exactly as many options as the feature asks for.",
+        "pick_not_offered" => "That option is not one this feature offers.",
+        "pick_duplicate" => "Choose each option once.",
+        "pick_unsupported" => "The builder cannot resolve that choice yet.",
         "world_not_ready" => "Start the session and open the world, then sync again.",
         "world_mismatch" => "The running world is not this campaign's world.",
         "not_dnd5e" => "The running world does not use the dnd5e system.",
@@ -537,6 +546,17 @@ fn BuilderSheet(
         }),
         None => {}
     };
+    let counts: Vec<(Step, usize)> = Step::ALL
+        .into_iter()
+        .map(|step| {
+            let count = data
+                .pending
+                .iter()
+                .filter(|pending| pending.step == step)
+                .count();
+            (step, count)
+        })
+        .collect();
     rsx! {
         DashboardHeader {
                 eyebrow: "Character builder".to_string(),
@@ -554,37 +574,63 @@ fn BuilderSheet(
             if let Some(note) = &data.dm_note {
                 FeedbackBanner { feedback: Feedback { kind: FeedbackKind::Info, message: format!("DM note: {note}") } }
             }
-            Field { id: "draft-name".to_string(), label: "Character name".to_string(),
-                input {
-                    id: "draft-name",
-                    r#type: "text",
-                    value: "{name}",
-                    maxlength: "100",
-                    disabled: !editable,
-                    onchange: move |event: FormEvent| patch.call(DraftPatch::Name(event.value())),
+            nav { class: "builder-steps", aria_label: "Steps",
+                for (step, count) in counts {
+                    a { key: "{step.anchor()}", class: "builder-step", href: "#{step.anchor()}",
+                        {step.label()}
+                        if count > 0 {
+                            span { class: "builder-step__count", "{count}" }
+                        }
+                    }
                 }
             }
-            SelectField {
-                id: "draft-method".to_string(),
-                label: "Ability method".to_string(),
-                value: method.map(|method| method.key().to_owned()).unwrap_or_default(),
-                options,
-                on_change: on_method,
-            }
-            if editable && method == Some(AbilityMethod::Roll) && data.rolls.is_none() {
-                // A granted reroll clears the dice; the select is already on
-                // "Roll", so it cannot fire the change again.
-                p { class: "tartan-muted", "Your GM granted a reroll." }
-                button {
-                    class: "tartan-button",
-                    r#type: "button",
-                    onclick: move |_| roll.call(()),
-                    "Roll abilities"
+            section { id: "class", class: "builder-step-body", aria_label: "Class",
+                h2 { "Class" }
+                ClassStep {
+                    classes: data.classes.clone(),
+                    selected: data.choices.class.clone(),
+                    class: data.class.clone(),
+                    picks: data.choices.picks.clone(),
+                    granted: data.granted.clone(),
+                    editable,
+                    patch,
                 }
             }
-            if let Some(base) = base {
-                if let Some(method) = method {
-                    AbilityScores { method, base, rolls: data.rolls.clone(), editable, patch }
+            div { id: "abilities",
+                SelectField {
+                    id: "draft-method".to_string(),
+                    label: "Ability method".to_string(),
+                    value: method.map(|method| method.key().to_owned()).unwrap_or_default(),
+                    options,
+                    on_change: on_method,
+                }
+                if editable && method == Some(AbilityMethod::Roll) && data.rolls.is_none() {
+                    // A granted reroll clears the dice; the select is already on
+                    // "Roll", so it cannot fire the change again.
+                    p { class: "tartan-muted", "Your GM granted a reroll." }
+                    button {
+                        class: "tartan-button",
+                        r#type: "button",
+                        onclick: move |_| roll.call(()),
+                        "Roll abilities"
+                    }
+                }
+                if let Some(base) = base {
+                    if let Some(method) = method {
+                        AbilityScores { method, base, rolls: data.rolls.clone(), editable, patch }
+                    }
+                }
+            }
+            div { id: "details",
+                Field { id: "draft-name".to_string(), label: "Character name".to_string(),
+                    input {
+                        id: "draft-name",
+                        r#type: "text",
+                        value: "{name}",
+                        maxlength: "100",
+                        disabled: !editable,
+                        onchange: move |event: FormEvent| patch.call(DraftPatch::Name(event.value())),
+                    }
                 }
             }
             if !data.pending.is_empty() {
@@ -724,16 +770,287 @@ fn AbilityRow(
     }
 }
 
-/// The one "to do" list; the phones scroll to the sticky bar's count.
+/// The one "to do" list; each open decision links to the step that answers it.
 #[component]
 fn PendingList(pending: Vec<Pending>) -> Element {
     rsx! {
         ul { class: "builder-pending", aria_label: "To do",
             for item in pending {
-                li { key: "{item.key}", "{item.label}" }
+                li { key: "{item.key}",
+                    a { href: "#{item.step.anchor()}", "{item.label}" }
+                }
             }
         }
     }
+}
+
+/// The class step: the sources' classes, then the chosen one's features and
+/// the choices they open.
+#[component]
+fn ClassStep(
+    classes: Vec<ClassOption>,
+    selected: Option<String>,
+    class: Option<ClassDetails>,
+    picks: BTreeMap<String, Vec<String>>,
+    granted: Vec<String>,
+    editable: bool,
+    /// Seeds the search box; empty unless a page links here filtered.
+    #[props(default)]
+    search: String,
+    patch: EventHandler<DraftPatch>,
+) -> Element {
+    let mut query = use_signal(|| search);
+    let needle = query().trim().to_lowercase();
+    let offered = !classes.is_empty();
+    // ponytail: the filter runs in the page; a hundred classes fit in one render.
+    let mut groups: Vec<(String, Vec<ClassOption>)> = Vec::new();
+    for class in classes
+        .into_iter()
+        .filter(|class| needle.is_empty() || class.name.to_lowercase().contains(&needle))
+    {
+        match groups
+            .iter_mut()
+            .find(|(source, _)| *source == class.source)
+        {
+            Some((_, group)) => group.push(class),
+            None => groups.push((class.source.clone(), vec![class])),
+        }
+    }
+    let chosen = class;
+    rsx! {
+        if !offered {
+            p { class: "tartan-muted",
+                "No classes here yet. The GM syncs the world's rules content and enables a pack with classes."
+            }
+        } else {
+            // The search stays whether or not it matches something.
+            Field { id: "class-search".to_string(), label: "Search classes".to_string(),
+                input {
+                    id: "class-search",
+                    r#type: "search",
+                    value: "{query}",
+                    disabled: !editable,
+                    oninput: move |event: FormEvent| query.set(event.value()),
+                }
+            }
+            if groups.is_empty() {
+                p { class: "tartan-muted", "No classes match." }
+            }
+            for (source, options) in groups {
+                fieldset { class: "builder-classes", key: "{source}",
+                    legend { "{source}" }
+                    for class in options {
+                        label { key: "{class.uuid}",
+                            input {
+                                r#type: "radio",
+                                name: "class",
+                                value: "{class.uuid}",
+                                checked: selected.as_deref() == Some(class.uuid.as_str()),
+                                disabled: !editable,
+                                onchange: {
+                                    let uuid = class.uuid.clone();
+                                    move |_| patch.call(DraftPatch::Select {
+                                        slot: Slot::Class,
+                                        uuid: Some(uuid.clone()),
+                                    })
+                                },
+                            }
+                            " {class.name}"
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(class) = chosen {
+            p { class: "tartan-muted",
+                "Hit die {class.hit_die} · Primary ability {class.primary_ability} · {class.source}"
+            }
+            for feature in class.features {
+                DetailDisclosure { key: "{feature.name}", label: feature.name.clone(),
+                    p { {feature.text.clone()} }
+                }
+            }
+            for decision in class.decisions.into_iter().filter(|decision| !decision.is_automatic()) {
+                DecisionField {
+                    key: "{decision.key}",
+                    picks: picks.get(&decision.key).cloned().unwrap_or_default(),
+                    granted: granted.clone(),
+                    editable,
+                    decision,
+                    patch,
+                }
+            }
+        }
+    }
+}
+
+/// One decision as a native checkbox or radio group that stops at its count.
+#[component]
+fn DecisionField(
+    decision: Decision,
+    picks: Vec<String>,
+    granted: Vec<String>,
+    editable: bool,
+    patch: EventHandler<DraftPatch>,
+) -> Element {
+    let pools: Vec<(u8, Vec<Opt>)> = match &decision.kind {
+        DecisionKind::Trait { choices, .. } => choices
+            .iter()
+            .map(|pool| (pool.count, pool.options.clone()))
+            .collect(),
+        DecisionKind::Items { count, options } => vec![(*count, options.clone())],
+        _ => Vec::new(),
+    };
+    // A pick the content no longer offers is not sent back.
+    let offered: Vec<String> = match &decision.kind {
+        DecisionKind::Trait { choices, .. } => choices
+            .iter()
+            .flat_map(|pool| pool.options.iter().map(|option| option.value.clone()))
+            .collect(),
+        DecisionKind::Items { options, .. } => {
+            options.iter().map(|option| option.value.clone()).collect()
+        }
+        DecisionKind::Size { options } => options.clone(),
+        DecisionKind::Asi { .. } | DecisionKind::Unsupported { .. } => Vec::new(),
+    };
+    let key = decision.key.clone();
+    // dnd5e's own one-liner for what a non-default trait mode can still take.
+    let mode_hint = match &decision.kind {
+        DecisionKind::Trait { mode, .. } => mode.hint(),
+        _ => None,
+    };
+    let unsupported = match &decision.kind {
+        DecisionKind::Asi { .. } => {
+            Some("Ability score increases are answered on the origin step.")
+        }
+        DecisionKind::Size { .. } => Some("Pick your size on the origin step."),
+        DecisionKind::Unsupported { .. } => Some("The builder cannot resolve this choice yet."),
+        DecisionKind::Trait { .. } | DecisionKind::Items { .. } if pools.is_empty() => {
+            Some("The rules content did not resolve this choice.")
+        }
+        _ => None,
+    };
+    // A non-default Trait mode's offers are the ones it can still take, so none
+    // of them is "already had".
+    let granted = match &decision.kind {
+        DecisionKind::Trait { mode, .. } if *mode != TraitMode::Default => Vec::new(),
+        _ => granted,
+    };
+    rsx! {
+        fieldset { class: "builder-decision",
+            legend { "{decision.title}" }
+            if !decision.hint.is_empty() {
+                p { class: "tartan-muted", "{decision.hint}" }
+            }
+            if let Some(hint) = mode_hint {
+                p { class: "tartan-muted", "{hint}" }
+            }
+            if let Some(message) = unsupported {
+                p { class: "tartan-muted", "{message}" }
+            }
+            for (index, (count, options)) in pools.into_iter().enumerate() {
+                DecisionPool {
+                    key: "{key}#{index}",
+                    name: "{key}#{index}",
+                    decision: key.clone(),
+                    count,
+                    options,
+                    picks: picks.clone(),
+                    offered: offered.clone(),
+                    granted: granted.clone(),
+                    editable,
+                    patch,
+                }
+            }
+        }
+    }
+}
+
+/// One pool of a decision: one radio per option at count one, checkboxes above.
+#[component]
+fn DecisionPool(
+    decision: String,
+    name: String,
+    count: u8,
+    options: Vec<Opt>,
+    picks: Vec<String>,
+    offered: Vec<String>,
+    granted: Vec<String>,
+    editable: bool,
+    patch: EventHandler<DraftPatch>,
+) -> Element {
+    let single = count == 1;
+    // Everything this pool already holds, so a checkbox group stops at count.
+    let taken = options
+        .iter()
+        .filter(|option| picks.contains(&option.value))
+        .count();
+    let full = !single && taken >= usize::from(count);
+    let all = options.clone();
+    rsx! {
+        if count > 1 {
+            p { class: "tartan-muted", "Choose {count}" }
+        }
+        for option in options {
+            label { key: "{option.value}",
+                input {
+                    r#type: if single { "radio" } else { "checkbox" },
+                    name: "{name}",
+                    value: "{option.value}",
+                    checked: picks.contains(&option.value),
+                    disabled: !editable
+                        || (full && !picks.contains(&option.value))
+                        || (granted.contains(&option.value) && !picks.contains(&option.value)),
+                    onchange: {
+                        let value = option.value.clone();
+                        let all = all.clone();
+                        let offered = offered.clone();
+                        let decision = decision.clone();
+                        let picks = picks.clone();
+                        move |event: FormEvent| {
+                            patch.call(DraftPatch::Pick {
+                                key: decision.clone(),
+                                values: toggle(&picks, &offered, &all, count, &value, event.checked()),
+                            })
+                        }
+                    },
+                }
+                " {option.label}"
+                if granted.contains(&option.value) && !picks.contains(&option.value) {
+                    span { class: "tartan-muted", " already have" }
+                }
+            }
+        }
+    }
+}
+
+/// The pick list one change produces: a radio replaces its pool's value, a
+/// checkbox adds or drops its own, and a value the content no longer offers is
+/// dropped rather than sent back.
+fn toggle(
+    picks: &[String],
+    offered: &[String],
+    options: &[Opt],
+    count: u8,
+    value: &str,
+    checked: bool,
+) -> Vec<String> {
+    let mut next: Vec<String> = picks
+        .iter()
+        .filter(|current| offered.iter().any(|option| option == *current))
+        .cloned()
+        .collect();
+    if count == 1 {
+        next.retain(|current| !options.iter().any(|option| &option.value == current));
+    }
+    if checked {
+        if !next.iter().any(|current| current == value) {
+            next.push(value.to_owned());
+        }
+    } else {
+        next.retain(|current| current != value);
+    }
+    next
 }
 
 /// A fresh valid assignment when the player switches method.
@@ -829,7 +1146,7 @@ fn dice_line(set: &AbilityRoll) -> String {
 #[cfg(all(test, feature = "server"))]
 mod tests {
     use super::*;
-    use crate::builder::{BuilderData, CharactersData, DraftStatus};
+    use crate::builder::{BuilderData, CharactersData, DraftStatus, Pool};
 
     fn campaign(open: bool) -> CampaignView {
         CampaignView {
@@ -878,6 +1195,7 @@ mod tests {
             choices: crate::builder::DraftChoices {
                 method: Some(method),
                 base,
+                ..crate::builder::DraftChoices::default()
             },
             rolls,
             pending: 0,
@@ -921,11 +1239,61 @@ mod tests {
                     wis: 10,
                     cha: 8,
                 }),
+                ..crate::builder::DraftChoices::default()
             },
             rolls: None,
             pending: Vec::new(),
             dm_note: None,
             srd_attribution: false,
+            classes: Vec::new(),
+            class: None,
+            granted: Vec::new(),
+        }
+    }
+
+    fn cleric(uuid: &str) -> ClassOption {
+        ClassOption {
+            uuid: uuid.into(),
+            name: "Cleric".into(),
+            source: "Character Classes".into(),
+        }
+    }
+
+    fn cleric_details(uuid: &str) -> ClassDetails {
+        ClassDetails {
+            uuid: uuid.into(),
+            name: "Cleric".into(),
+            source: "Character Classes".into(),
+            hit_die: "d8".into(),
+            primary_ability: "Wisdom".into(),
+            features: vec![crate::builder::Feature {
+                name: "Divine Order".into(),
+                text: "You have dedicated yourself to one sacred role.".into(),
+            }],
+            decisions: vec![Decision {
+                key: format!("{uuid}#2wUNkQzS4vL9nR6D#1"),
+                owner_name: "Cleric".into(),
+                title: "Skill Proficiencies".into(),
+                hint: String::new(),
+                step: Step::Class,
+                kind: DecisionKind::Trait {
+                    mode: crate::builder::TraitMode::Default,
+                    grants: Vec::new(),
+                    choices: vec![crate::builder::Pool {
+                        count: 2,
+                        options: vec![
+                            Opt {
+                                value: "skills:his".into(),
+                                label: "History".into(),
+                            },
+                            Opt {
+                                value: "skills:ins".into(),
+                                label: "Insight".into(),
+                            },
+                        ],
+                    }],
+                },
+            }],
         }
     }
 
@@ -955,6 +1323,55 @@ mod tests {
         }
         dioxus::ssr::render_element(rsx! {
             Harness { view }
+        })
+    }
+
+    fn render_class_step(classes: Vec<ClassOption>, search: &str) -> String {
+        #[component]
+        fn Harness(classes: Vec<ClassOption>, search: String) -> Element {
+            let patch = EventHandler::new(|_: DraftPatch| ());
+            rsx! {
+                ClassStep {
+                    classes,
+                    selected: None,
+                    class: None,
+                    picks: BTreeMap::new(),
+                    granted: Vec::new(),
+                    editable: true,
+                    search,
+                    patch,
+                }
+            }
+        }
+        dioxus::ssr::render_element(rsx! {
+            Harness { classes, search: search.to_string() }
+        })
+    }
+
+    /// The class step for one chosen class and the trait keys the draft holds.
+    fn render_class(class: ClassDetails, granted: Vec<String>) -> String {
+        #[component]
+        fn Harness(class: ClassDetails, granted: Vec<String>) -> Element {
+            let patch = EventHandler::new(|_: DraftPatch| ());
+            let option = ClassOption {
+                uuid: class.uuid.clone(),
+                name: class.name.clone(),
+                source: class.source.clone(),
+            };
+            rsx! {
+                ClassStep {
+                    classes: vec![option],
+                    selected: Some(class.uuid.clone()),
+                    class: Some(class),
+                    picks: BTreeMap::new(),
+                    granted,
+                    editable: true,
+                    patch,
+                }
+            }
+        }
+        dioxus::ssr::render_element(rsx! {
+            Harness { class, granted }
         })
     }
 
@@ -1031,5 +1448,194 @@ mod tests {
         assert!(html.contains("Submitted"));
         assert!(html.contains("read-only"));
         assert!(html.contains("disabled"));
+    }
+
+    #[test]
+    fn class_step_lists_enabled_sources_only() {
+        let uuid = "Compendium.dnd5e.classes24.Item.phbclcCleric0000";
+        let mut data = builder_data(CampaignRules::default());
+        // The server hands over only the classes of the campaign's sources.
+        data.classes = vec![cleric(uuid)];
+        data.choices.class = Some(uuid.into());
+        data.class = Some(cleric_details(uuid));
+        let html = render_sheet(BuilderView::Ready(Box::new(data)));
+
+        // One radio per offered class, grouped under its source.
+        assert_eq!(html.matches("name=\"class\"").count(), 1);
+        assert!(html.contains("Character Classes"));
+        assert!(html.contains(&format!("value=\"{uuid}\"")));
+        assert!(html.contains("checked"));
+
+        // The chosen class shows its numbers and a disclosure per feature.
+        assert!(html.contains("d8"));
+        assert!(html.contains("Wisdom"));
+        assert!(html.contains("<summary>Divine Order</summary>"));
+
+        // Its two-skill pool is a checkbox group.
+        assert!(html.contains("type=\"checkbox\""));
+        assert!(html.contains("value=\"skills:ins\""));
+        assert!(html.contains("Choose 2"));
+    }
+
+    /// A class whose only decision is a two-skill Trait in `mode`.
+    fn expertise_class(mode: TraitMode) -> ClassDetails {
+        let uuid = "Compendium.dnd5e.classes24.Item.phbrgeRogue00000";
+        ClassDetails {
+            uuid: uuid.into(),
+            name: "Rogue".into(),
+            source: "Character Classes".into(),
+            hit_die: "d8".into(),
+            primary_ability: "Dexterity".into(),
+            features: Vec::new(),
+            decisions: vec![Decision {
+                key: format!("{uuid}#4doj2kFD8sIYiX8X#1"),
+                owner_name: "Expertise".into(),
+                title: "Expertise".into(),
+                hint: String::new(),
+                step: Step::Class,
+                kind: DecisionKind::Trait {
+                    mode,
+                    grants: Vec::new(),
+                    choices: vec![Pool {
+                        count: 2,
+                        options: [
+                            ("skills:ins", "Insight"),
+                            ("skills:per", "Perception"),
+                            ("skills:slt", "Sleight of Hand"),
+                            ("skills:ste", "Stealth"),
+                        ]
+                        .map(|(value, label)| Opt {
+                            value: value.into(),
+                            label: label.into(),
+                        })
+                        .to_vec(),
+                    }],
+                },
+            }],
+        }
+    }
+
+    #[test]
+    fn expertise_options_are_never_already_had() {
+        // The walker offers an Expertise decision only the skills the draft is
+        // proficient with, so every offer must stay pickable.
+        let granted = ["skills:ins", "skills:per", "skills:ste"]
+            .map(str::to_owned)
+            .to_vec();
+        let html = render_class(expertise_class(TraitMode::Expertise), granted);
+        assert!(html.contains("Gain expertise in a trait"));
+        for value in ["skills:ins", "skills:per", "skills:slt", "skills:ste"] {
+            assert!(
+                html.contains(&format!("value=\"{value}\"")),
+                "{value} missing"
+            );
+        }
+        assert!(!html.contains("disabled"), "{html}");
+        // The mode's own hint says "already have", so match the marker itself.
+        assert!(!html.contains("> already have</span>"), "{html}");
+
+        // A default-mode pool does offer traits the draft already has, and says
+        // so instead of letting the player take the same one twice.
+        let html = render_class(
+            expertise_class(TraitMode::Default),
+            ["skills:ins".to_owned()].to_vec(),
+        );
+        assert!(html.contains("> already have</span>"), "{html}");
+        assert!(html.contains("disabled"), "{html}");
+    }
+
+    #[test]
+    fn class_search_survives_an_empty_filter() {
+        // A search that matches nothing keeps its box and says so; the empty
+        // catalog keeps its own message instead.
+        let uuid = "Compendium.dnd5e.classes24.Item.phbclcCleric0000";
+        let html = render_class_step(vec![cleric(uuid)], "wizard");
+        assert!(html.contains("No classes match"));
+        assert!(html.contains("id=\"class-search\""));
+        assert!(html.contains("value=\"wizard\""));
+        assert!(!html.contains("No classes here yet"));
+        assert!(!html.contains(&format!("value=\"{uuid}\"")));
+
+        let html = render_class_step(Vec::new(), "wizard");
+        assert!(html.contains("No classes here yet"));
+        assert!(!html.contains("No classes match"));
+        assert!(!html.contains("id=\"class-search\""));
+    }
+
+    #[test]
+    fn todo_list_links_each_open_decision() {
+        let uuid = "Compendium.dnd5e.classes24.Item.phbclcCleric0000";
+        let mut data = builder_data(CampaignRules::default());
+        data.choices.class = Some(uuid.into());
+        data.class = Some(cleric_details(uuid));
+        data.pending = vec![
+            Pending {
+                step: Step::Class,
+                key: format!("{uuid}#2wUNkQzS4vL9nR6D#1"),
+                label: "Skill Proficiencies".into(),
+            },
+            Pending {
+                step: Step::Class,
+                key: "Compendium.dnd5e.classes24.Item.phbclcDivineOrde#V8GfnoZYTe1PLXPI#1".into(),
+                label: "Divine Order Choice".into(),
+            },
+        ];
+        let html = render_sheet(BuilderView::Ready(Box::new(data)));
+
+        // The nav links the class step and counts what is open there; the
+        // "to do" list links each decision to the same anchor.
+        assert_eq!(html.matches("href=\"#class\"").count(), 3);
+        assert!(html.contains("<span class=\"builder-step__count\">2</span>"));
+        assert!(html.contains("Skill Proficiencies"));
+        assert!(html.contains("Divine Order Choice"));
+        assert!(html.contains("2 to do"));
+    }
+
+    #[test]
+    fn picking_keeps_a_pool_within_its_count() {
+        let options = vec![
+            Opt {
+                value: "skills:his".into(),
+                label: "History".into(),
+            },
+            Opt {
+                value: "skills:ins".into(),
+                label: "Insight".into(),
+            },
+        ];
+        let offered = vec![
+            "skills:his".to_owned(),
+            "skills:ins".to_owned(),
+            "skills:rel".to_owned(),
+        ];
+
+        // A checkbox adds and drops its own value only.
+        let one = toggle(&[], &offered, &options, 2, "skills:ins", true);
+        assert_eq!(one, ["skills:ins"]);
+        let two = toggle(&one, &offered, &options, 2, "skills:rel", true);
+        assert_eq!(two, ["skills:ins", "skills:rel"]);
+        assert_eq!(
+            toggle(&two, &offered, &options, 2, "skills:rel", false),
+            ["skills:ins"]
+        );
+
+        // A radio replaces this pool's value and leaves another pool's alone.
+        assert_eq!(
+            toggle(&two, &offered, &options, 1, "skills:his", true),
+            ["skills:rel", "skills:his"]
+        );
+
+        // A pick the content no longer offers is dropped by the next change.
+        assert_eq!(
+            toggle(
+                &["skills:med".to_owned()],
+                &offered,
+                &options,
+                2,
+                "skills:his",
+                true
+            ),
+            ["skills:his"]
+        );
     }
 }

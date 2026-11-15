@@ -455,6 +455,50 @@ pub const STYLES: &str = r##"
   font-weight: 700;
 }
 
+.builder-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .375rem .75rem;
+  margin: 1rem 0;
+  padding: 0;
+}
+
+.builder-step {
+  display: inline-flex;
+  align-items: center;
+  gap: .375rem;
+  color: var(--tb-ui-foreground);
+  text-decoration: none;
+}
+
+.builder-step__count {
+  border: 1px solid var(--tb-ui-border);
+  border-radius: 999px;
+  padding: 0 .375rem;
+  color: var(--tb-ui-foreground-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.builder-step-body,
+.builder-classes,
+.builder-decision {
+  display: grid;
+  gap: .25rem;
+  margin: 1rem 0;
+}
+
+.builder-classes,
+.builder-decision {
+  border: 1px solid var(--tb-ui-border);
+  border-radius: .5rem;
+  padding: .75rem;
+}
+
+.builder-classes legend,
+.builder-decision legend {
+  font-weight: 700;
+}
+
 .builder-abilities {
   display: grid;
   gap: .25rem;

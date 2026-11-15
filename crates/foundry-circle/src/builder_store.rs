@@ -13,9 +13,10 @@ use super::{AppState, Caller, auth, console_actor, console_caller, session};
 use crate::{
     Role,
     builder::{
-        AbilityMethod, BuilderData, BuilderView, CampaignRules, CampaignView, CatalogItem,
+        AbilityMethod, BuilderData, BuilderView, CampaignRules, CampaignView, Catalog, CatalogItem,
         CharactersData, CharactersView, DraftChoices, DraftPatch, DraftStatus, DraftSummary,
-        PackInfo, Rolls, Scores, pending, roll_sets, validate_scores,
+        PackInfo, Rolls, Scores, class_details, classes, decisions, granted_traits, pending,
+        prune_picks, roll_sets, validate_pick, validate_scores,
     },
     driver::{FoundryDriver, WorldOp, WorldState},
 };
@@ -206,7 +207,9 @@ async fn summaries(pool: &PgPool, only: Option<&str>) -> Result<Vec<DraftSummary
                 name: name.clone(),
                 status: DraftStatus::from_db(row.try_get::<String, _>("status").ok()?.as_str())?,
                 player: row.try_get("player").ok()?,
-                pending: pending(&choices, &name, rolls.as_ref()).len() as u32,
+                // ponytail: the party count omits the class decisions; load
+                // each world's catalog here when the DM board needs them all.
+                pending: pending(None, &choices, &name, rolls.as_ref(), &[]).len() as u32,
                 choices,
                 rolls,
             })
@@ -247,17 +250,15 @@ async fn read_ready(pool: &PgPool, id: Uuid, subject: &str, role: Role) -> Build
     if role == Role::Player && draft.subject != subject {
         return BuilderView::Missing;
     }
-    let sources = &draft.rules.sources;
-    let srd_attribution = !sources.is_empty()
-        && sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS (SELECT 1 FROM builder_catalog
-                             WHERE world_id = $1 AND pack_id = ANY($2) AND source_book = 'SRD 5.2')",
-        )
-        .bind(&draft.world_id)
-        .bind(sources)
-        .fetch_one(pool)
-        .await
-        .unwrap_or(false);
+    let catalog = match catalog(pool, &draft.world_id, &draft.rules.sources).await {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            tracing::warn!(%error, "failed to read a world's rules content");
+            Catalog::default()
+        }
+    };
+    let level = draft.rules.starting_level;
+    let decisions = decisions(&catalog, &draft.choices, level);
     BuilderView::Ready(Box::new(BuilderData {
         id: id.to_string(),
         editable: draft.status == DraftStatus::Draft && draft.open && draft.subject == subject,
@@ -265,11 +266,62 @@ async fn read_ready(pool: &PgPool, id: Uuid, subject: &str, role: Role) -> Build
         status: draft.status,
         rules: draft.rules,
         rolls: draft.rolls.clone(),
-        pending: pending(&draft.choices, &draft.name, draft.rolls.as_ref()),
+        pending: pending(
+            Some(&catalog),
+            &draft.choices,
+            &draft.name,
+            draft.rolls.as_ref(),
+            &decisions,
+        ),
         dm_note: draft.dm_note,
+        srd_attribution: catalog
+            .packs
+            .iter()
+            .any(|pack| pack.source_book.as_deref() == Some("SRD 5.2")),
+        granted: granted_traits(&decisions, &draft.choices)
+            .into_iter()
+            .collect(),
+        class: class_details(&catalog, &draft.choices, level),
+        classes: classes(&catalog),
         choices: draft.choices,
-        srd_attribution,
     }))
+}
+
+/// The enabled sources' cached documents, by pack label: the class step and the
+/// decision walker read only this.
+async fn catalog(
+    executor: impl sqlx::PgExecutor<'_>,
+    world_id: &str,
+    sources: &[String],
+) -> Result<Catalog, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT pack_id, label, source_book, rules_version,
+                jsonb_array_length(items) AS count, items
+           FROM builder_catalog
+          WHERE world_id = $1 AND pack_id = ANY($2)
+          ORDER BY label, pack_id",
+    )
+    .bind(world_id)
+    .bind(sources)
+    .fetch_all(executor)
+    .await?;
+    let mut catalog = Catalog::default();
+    for row in &rows {
+        catalog.packs.push(PackInfo {
+            id: row.try_get("pack_id")?,
+            label: row.try_get("label")?,
+            source_book: row.try_get("source_book")?,
+            rules_version: row.try_get("rules_version")?,
+            count: row.try_get::<i32, _>("count").unwrap_or_default().max(0) as u32,
+        });
+        let items: Vec<CatalogItem> = row
+            .try_get::<Value, _>("items")
+            .ok()
+            .and_then(|items| serde_json::from_value(items).ok())
+            .unwrap_or_default();
+        catalog.items.extend(items);
+    }
+    Ok(catalog)
 }
 
 /// The draft row plus its campaign's rules; `lock` serialises the mutations.
@@ -659,6 +711,9 @@ pub async fn update_draft(id: &str, patch: DraftPatch) -> Result<BuilderView, St
     let id = Uuid::parse_str(id).map_err(|_| "draft_not_found".to_owned())?;
     let mut transaction = pool.begin().await.map_err(database_code)?;
     let draft = locked_own_draft(&mut transaction, id, &principal.subject).await?;
+    let catalog = catalog(&mut *transaction, &draft.world_id, &draft.rules.sources)
+        .await
+        .map_err(database_code)?;
     let (name, choices) = match patch {
         DraftPatch::Name(name) => {
             let name = name.trim();
@@ -673,6 +728,41 @@ pub async fn update_draft(id: &str, patch: DraftPatch) -> Result<BuilderView, St
             let mut choices = draft.choices;
             choices.method = Some(method);
             choices.base = Some(base);
+            (draft.name, choices)
+        }
+        DraftPatch::Select { slot, uuid } => {
+            // Only a document an enabled source holds may fill a slot.
+            if let Some(uuid) = &uuid {
+                let offered = catalog
+                    .get(uuid)
+                    .is_some_and(|item| item.item_type == slot.item_type());
+                if !offered {
+                    return Err("not_offered".into());
+                }
+            }
+            let mut choices = draft.choices;
+            choices.select(slot, uuid);
+            // Only what the roots still open stays; a nested decision's key
+            // carries its granted feature, not the replaced root.
+            prune_picks(&catalog, &mut choices, draft.rules.starting_level);
+            (draft.name, choices)
+        }
+        DraftPatch::Pick { key, values } => {
+            let mut choices = draft.choices;
+            // The list is bounded before any decision walks it.
+            if values.len() > 32 || values.iter().any(|value| value.len() > 200) {
+                return Err("pick_not_offered".into());
+            }
+            let level = draft.rules.starting_level;
+            let decisions = decisions(&catalog, &choices, level);
+            let decision = decisions
+                .iter()
+                .find(|decision| decision.key == key)
+                .ok_or_else(|| "unknown_decision".to_owned())?;
+            validate_pick(decision, &values).map_err(str::to_owned)?;
+            choices.picks.insert(key, values);
+            // A dropped item takes its sub-decisions' answers with it.
+            prune_picks(&catalog, &mut choices, level);
             (draft.name, choices)
         }
     };

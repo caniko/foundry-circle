@@ -39,6 +39,24 @@ authoritative for world documents. Nothing here writes to Foundry yet.
   are written once per draft, and `update_draft` never writes the `rolls`
   column.
 
+### Class step
+
+A draft picks one class from the campaign's enabled sources. The console walks
+that class's dnd5e advancements instead of hard-coding any of them: a trait
+pool (the cleric's two skills) is a checkbox group that stops at its count, an
+item choice (Divine Order) a radio group, and a choice that hangs off a granted
+feature is reached through that grant. Options the draft already has are marked
+"already have", the "to do" list links every open decision to its step, and
+`update_draft` re-validates each pick against the decision it names — choosing
+another class clears the old class's picks. Subclass and class-level feat
+choices wait for level 2+, and spell choices for slice 8.
+
+The walker honours what each advancement asks for: a trait mode offers only
+what the draft can still take (expertise only what it is proficient with,
+mastery only weapons whose kind it is proficient with), an item choice hides a
+feat whose level or named-item prerequisite it does not meet, and a saved class
+the enabled sources no longer hold puts the Class step back on the to do list.
+
 ### Rules content
 
 Content is the world's own compendium packs, cached per world in

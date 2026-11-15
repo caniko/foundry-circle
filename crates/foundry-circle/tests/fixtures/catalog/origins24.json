@@ -207,5 +207,47 @@
       }
     },
     "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.origins24.Item.phbsptVersatile0",
+    "name": "Versatile",
+    "type": "feat",
+    "img": "icons/skills/trades/academics-investigation-puzzles.webp",
+    "text": "You gain an Origin feat of your choice. Skilled is recommended.",
+    "system": {
+      "source": {
+        "revision": 1,
+        "rules": "2024",
+        "book": "",
+        "license": "CC-BY-4.0"
+      },
+      "identifier": "versatile",
+      "type": { "value": "race", "subtype": "" },
+      "advancement": {
+        "KB8IQLwyuL6SOFnv": {
+          "_id": "KB8IQLwyuL6SOFnv",
+          "type": "ItemChoice",
+          "configuration": {
+            "choices": { "0": { "count": 1, "replacement": false } },
+            "allowDrops": true,
+            "type": "feat",
+            "pool": [
+              {
+                "sort": 0,
+                "uuid": "Compendium.dnd-players-handbook.feats.Item.phbftSkilled0000"
+              }
+            ],
+            "spell": null,
+            "restriction": { "type": "feat", "subtype": "origin", "list": [], "school": [] },
+            "sorting": "a"
+          },
+          "value": { "added": {}, "replaced": {} },
+          "hint": "You gain an Origin feat of your choice. Skilled is recommended.",
+          "name": "Versatile",
+          "flags": {}
+        }
+      }
+    },
+    "traits": {}
   }
 ]

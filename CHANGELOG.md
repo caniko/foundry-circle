@@ -4,6 +4,18 @@ All notable changes to Foundry Circle are documented here.
 
 ## Unreleased
 
+- Add the class step to the character builder: a draft picks a class from the
+  campaign's enabled sources and the console walks that class's dnd5e
+  advancements to list every decision a level-one character owes, including
+  choices that hang off a granted feature such as Divine Order. Trait pools are
+  checkbox groups that stop at their count, item choices radio groups, options
+  the draft already has are marked "already have", the "to do" list links each
+  open decision to its step, and `update_draft` re-validates every pick against
+  the decision it names. Choosing another class clears the old class's picks,
+  including those of a feature that class granted. A trait mode offers only what
+  the draft can still take, a feat whose prerequisites it does not meet is not
+  offered, and a class the enabled sources no longer hold puts the Class step
+  back on the to do list.
 - Add the rules-content sync to the character builder: a GM snapshots the
   running dnd5e world's Item packs into `builder_catalog` and picks the packs
   players may build from. The reads come from a new companion Foundry module

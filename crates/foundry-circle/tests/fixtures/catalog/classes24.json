@@ -161,5 +161,1446 @@
         "choices": []
       }
     }
+  },
+  {
+    "uuid": "Compendium.dnd5e.classes24.Item.phbclcDivineOrde",
+    "name": "Divine Order",
+    "type": "feat",
+    "img": "icons/magic/light/explosion-star-glow-blue-purple.webp",
+    "text": "You have dedicated yourself to one of the following sacred roles of your choice.ProtectorTrained for battle, you gain proficiency with Martial weapons and training with Heavy armor.ThaumaturgeYou know one extra cantrip from the Cleric spell list. In addition, your mystical connection to the divine gives you a bonus to your Intelligence (Arcana or Religion) checks. The bonus equals your Wisdom modifier (minimum of +1).",
+    "system": {
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "book": "",
+        "page": "",
+        "license": "CC-BY-4.0",
+        "revision": 2
+      },
+      "identifier": "divine-order",
+      "type": { "value": "class", "subtype": "" },
+      "advancement": {
+        "V8GfnoZYTe1PLXPI": {
+          "_id": "V8GfnoZYTe1PLXPI",
+          "type": "ItemChoice",
+          "configuration": {
+            "choices": { "1": { "count": 1, "replacement": false } },
+            "allowDrops": false,
+            "type": "feat",
+            "pool": [
+              {
+                "uuid": "Compendium.dnd5e.classes24.Item.phbDivineOrderPr",
+                "sort": 0
+              },
+              {
+                "uuid": "Compendium.dnd5e.classes24.Item.phbDivineOrderTh",
+                "sort": 0
+              }
+            ],
+            "spell": null,
+            "restriction": { "type": "class", "subtype": "", "list": [], "school": [] },
+            "sorting": "a"
+          },
+          "value": { "added": {}, "replaced": {} },
+          "hint": "You have dedicated yourself to one of the following sacred roles of your choice.",
+          "name": "Divine Order Choice",
+          "flags": {}
+        }
+      }
+    },
+    "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.classes24.Item.phbDivineOrderPr",
+    "name": "Divine Order: Protector",
+    "type": "feat",
+    "img": "icons/magic/holy/barrier-shield-winged-blue.webp",
+    "text": "Trained for battle, you gain proficiency with Martial weapons and training with Heavy armor.",
+    "system": {
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "book": "",
+        "page": "",
+        "license": "CC-BY-4.0",
+        "revision": 2
+      },
+      "identifier": "divine-order-protector",
+      "type": { "value": "class", "subtype": "" },
+      "advancement": {
+        "Pw2NhGslXxcl0btG": {
+          "_id": "Pw2NhGslXxcl0btG",
+          "type": "Trait",
+          "configuration": {
+            "allowReplacements": false,
+            "choices": [],
+            "grants": ["armor:hvy", "weapon:mar"],
+            "mode": "default"
+          },
+          "flags": {},
+          "level": 1,
+          "hint": "",
+          "name": "Protector",
+          "value": { "chosen": [] }
+        }
+      }
+    },
+    "traits": {
+      "Pw2NhGslXxcl0btG": {
+        "grants": [
+          { "key": "armor:hvy", "label": "Heavy" },
+          { "key": "weapon:mar", "label": "Martial" }
+        ],
+        "choices": []
+      }
+    }
+  },
+  {
+    "uuid": "Compendium.dnd5e.classes24.Item.phbDivineOrderTh",
+    "name": "Divine Order: Thaumaturge",
+    "type": "feat",
+    "img": "icons/magic/life/ankh-shadow-green.webp",
+    "text": "You know one extra cantrip from the Cleric spell list. In addition, your mystical connection to the divine gives you a bonus to your Intelligence (Arcana or Religion) checks. The bonus equals your Wisdom modifier (minimum of +1).",
+    "system": {
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "book": "",
+        "page": "",
+        "license": "CC-BY-4.0",
+        "revision": 1
+      },
+      "identifier": "divine-order-thaumaturge",
+      "type": { "value": "class", "subtype": "" },
+      "advancement": {}
+    },
+    "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.classes24.Item.phbbrdBard000000",
+    "name": "Bard",
+    "type": "class",
+    "img": "systems/dnd5e/icons/classes/bard.webp",
+    "text": "Class DetailsBecoming a Bard …As a Level 1 CharacterGain all the traits in the Core Bard Traits table.Gain the Bard's level 1 features, which are listed in the Bard Features table.As a Multiclass CharacterGain the following traits from the Core Bard Traits table: Hit Point Die, proficiency in one skill of your choice, proficiency with one Musical Instrument of your choice, and training with Light armor.Gain the Bard's level 1 features, which are listed in the Bard Features table. See the multiclassing rules in chapter 2 to determine your available spell slots.",
+    "system": {
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "revision": 2,
+        "book": "",
+        "page": "",
+        "license": "CC-BY-4.0"
+      },
+      "identifier": "bard",
+      "levels": 1,
+      "hd": { "denomination": "d8", "spent": 0, "additional": "" },
+      "primaryAbility": { "value": ["cha"], "all": true },
+      "spellcasting": {
+        "progression": "full",
+        "ability": "cha",
+        "preparation": { "formula": "@scale.bard.max-prepared" }
+      },
+      "wealth": "90",
+      "advancement": {
+        "e0FUZL9SxuBimLv3": {
+          "_id": "e0FUZL9SxuBimLv3",
+          "type": "ItemGrant",
+          "configuration": {
+            "items": [
+              {
+                "uuid": "Compendium.dnd5e.classes24.Item.phbbrdBardicInsp",
+                "optional": false,
+                "sort": 0
+              },
+              {
+                "uuid": "Compendium.dnd5e.classes24.Item.phbbrdSpellcasti",
+                "optional": false,
+                "sort": 0
+              }
+            ],
+            "optional": false,
+            "spell": null,
+            "sorting": "m"
+          },
+          "value": {},
+          "level": 1,
+          "name": "",
+          "flags": {},
+          "hint": ""
+        },
+        "eHieMgibvVLqVjY8": {
+          "_id": "eHieMgibvVLqVjY8",
+          "type": "ItemGrant",
+          "configuration": {
+            "items": [
+              {
+                "uuid": "Compendium.dnd5e.classes24.Item.phbbrdExpertise0",
+                "optional": false,
+                "sort": 0
+              },
+              {
+                "uuid": "Compendium.dnd5e.classes24.Item.phbbrdJackOfAllT",
+                "optional": false,
+                "sort": 0
+              }
+            ],
+            "optional": false,
+            "spell": null,
+            "sorting": "m"
+          },
+          "value": {},
+          "level": 2,
+          "name": "",
+          "flags": {},
+          "hint": ""
+        },
+        "fc1RwzQMT6qSaH5v": {
+          "_id": "fc1RwzQMT6qSaH5v",
+          "type": "Trait",
+          "configuration": {
+            "mode": "default",
+            "allowReplacements": false,
+            "grants": ["saves:dex", "saves:cha"],
+            "choices": []
+          },
+          "value": { "chosen": [] },
+          "level": 1,
+          "hint": "",
+          "classRestriction": "primary",
+          "name": "Saving Throw Proficiencies",
+          "flags": {}
+        },
+        "NGtmmsYBnIAGKUSn": {
+          "_id": "NGtmmsYBnIAGKUSn",
+          "type": "Trait",
+          "configuration": {
+            "mode": "default",
+            "allowReplacements": false,
+            "grants": [],
+            "choices": [{ "count": 3, "pool": ["skills:*"] }]
+          },
+          "value": { "chosen": [] },
+          "level": 1,
+          "hint": "",
+          "classRestriction": "primary",
+          "name": "Skill Proficiencies",
+          "flags": {}
+        },
+        "iFuxb8gJBCVtfegb": {
+          "_id": "iFuxb8gJBCVtfegb",
+          "type": "Trait",
+          "configuration": {
+            "mode": "default",
+            "allowReplacements": false,
+            "grants": ["weapon:sim"],
+            "choices": []
+          },
+          "value": { "chosen": [] },
+          "level": 1,
+          "hint": "",
+          "name": "Weapon Proficiencies",
+          "flags": {}
+        },
+        "2ew4StamPWWfQYsf": {
+          "_id": "2ew4StamPWWfQYsf",
+          "type": "Trait",
+          "configuration": {
+            "mode": "default",
+            "allowReplacements": false,
+            "grants": [],
+            "choices": [{ "count": 3, "pool": ["tool:music:*"] }]
+          },
+          "value": { "chosen": [] },
+          "level": 1,
+          "hint": "",
+          "classRestriction": "primary",
+          "name": "Tool Proficiencies",
+          "flags": {}
+        },
+        "5Dar82bZhYxSpxG7": {
+          "_id": "5Dar82bZhYxSpxG7",
+          "type": "Trait",
+          "configuration": {
+            "mode": "default",
+            "allowReplacements": false,
+            "grants": ["armor:lgt"],
+            "choices": []
+          },
+          "value": { "chosen": [] },
+          "level": 1,
+          "hint": "",
+          "name": "Armor Training",
+          "flags": {}
+        },
+        "kPeKGxUo8GJygCJG": {
+          "_id": "kPeKGxUo8GJygCJG",
+          "type": "Trait",
+          "configuration": {
+            "mode": "default",
+            "allowReplacements": false,
+            "grants": [],
+            "choices": [{ "count": 1, "pool": ["skills:*"] }]
+          },
+          "value": { "chosen": [] },
+          "level": 1,
+          "hint": "",
+          "classRestriction": "secondary",
+          "name": "Skill Proficiencies",
+          "flags": {}
+        },
+        "n0aMUQr79P5Pkjpf": {
+          "_id": "n0aMUQr79P5Pkjpf",
+          "type": "Trait",
+          "configuration": {
+            "mode": "default",
+            "allowReplacements": false,
+            "grants": [],
+            "choices": [{ "count": 1, "pool": ["tool:music:*"] }]
+          },
+          "value": { "chosen": [] },
+          "level": 1,
+          "hint": "",
+          "classRestriction": "secondary",
+          "name": "Tool Proficiencies",
+          "flags": {}
+        }
+      }
+    },
+    "traits": {
+      "fc1RwzQMT6qSaH5v": {
+        "grants": [
+          { "key": "saves:dex", "label": "Dexterity" },
+          { "key": "saves:cha", "label": "Charisma" }
+        ],
+        "choices": []
+      },
+      "NGtmmsYBnIAGKUSn": {
+        "grants": [],
+        "choices": [
+          {
+            "count": 3,
+            "options": [
+              { "key": "skills:acr", "label": "Acrobatics" },
+              { "key": "skills:ani", "label": "Animal Handling" },
+              { "key": "skills:arc", "label": "Arcana" },
+              { "key": "skills:ath", "label": "Athletics" },
+              { "key": "skills:dec", "label": "Deception" },
+              { "key": "skills:his", "label": "History" },
+              { "key": "skills:ins", "label": "Insight" },
+              { "key": "skills:inv", "label": "Investigation" },
+              { "key": "skills:itm", "label": "Intimidation" },
+              { "key": "skills:med", "label": "Medicine" },
+              { "key": "skills:nat", "label": "Nature" },
+              { "key": "skills:per", "label": "Persuasion" },
+              { "key": "skills:prc", "label": "Perception" },
+              { "key": "skills:prf", "label": "Performance" },
+              { "key": "skills:rel", "label": "Religion" },
+              { "key": "skills:slt", "label": "Sleight of Hand" },
+              { "key": "skills:ste", "label": "Stealth" },
+              { "key": "skills:sur", "label": "Survival" }
+            ]
+          }
+        ]
+      },
+      "iFuxb8gJBCVtfegb": { "grants": [{ "key": "weapon:sim", "label": "Simple" }], "choices": [] },
+      "2ew4StamPWWfQYsf": {
+        "grants": [],
+        "choices": [
+          {
+            "count": 3,
+            "options": [
+              { "key": "tool:music:bagpipes", "label": "Bagpipes" },
+              { "key": "tool:music:drum", "label": "Drum" },
+              { "key": "tool:music:dulcimer", "label": "Dulcimer" },
+              { "key": "tool:music:flute", "label": "Flute" },
+              { "key": "tool:music:horn", "label": "Horn" },
+              { "key": "tool:music:lute", "label": "Lute" },
+              { "key": "tool:music:lyre", "label": "Lyre" },
+              { "key": "tool:music:panflute", "label": "Pan Flute" },
+              { "key": "tool:music:shawm", "label": "Shawm" },
+              { "key": "tool:music:viol", "label": "Viol" }
+            ]
+          }
+        ]
+      },
+      "5Dar82bZhYxSpxG7": { "grants": [{ "key": "armor:lgt", "label": "Light" }], "choices": [] },
+      "kPeKGxUo8GJygCJG": {
+        "grants": [],
+        "choices": [
+          {
+            "count": 1,
+            "options": [
+              { "key": "skills:acr", "label": "Acrobatics" },
+              { "key": "skills:ani", "label": "Animal Handling" },
+              { "key": "skills:arc", "label": "Arcana" },
+              { "key": "skills:ath", "label": "Athletics" },
+              { "key": "skills:dec", "label": "Deception" },
+              { "key": "skills:his", "label": "History" },
+              { "key": "skills:ins", "label": "Insight" },
+              { "key": "skills:inv", "label": "Investigation" },
+              { "key": "skills:itm", "label": "Intimidation" },
+              { "key": "skills:med", "label": "Medicine" },
+              { "key": "skills:nat", "label": "Nature" },
+              { "key": "skills:per", "label": "Persuasion" },
+              { "key": "skills:prc", "label": "Perception" },
+              { "key": "skills:prf", "label": "Performance" },
+              { "key": "skills:rel", "label": "Religion" },
+              { "key": "skills:slt", "label": "Sleight of Hand" },
+              { "key": "skills:ste", "label": "Stealth" },
+              { "key": "skills:sur", "label": "Survival" }
+            ]
+          }
+        ]
+      },
+      "n0aMUQr79P5Pkjpf": {
+        "grants": [],
+        "choices": [
+          {
+            "count": 1,
+            "options": [
+              { "key": "tool:music:bagpipes", "label": "Bagpipes" },
+              { "key": "tool:music:drum", "label": "Drum" },
+              { "key": "tool:music:dulcimer", "label": "Dulcimer" },
+              { "key": "tool:music:flute", "label": "Flute" },
+              { "key": "tool:music:horn", "label": "Horn" },
+              { "key": "tool:music:lute", "label": "Lute" },
+              { "key": "tool:music:lyre", "label": "Lyre" },
+              { "key": "tool:music:panflute", "label": "Pan Flute" },
+              { "key": "tool:music:shawm", "label": "Shawm" },
+              { "key": "tool:music:viol", "label": "Viol" }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "uuid": "Compendium.dnd5e.classes24.Item.phbbrdExpertise0",
+    "name": "Expertise",
+    "type": "feat",
+    "img": "icons/magic/symbols/chevron-elipse-circle-blue.webp",
+    "text": "You gain &Reference[Expertise] in two of your skill proficiencies of your choice. Performance and Persuasion are recommended if you have proficiency in them.At Bard level 9, you gain Expertise in two more of your skill proficiencies of your choice.",
+    "system": {
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "revision": 1,
+        "book": "",
+        "license": "CC-BY-4.0"
+      },
+      "identifier": "expertise",
+      "type": { "value": "class", "subtype": "" },
+      "prerequisites": { "level": 2, "items": [], "repeatable": false },
+      "advancement": {
+        "zHtnbRgLICltyy8V": {
+          "_id": "zHtnbRgLICltyy8V",
+          "type": "Trait",
+          "configuration": {
+            "mode": "expertise",
+            "allowReplacements": false,
+            "grants": [],
+            "choices": [{ "count": 2, "pool": ["skills:*"] }]
+          },
+          "value": { "chosen": [] },
+          "level": 2,
+          "name": "Expertise",
+          "flags": {},
+          "hint": "<p>You gain &amp;Reference[Expertise] in two of your skill proficiencies of your choice. Performance and Persuasion are recommended if you have proficiency in them.</p>"
+        },
+        "e8hDmktYGVFiT6M0": {
+          "_id": "e8hDmktYGVFiT6M0",
+          "type": "Trait",
+          "configuration": {
+            "mode": "expertise",
+            "allowReplacements": false,
+            "grants": [],
+            "choices": [{ "count": 2, "pool": ["skills:*"] }]
+          },
+          "value": { "chosen": [] },
+          "level": 9,
+          "name": "Expertise",
+          "flags": {},
+          "hint": "<p>You gain &amp;Reference[Expertise] in two more of your skill proficiencies of your choice.</p>"
+        }
+      }
+    },
+    "traits": {
+      "zHtnbRgLICltyy8V": {
+        "grants": [],
+        "choices": [
+          {
+            "count": 2,
+            "options": [
+              { "key": "skills:acr", "label": "Acrobatics" },
+              { "key": "skills:ani", "label": "Animal Handling" },
+              { "key": "skills:arc", "label": "Arcana" },
+              { "key": "skills:ath", "label": "Athletics" },
+              { "key": "skills:dec", "label": "Deception" },
+              { "key": "skills:his", "label": "History" },
+              { "key": "skills:ins", "label": "Insight" },
+              { "key": "skills:inv", "label": "Investigation" },
+              { "key": "skills:itm", "label": "Intimidation" },
+              { "key": "skills:med", "label": "Medicine" },
+              { "key": "skills:nat", "label": "Nature" },
+              { "key": "skills:per", "label": "Persuasion" },
+              { "key": "skills:prc", "label": "Perception" },
+              { "key": "skills:prf", "label": "Performance" },
+              { "key": "skills:rel", "label": "Religion" },
+              { "key": "skills:slt", "label": "Sleight of Hand" },
+              { "key": "skills:ste", "label": "Stealth" },
+              { "key": "skills:sur", "label": "Survival" }
+            ]
+          }
+        ]
+      },
+      "e8hDmktYGVFiT6M0": {
+        "grants": [],
+        "choices": [
+          {
+            "count": 2,
+            "options": [
+              { "key": "skills:acr", "label": "Acrobatics" },
+              { "key": "skills:ani", "label": "Animal Handling" },
+              { "key": "skills:arc", "label": "Arcana" },
+              { "key": "skills:ath", "label": "Athletics" },
+              { "key": "skills:dec", "label": "Deception" },
+              { "key": "skills:his", "label": "History" },
+              { "key": "skills:ins", "label": "Insight" },
+              { "key": "skills:inv", "label": "Investigation" },
+              { "key": "skills:itm", "label": "Intimidation" },
+              { "key": "skills:med", "label": "Medicine" },
+              { "key": "skills:nat", "label": "Nature" },
+              { "key": "skills:per", "label": "Persuasion" },
+              { "key": "skills:prc", "label": "Perception" },
+              { "key": "skills:prf", "label": "Performance" },
+              { "key": "skills:rel", "label": "Religion" },
+              { "key": "skills:slt", "label": "Sleight of Hand" },
+              { "key": "skills:ste", "label": "Stealth" },
+              { "key": "skills:sur", "label": "Survival" }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "uuid": "Compendium.dnd5e.classes24.Item.phbwlkWarlock000",
+    "name": "Warlock",
+    "type": "class",
+    "img": "systems/dnd5e/icons/classes/warlock.webp",
+    "text": "Class DetailsBecoming a Warlock …As a Level 1 CharacterGain all the traits in the Core Warlock Traits table.Gain the Warlock's level 1 features, which are listed in the Warlock Features table.As a Multiclass CharacterGain the following traits from the Core Warlock Traits table: Hit Point Die and training with Light armor.Gain the Warlock's level 1 features, which are listed in the Warlock Features table. See the multiclassing rules to determine your available spell slots.",
+    "system": {
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "book": "",
+        "page": "",
+        "license": "CC-BY-4.0",
+        "revision": 3
+      },
+      "identifier": "warlock",
+      "levels": 1,
+      "hd": { "denomination": "d8", "spent": 0, "additional": "" },
+      "primaryAbility": { "value": ["cha"], "all": true },
+      "spellcasting": {
+        "progression": "pact",
+        "ability": "cha",
+        "preparation": { "formula": "@scale.warlock.max-prepared" }
+      },
+      "wealth": "100",
+      "advancement": {
+        "yjm7B73po6OV5DPi": {
+          "_id": "yjm7B73po6OV5DPi",
+          "type": "ItemGrant",
+          "configuration": {
+            "items": [
+              {
+                "uuid": "Compendium.dnd5e.classes24.Item.phbwlkEldritchIn",
+                "optional": false,
+                "sort": 0
+              },
+              {
+                "uuid": "Compendium.dnd5e.classes24.Item.phbwlkPactMagic0",
+                "optional": false,
+                "sort": 0
+              }
+            ],
+            "optional": false,
+            "spell": null,
+            "sorting": "m"
+          },
+          "value": {},
+          "level": 1,
+          "name": "",
+          "flags": {},
+          "hint": ""
+        },
+        "W9auMtMHTf0KV1Xw": {
+          "_id": "W9auMtMHTf0KV1Xw",
+          "type": "Trait",
+          "configuration": {
+            "mode": "default",
+            "allowReplacements": false,
+            "grants": ["saves:wis", "saves:cha"],
+            "choices": []
+          },
+          "value": { "chosen": [] },
+          "level": 1,
+          "hint": "",
+          "classRestriction": "primary",
+          "name": "Saving Throw Proficiencies",
+          "flags": {}
+        },
+        "9LblGv17rkWDNni2": {
+          "_id": "9LblGv17rkWDNni2",
+          "type": "Trait",
+          "configuration": {
+            "mode": "default",
+            "allowReplacements": false,
+            "grants": [],
+            "choices": [
+              {
+                "count": 2,
+                "pool": [
+                  "skills:arc",
+                  "skills:dec",
+                  "skills:his",
+                  "skills:itm",
+                  "skills:inv",
+                  "skills:nat",
+                  "skills:rel"
+                ]
+              }
+            ]
+          },
+          "value": { "chosen": [] },
+          "level": 1,
+          "hint": "",
+          "classRestriction": "primary",
+          "name": "Skill Proficiencies",
+          "flags": {}
+        },
+        "4XUbrDNUSRAH6TqT": {
+          "_id": "4XUbrDNUSRAH6TqT",
+          "type": "Trait",
+          "configuration": {
+            "mode": "default",
+            "allowReplacements": false,
+            "grants": ["weapon:sim"],
+            "choices": []
+          },
+          "value": { "chosen": [] },
+          "level": 1,
+          "hint": "",
+          "classRestriction": "primary",
+          "name": "Weapon Proficiencies",
+          "flags": {}
+        },
+        "yB5RTWToMnl2sB6c": {
+          "_id": "yB5RTWToMnl2sB6c",
+          "type": "Trait",
+          "configuration": {
+            "mode": "default",
+            "allowReplacements": false,
+            "grants": ["armor:lgt"],
+            "choices": []
+          },
+          "value": { "chosen": [] },
+          "level": 1,
+          "hint": "",
+          "name": "Armor Training",
+          "flags": {}
+        }
+      }
+    },
+    "traits": {
+      "W9auMtMHTf0KV1Xw": {
+        "grants": [
+          { "key": "saves:wis", "label": "Wisdom" },
+          { "key": "saves:cha", "label": "Charisma" }
+        ],
+        "choices": []
+      },
+      "9LblGv17rkWDNni2": {
+        "grants": [],
+        "choices": [
+          {
+            "count": 2,
+            "options": [
+              { "key": "skills:arc", "label": "Arcana" },
+              { "key": "skills:dec", "label": "Deception" },
+              { "key": "skills:his", "label": "History" },
+              { "key": "skills:itm", "label": "Intimidation" },
+              { "key": "skills:inv", "label": "Investigation" },
+              { "key": "skills:nat", "label": "Nature" },
+              { "key": "skills:rel", "label": "Religion" }
+            ]
+          }
+        ]
+      },
+      "4XUbrDNUSRAH6TqT": { "grants": [{ "key": "weapon:sim", "label": "Simple" }], "choices": [] },
+      "yB5RTWToMnl2sB6c": { "grants": [{ "key": "armor:lgt", "label": "Light" }], "choices": [] }
+    }
+  },
+  {
+    "uuid": "Compendium.dnd5e.classes24.Item.phbwlkEldritchIn",
+    "name": "Eldritch Invocations",
+    "type": "feat",
+    "img": "icons/sundries/lights/candles-lit-red-evil.webp",
+    "text": "You have unearthed Eldritch Invocations, pieces of forbidden knowledge that imbue you with an abiding magical ability or other lessons. You gain one invocation of your choice, such as Pact of the Tome. Invocations are described in the Eldritch Invocation Options section.Prerequisites. If an invocation has a prerequisite, you must meet it to learn that invocation. For example, if an invocation requires you to be a level 5+ Warlock, you can select the invocation once you reach Warlock level 5.Replacing and Gaining Invocations. Whenever you gain a Warlock level, you can replace one of your invocations with another one for which you qualify. You can't replace an invocation if it's a prerequisite for another invocation that you have.When you gain certain Warlock levels, you gain more invocations of your choice, as shown in the Invocations column of the Warlock Features table.You can't pick the same invocation more than once unless its description says otherwise.",
+    "system": {
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "revision": 2,
+        "book": "",
+        "page": "",
+        "license": "CC-BY-4.0"
+      },
+      "identifier": "eldritch-invocations",
+      "type": { "value": "class", "subtype": "" },
+      "prerequisites": { "level": 1, "items": [], "repeatable": false },
+      "advancement": {
+        "xMtpuEuf5g6C8cqA": {
+          "_id": "xMtpuEuf5g6C8cqA",
+          "type": "ItemChoice",
+          "configuration": {
+            "choices": {
+              "1": { "count": 1, "replacement": false },
+              "2": { "count": 2, "replacement": true },
+              "3": { "count": null, "replacement": true },
+              "4": { "count": null, "replacement": true },
+              "5": { "count": 2, "replacement": true },
+              "6": { "count": null, "replacement": true },
+              "7": { "count": 1, "replacement": true },
+              "8": { "count": null, "replacement": true },
+              "9": { "count": 1, "replacement": true },
+              "10": { "count": null, "replacement": true },
+              "11": { "count": null, "replacement": true },
+              "12": { "count": 1, "replacement": true },
+              "13": { "count": null, "replacement": true },
+              "14": { "count": null, "replacement": true },
+              "15": { "count": 1, "replacement": true },
+              "16": { "count": null, "replacement": true },
+              "17": { "count": null, "replacement": true },
+              "18": { "count": 1, "replacement": true },
+              "19": { "count": null, "replacement": true },
+              "20": { "count": null, "replacement": true }
+            },
+            "allowDrops": true,
+            "type": "feat",
+            "pool": [],
+            "spell": null,
+            "restriction": {
+              "type": "class",
+              "subtype": "eldritchInvocation",
+              "list": [],
+              "school": []
+            },
+            "sorting": "a"
+          },
+          "value": { "added": {}, "replaced": {} },
+          "hint": "<p>You have unearthed Eldritch Invocations, pieces of forbidden knowledge that imbue you with an abiding magical ability or other lessons.</p>",
+          "name": "Choose Eldritch Invocation",
+          "flags": {}
+        }
+      }
+    },
+    "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.classes24.Item.phbinvPactBlade0",
+    "name": "Pact of the Blade",
+    "type": "feat",
+    "img": "icons/skills/melee/weapons-crossed-swords-teal.webp",
+    "text": "As a Bonus Action, you can conjure a pact weapon in your hand—a Simple or Martial Melee weapon of your choice with which you bond—or create a bond with a magic weapon you touch; you can't bond with a magic weapon if someone else is attuned to it or another Warlock is bonded with it. Until the bond ends, you have proficiency with the weapon, and you can use it as a Spellcasting Focus.Whenever you attack with the bonded weapon, you can use your Charisma modifier for the attack and damage rolls instead of using Strength or Dexterity; and you can cause the weapon to deal Necrotic, Psychic, or Radiant damage or its normal damage type.Your bond with the weapon ends if you use this feature's Bonus Action again, if the weapon is more than 5 feet away from you for 1 minute or more, or if you die. A conjured weapon disappears when the bond ends.",
+    "system": {
+      "source": {
+        "rules": "2024",
+        "custom": "",
+        "revision": 2,
+        "book": "",
+        "page": "",
+        "license": "CC-BY-4.0"
+      },
+      "identifier": "pact-of-the-blade",
+      "type": { "value": "class", "subtype": "eldritchInvocation" },
+      "prerequisites": { "level": null, "items": [], "repeatable": false },
+      "advancement": {}
+    },
+    "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.classes24.Item.phbinvAgonizingB",
+    "name": "Agonizing Blast",
+    "type": "feat",
+    "img": "icons/magic/acid/projectile-stream-bubbles.webp",
+    "text": "Prerequisite: Level 2+ Warlock, a Warlock Cantrip That Deals DamageChoose one of your known Warlock cantrips that deals damage. You can add your Charisma modifier to that spell's damage rolls.Repeatable. You can gain this invocation more than once. Each time you do so, choose a different eligible cantrip.Foundry NoteThe Make Agonizing activity can be used to enchant a cantrip which adds \"(Agonizing)\" to its name and includes the damage bonus.",
+    "system": {
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "book": "",
+        "page": "",
+        "license": "CC-BY-4.0",
+        "revision": 2
+      },
+      "identifier": "agonizing-blast",
+      "type": { "value": "class", "subtype": "eldritchInvocation" },
+      "prerequisites": { "level": 2, "repeatable": true, "items": [] },
+      "advancement": {}
+    },
+    "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.classes24.Item.phbinvThirstingB",
+    "name": "Thirsting Blade",
+    "type": "feat",
+    "img": "icons/skills/melee/blade-tip-chipped-blood-red.webp",
+    "text": "Prerequisite: Level 5+ Warlock, Pact of the Blade Invocation.You gain the Extra Attack feature for your pact weapon only. With that feature, you can attack twice with the weapon instead of once when you take the &Reference[Attack] action on your turn.",
+    "system": {
+      "source": {
+        "rules": "2024",
+        "revision": 2,
+        "book": "",
+        "page": "",
+        "license": "CC-BY-4.0"
+      },
+      "identifier": "thirsting-blade",
+      "type": { "value": "class", "subtype": "eldritchInvocation" },
+      "prerequisites": { "level": 5, "items": ["feat:pact-of-the-blade"], "repeatable": false },
+      "advancement": {}
+    },
+    "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.classes24.Item.phbrgeRogue00000",
+    "name": "Rogue",
+    "type": "class",
+    "img": "systems/dnd5e/icons/classes/rogue.webp",
+    "text": "Class DetailsBecoming a Rogue …As a Level 1 CharacterGain all the traits in the Core Rogue Traits table.Gain the Rogue's level 1 features, which are listed in the Rogue Features table.As a Multiclass CharacterGain the following traits from the Core Rogue Traits table: Hit Point Die, proficiency in one skill of your choice from the Rogue's skill list, proficiency with Thieves' Tools, and training with Light armor.Gain the Rogue's level 1 features, which are listed in the Rogue Features table.",
+    "system": {
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "book": "",
+        "page": "",
+        "license": "CC-BY-4.0",
+        "revision": 2
+      },
+      "identifier": "rogue",
+      "levels": 1,
+      "hd": {
+        "denomination": "d8",
+        "spent": 0,
+        "additional": ""
+      },
+      "primaryAbility": {
+        "value": ["dex"],
+        "all": true
+      },
+      "wealth": "100",
+      "advancement": {
+        "6zkx7K1uPW2IQ5JA": {
+          "_id": "6zkx7K1uPW2IQ5JA",
+          "type": "HitPoints",
+          "configuration": {},
+          "value": {},
+          "flags": {},
+          "hint": ""
+        },
+        "4lvoA3fvGLv15lyc": {
+          "_id": "4lvoA3fvGLv15lyc",
+          "type": "ItemGrant",
+          "configuration": {
+            "items": [
+              {
+                "uuid": "Compendium.dnd5e.classes24.Item.phbrgeExpertise0",
+                "optional": false,
+                "sort": 0
+              },
+              {
+                "uuid": "Compendium.dnd5e.classes24.Item.phbrgeSneakAttac",
+                "optional": false,
+                "sort": 0
+              },
+              {
+                "uuid": "Compendium.dnd5e.classes24.Item.phbrgeThievesCan",
+                "optional": false,
+                "sort": 0
+              },
+              {
+                "uuid": "Compendium.dnd5e.classes24.Item.phbrgeWeaponMast",
+                "optional": false,
+                "sort": 0
+              }
+            ],
+            "optional": false,
+            "spell": null,
+            "sorting": "m"
+          },
+          "value": {},
+          "level": 1,
+          "name": "",
+          "flags": {},
+          "hint": ""
+        },
+        "N5TGZDRu7NwVSaq6": {
+          "_id": "N5TGZDRu7NwVSaq6",
+          "type": "Trait",
+          "configuration": {
+            "mode": "default",
+            "allowReplacements": false,
+            "grants": ["tool:thief"],
+            "choices": []
+          },
+          "value": {
+            "chosen": []
+          },
+          "level": 1,
+          "hint": "",
+          "name": "Tool Proficiencies",
+          "flags": {}
+        },
+        "OJXVOKQhi05P672u": {
+          "_id": "OJXVOKQhi05P672u",
+          "type": "Trait",
+          "configuration": {
+            "mode": "default",
+            "allowReplacements": false,
+            "grants": ["saves:dex", "saves:int"],
+            "choices": []
+          },
+          "value": {
+            "chosen": []
+          },
+          "level": 1,
+          "hint": "",
+          "classRestriction": "primary",
+          "name": "Saving Throw Proficiencies",
+          "flags": {}
+        },
+        "UH1CrcBv6JRJJxsQ": {
+          "_id": "UH1CrcBv6JRJJxsQ",
+          "type": "Trait",
+          "configuration": {
+            "mode": "default",
+            "allowReplacements": false,
+            "grants": ["armor:lgt"],
+            "choices": []
+          },
+          "value": {
+            "chosen": []
+          },
+          "level": 1,
+          "hint": "",
+          "name": "Armor Training",
+          "flags": {}
+        },
+        "q22sm4VsezAltuqE": {
+          "_id": "q22sm4VsezAltuqE",
+          "type": "Trait",
+          "configuration": {
+            "mode": "default",
+            "allowReplacements": false,
+            "grants": ["weapon:sim", "weapon:mar:handcrossbow", "weapon:mar:rapier", "weapon:mar:scimitar", "weapon:mar:shortsword", "weapon:mar:whip"],
+            "choices": []
+          },
+          "value": {
+            "chosen": []
+          },
+          "level": 1,
+          "hint": "",
+          "classRestriction": "primary",
+          "name": "Weapon Proficiencies",
+          "flags": {}
+        },
+        "xE00qAIjMdw63Kja": {
+          "_id": "xE00qAIjMdw63Kja",
+          "type": "Trait",
+          "configuration": {
+            "mode": "default",
+            "allowReplacements": false,
+            "grants": [],
+            "choices": [
+              {
+                "count": 4,
+                "pool": ["skills:acr", "skills:ath", "skills:dec", "skills:ins", "skills:itm", "skills:inv", "skills:prc", "skills:per", "skills:slt", "skills:ste"]
+              }
+            ]
+          },
+          "value": {
+            "chosen": []
+          },
+          "level": 1,
+          "hint": "",
+          "classRestriction": "primary",
+          "name": "Skill Proficiencies",
+          "flags": {}
+        }
+      }
+    },
+    "traits": {
+      "N5TGZDRu7NwVSaq6": {
+        "grants": [
+          {
+            "key": "tool:thief",
+            "label": "Thieves' Tools"
+          }
+        ],
+        "choices": []
+      },
+      "OJXVOKQhi05P672u": {
+        "grants": [
+          {
+            "key": "saves:dex",
+            "label": "Dexterity"
+          },
+          {
+            "key": "saves:int",
+            "label": "Intelligence"
+          }
+        ],
+        "choices": []
+      },
+      "UH1CrcBv6JRJJxsQ": {
+        "grants": [
+          {
+            "key": "armor:lgt",
+            "label": "Light"
+          }
+        ],
+        "choices": []
+      },
+      "q22sm4VsezAltuqE": {
+        "grants": [
+          {
+            "key": "weapon:sim",
+            "label": "Simple"
+          },
+          {
+            "key": "weapon:mar:handcrossbow",
+            "label": "Hand Crossbow"
+          },
+          {
+            "key": "weapon:mar:rapier",
+            "label": "Rapier"
+          },
+          {
+            "key": "weapon:mar:scimitar",
+            "label": "Scimitar"
+          },
+          {
+            "key": "weapon:mar:shortsword",
+            "label": "Shortsword"
+          },
+          {
+            "key": "weapon:mar:whip",
+            "label": "Whip"
+          }
+        ],
+        "choices": []
+      },
+      "xE00qAIjMdw63Kja": {
+        "grants": [],
+        "choices": [
+          {
+            "count": 4,
+            "options": [
+              {
+                "key": "skills:acr",
+                "label": "Acrobatics"
+              },
+              {
+                "key": "skills:ath",
+                "label": "Athletics"
+              },
+              {
+                "key": "skills:dec",
+                "label": "Deception"
+              },
+              {
+                "key": "skills:ins",
+                "label": "Insight"
+              },
+              {
+                "key": "skills:inv",
+                "label": "Investigation"
+              },
+              {
+                "key": "skills:itm",
+                "label": "Intimidation"
+              },
+              {
+                "key": "skills:per",
+                "label": "Persuasion"
+              },
+              {
+                "key": "skills:prc",
+                "label": "Perception"
+              },
+              {
+                "key": "skills:slt",
+                "label": "Sleight of Hand"
+              },
+              {
+                "key": "skills:ste",
+                "label": "Stealth"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "uuid": "Compendium.dnd5e.classes24.Item.phbrgeExpertise0",
+    "name": "Expertise",
+    "type": "feat",
+    "img": "icons/magic/symbols/chevron-elipse-circle-blue.webp",
+    "text": "You gain &Reference[Expertise] in two of your skill proficiencies of your choice. Sleight of Hand and Stealth are recommended if you have proficiency in them.At Rogue level 6, you gain Expertise in two more of your skill proficiencies of your choice.",
+    "system": {
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "book": "",
+        "page": "",
+        "license": "CC-BY-4.0",
+        "revision": 2
+      },
+      "identifier": "expertise",
+      "type": {
+        "value": "class",
+        "subtype": ""
+      },
+      "prerequisites": {
+        "level": 1,
+        "items": [],
+        "repeatable": false
+      },
+      "advancement": {
+        "4doj2kFD8sIYiX8X": {
+          "_id": "4doj2kFD8sIYiX8X",
+          "type": "Trait",
+          "configuration": {
+            "mode": "expertise",
+            "allowReplacements": false,
+            "grants": [],
+            "choices": [
+              {
+                "count": 2,
+                "pool": ["skills:*"]
+              }
+            ]
+          },
+          "value": {
+            "chosen": []
+          },
+          "level": 1,
+          "hint": "<p>You gain &amp;Reference[Expertise] in two of your skill proficiencies of your choice. Sleight of Hand and Stealth are recommended if you have proficiency in them.</p>",
+          "name": "Expertise",
+          "flags": {}
+        }
+      }
+    },
+    "traits": {
+      "4doj2kFD8sIYiX8X": {
+        "grants": [],
+        "choices": [
+          {
+            "count": 2,
+            "options": [
+              {
+                "key": "skills:acr",
+                "label": "Acrobatics"
+              },
+              {
+                "key": "skills:ani",
+                "label": "Animal Handling"
+              },
+              {
+                "key": "skills:arc",
+                "label": "Arcana"
+              },
+              {
+                "key": "skills:ath",
+                "label": "Athletics"
+              },
+              {
+                "key": "skills:dec",
+                "label": "Deception"
+              },
+              {
+                "key": "skills:his",
+                "label": "History"
+              },
+              {
+                "key": "skills:ins",
+                "label": "Insight"
+              },
+              {
+                "key": "skills:inv",
+                "label": "Investigation"
+              },
+              {
+                "key": "skills:itm",
+                "label": "Intimidation"
+              },
+              {
+                "key": "skills:med",
+                "label": "Medicine"
+              },
+              {
+                "key": "skills:nat",
+                "label": "Nature"
+              },
+              {
+                "key": "skills:per",
+                "label": "Persuasion"
+              },
+              {
+                "key": "skills:prc",
+                "label": "Perception"
+              },
+              {
+                "key": "skills:prf",
+                "label": "Performance"
+              },
+              {
+                "key": "skills:rel",
+                "label": "Religion"
+              },
+              {
+                "key": "skills:slt",
+                "label": "Sleight of Hand"
+              },
+              {
+                "key": "skills:ste",
+                "label": "Stealth"
+              },
+              {
+                "key": "skills:sur",
+                "label": "Survival"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "uuid": "Compendium.dnd5e.classes24.Item.phbrgeWeaponMast",
+    "name": "Weapon Mastery",
+    "type": "feat",
+    "img": "icons/skills/melee/strike-sword-steel-yellow.webp",
+    "text": "Your training with weapons allows you to use the mastery properties of two kinds of weapons of your choice with which you have proficiency, such as Daggers and Shortbows.Whenever you finish a Long Rest, you can change the kinds of weapons you chose. For example, you could switch to using the mastery properties of Scimitars and Shortswords.",
+    "system": {
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "book": "",
+        "page": "",
+        "license": "CC-BY-4.0",
+        "revision": 2
+      },
+      "identifier": "weapon-mastery",
+      "type": {
+        "value": "class",
+        "subtype": ""
+      },
+      "prerequisites": {
+        "level": 1,
+        "items": [],
+        "repeatable": false
+      },
+      "advancement": {
+        "yp6ZCsT10nGs4J4q": {
+          "_id": "yp6ZCsT10nGs4J4q",
+          "type": "Trait",
+          "configuration": {
+            "mode": "mastery",
+            "allowReplacements": false,
+            "grants": [],
+            "choices": [
+              {
+                "count": 2,
+                "pool": ["weapon:*"]
+              }
+            ]
+          },
+          "value": {
+            "chosen": []
+          },
+          "level": 1,
+          "hint": "<p>Your training with weapons allows you to use the mastery properties of two kinds of weapons of your choice with which you have proficiency, such as Daggers and Shortbows.</p>",
+          "name": "Weapon Mastery",
+          "flags": {}
+        }
+      }
+    },
+    "traits": {
+      "yp6ZCsT10nGs4J4q": {
+        "grants": [],
+        "choices": [
+          {
+            "count": 2,
+            "options": [
+              {
+                "key": "weapon:sim:club",
+                "label": "Club"
+              },
+              {
+                "key": "weapon:sim:dagger",
+                "label": "Dagger"
+              },
+              {
+                "key": "weapon:sim:dart",
+                "label": "Dart"
+              },
+              {
+                "key": "weapon:sim:greatclub",
+                "label": "Greatclub"
+              },
+              {
+                "key": "weapon:sim:handaxe",
+                "label": "Handaxe"
+              },
+              {
+                "key": "weapon:sim:javelin",
+                "label": "Javelin"
+              },
+              {
+                "key": "weapon:sim:lightcrossbow",
+                "label": "Light Crossbow"
+              },
+              {
+                "key": "weapon:sim:lighthammer",
+                "label": "Light Hammer"
+              },
+              {
+                "key": "weapon:sim:mace",
+                "label": "Mace"
+              },
+              {
+                "key": "weapon:sim:quarterstaff",
+                "label": "Quarterstaff"
+              },
+              {
+                "key": "weapon:sim:shortbow",
+                "label": "Shortbow"
+              },
+              {
+                "key": "weapon:sim:sickle",
+                "label": "Sickle"
+              },
+              {
+                "key": "weapon:sim:sling",
+                "label": "Sling"
+              },
+              {
+                "key": "weapon:sim:spear",
+                "label": "Spear"
+              },
+              {
+                "key": "weapon:mar:battleaxe",
+                "label": "Battleaxe"
+              },
+              {
+                "key": "weapon:mar:blowgun",
+                "label": "Blowgun"
+              },
+              {
+                "key": "weapon:mar:flail",
+                "label": "Flail"
+              },
+              {
+                "key": "weapon:mar:glaive",
+                "label": "Glaive"
+              },
+              {
+                "key": "weapon:mar:greataxe",
+                "label": "Greataxe"
+              },
+              {
+                "key": "weapon:mar:greatsword",
+                "label": "Greatsword"
+              },
+              {
+                "key": "weapon:mar:halberd",
+                "label": "Halberd"
+              },
+              {
+                "key": "weapon:mar:handcrossbow",
+                "label": "Hand Crossbow"
+              },
+              {
+                "key": "weapon:mar:heavycrossbow",
+                "label": "Heavy Crossbow"
+              },
+              {
+                "key": "weapon:mar:lance",
+                "label": "Lance"
+              },
+              {
+                "key": "weapon:mar:longbow",
+                "label": "Longbow"
+              },
+              {
+                "key": "weapon:mar:longsword",
+                "label": "Longsword"
+              },
+              {
+                "key": "weapon:mar:maul",
+                "label": "Maul"
+              },
+              {
+                "key": "weapon:mar:morningstar",
+                "label": "Morningstar"
+              },
+              {
+                "key": "weapon:mar:musket",
+                "label": "Musket"
+              },
+              {
+                "key": "weapon:mar:pike",
+                "label": "Pike"
+              },
+              {
+                "key": "weapon:mar:pistol",
+                "label": "Pistol"
+              },
+              {
+                "key": "weapon:mar:rapier",
+                "label": "Rapier"
+              },
+              {
+                "key": "weapon:mar:scimitar",
+                "label": "Scimitar"
+              },
+              {
+                "key": "weapon:mar:shortsword",
+                "label": "Shortsword"
+              },
+              {
+                "key": "weapon:mar:trident",
+                "label": "Trident"
+              },
+              {
+                "key": "weapon:mar:warpick",
+                "label": "War Pick"
+              },
+              {
+                "key": "weapon:mar:warhammer",
+                "label": "Warhammer"
+              },
+              {
+                "key": "weapon:mar:whip",
+                "label": "Whip"
+              }
+            ]
+          }
+        ]
+      }
+    }
   }
 ]

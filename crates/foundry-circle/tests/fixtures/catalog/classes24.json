@@ -208,7 +208,7 @@
               { "key": "skills:his", "label": "History" },
               { "key": "skills:ins", "label": "Insight" },
               { "key": "skills:med", "label": "Medicine" },
-              { "key": "skills:per", "label": "Perception" },
+              { "key": "skills:per", "label": "Persuasion" },
               { "key": "skills:rel", "label": "Religion" }
             ]
           }

@@ -567,6 +567,30 @@ pub const STYLES: &str = r##"
   padding-left: 1.25rem;
 }
 
+.builder-details {
+  margin: .5rem 0;
+  border: 1px solid var(--tb-ui-border);
+  border-radius: .5rem;
+  padding: .75rem;
+}
+
+.builder-details summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.builder-details textarea,
+.builder-note textarea {
+  font: inherit;
+  width: 100%;
+  min-height: 4rem;
+}
+
+.builder-note {
+  display: grid;
+  gap: .25rem;
+}
+
 .builder-sticky {
   position: sticky;
   bottom: 0;

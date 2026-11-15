@@ -4,6 +4,8 @@
 //! Drafts are control-plane state until approval; Foundry owns the Actor after
 //! that, so nothing here writes to a world.
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
@@ -14,10 +16,12 @@ use crate::{
     Role,
     builder::{
         AbilityMethod, BuilderData, BuilderView, CampaignRules, CampaignView, Catalog, CatalogItem,
-        CharactersData, CharactersView, DraftChoices, DraftPatch, DraftStatus, DraftSummary,
-        PackInfo, Redirect, Rolls, Scores, Slot, class_details, classes, decisions,
-        equipment_plans, granted_traits, origin_details, origin_options, pending, prune_picks,
-        roll_sets, totals, validate_asi, validate_equipment, validate_pick, validate_scores,
+        CharactersData, CharactersView, Decision, DraftChoices, DraftPatch, DraftStatus,
+        DraftSummary, PackInfo, PartySummary, Pending, Redirect, Rolls, Scores, Slot,
+        catalog_skills, class_details, classes, decisions, equipment_plans, granted_traits,
+        origin_details, origin_options, party_summary, pending, prune_picks, roll_sets,
+        submit_refusal, totals, validate_asi, validate_detail, validate_equipment, validate_note,
+        validate_pick, validate_scores,
     },
     driver::{CatalogPacks, FoundryDriver, WorldOp, WorldState},
 };
@@ -72,6 +76,7 @@ pub async fn characters_view() -> CharactersView {
             campaigns: Vec::new(),
             mine: Vec::new(),
             party: Vec::new(),
+            coverage: PartySummary::default(),
             ready_world: None,
         }));
     };
@@ -83,20 +88,23 @@ pub async fn characters_view() -> CharactersView {
         }
     };
     let mine = match summaries(&pool, Some(&principal.subject)).await {
-        Ok(mine) => mine,
+        Ok((mine, _)) => mine.into_iter().map(|(summary, _)| summary).collect(),
         Err(error) => {
             tracing::warn!(%error, "failed to list Foundry Circle character drafts");
             Vec::new()
         }
     };
-    let party = if role == Role::Player {
-        Vec::new()
-    } else {
-        summaries(&pool, None).await.unwrap_or_else(|error| {
-            tracing::warn!(%error, "failed to list the Foundry Circle party");
-            Vec::new()
-        })
-    };
+    let mut party = Vec::new();
+    let mut coverage = PartySummary::default();
+    if role != Role::Player {
+        match summaries(&pool, None).await {
+            Ok((rows, skills)) => {
+                coverage = party_summary(&rows, &skills);
+                party = rows.into_iter().map(|(summary, _)| summary).collect();
+            }
+            Err(error) => tracing::warn!(%error, "failed to list the Foundry Circle party"),
+        }
+    }
     let snapshot = state.driver.snapshot();
     let ready_world = (snapshot.state == WorldState::Ready)
         .then_some(snapshot.id)
@@ -106,6 +114,7 @@ pub async fn characters_view() -> CharactersView {
         campaigns,
         mine,
         party,
+        coverage,
         ready_world,
     }))
 }
@@ -176,55 +185,115 @@ async fn catalog_rows(
     Ok((packs, synced_at))
 }
 
-/// Drafts as the characters page lists them; `only` narrows to one player.
-async fn summaries(pool: &PgPool, only: Option<&str>) -> Result<Vec<DraftSummary>, sqlx::Error> {
+/// Drafts as the characters page lists them; `only` narrows to one player. Each
+/// draft's open steps are counted from its world's real catalog and rules, by the
+/// same functions the builder page calls.
+/// The listed drafts with their decisions, plus every skill the listed worlds'
+/// rules content names (the set party coverage is measured against).
+async fn summaries(
+    pool: &PgPool,
+    only: Option<&str>,
+) -> Result<(Vec<(DraftSummary, Vec<Decision>)>, BTreeMap<String, String>), sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT d.id, d.name, d.status, d.choices, d.rolls,
+        "SELECT d.id, d.name, d.status, d.choices, d.rolls, d.world_id, r.rules,
                 COALESCE(p.display_name, p.email, p.subject) AS player
            FROM character_drafts d
            JOIN principals p ON p.subject = d.subject
+           LEFT JOIN campaign_rules r ON r.world_id = d.world_id
           WHERE $1::text IS NULL OR d.subject = $1
           ORDER BY d.name, d.created_at",
     )
     .bind(only)
     .fetch_all(pool)
     .await?;
-    Ok(rows
-        .iter()
-        .filter_map(|row| {
-            let choices: DraftChoices = row
-                .try_get::<Value, _>("choices")
+    // One catalog read per world, however many of its drafts are listed.
+    let mut worlds: BTreeMap<String, (CampaignRules, Catalog)> = BTreeMap::new();
+    let mut summaries = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let Ok(world_id) = row.try_get::<String, _>("world_id") else {
+            continue;
+        };
+        if !worlds.contains_key(&world_id) {
+            let rules: CampaignRules = row
+                .try_get::<Value, _>("rules")
                 .ok()
-                .and_then(|value| serde_json::from_value(value).ok())
+                .and_then(|rules| serde_json::from_value(rules).ok())
                 .unwrap_or_default();
-            let rolls = row
-                .try_get::<Option<Value>, _>("rolls")
-                .ok()
-                .flatten()
-                .and_then(|value| serde_json::from_value(value).ok());
-            let name: String = row.try_get("name").ok()?;
-            Some(DraftSummary {
-                id: row.try_get::<Uuid, _>("id").ok()?.to_string(),
-                name: name.clone(),
-                status: DraftStatus::from_db(row.try_get::<String, _>("status").ok()?.as_str())?,
-                player: row.try_get("player").ok()?,
-                // ponytail: the party count omits the class decisions and the
-                // equipment; load each world's catalog here when the DM board
-                // needs them all.
-                pending: pending(
-                    None,
-                    &CampaignRules::default(),
-                    &choices,
-                    &name,
-                    rolls.as_ref(),
-                    &[],
-                )
-                .len() as u32,
+            let catalog = catalog(pool, &world_id, &rules.sources)
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "failed to read a world's rules content");
+                    Catalog::default()
+                });
+            worlds.insert(world_id.clone(), (rules, catalog));
+        }
+        let (rules, catalog) = &worlds[&world_id];
+        let Ok(name) = row.try_get::<String, _>("name") else {
+            continue;
+        };
+        let choices: DraftChoices = row
+            .try_get::<Value, _>("choices")
+            .ok()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default();
+        let rolls = row
+            .try_get::<Option<Value>, _>("rolls")
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::from_value(value).ok());
+        let (Ok(id), Ok(status), Ok(player)) = (
+            row.try_get::<Uuid, _>("id"),
+            row.try_get::<String, _>("status"),
+            row.try_get::<String, _>("player"),
+        ) else {
+            continue;
+        };
+        let Some(status) = DraftStatus::from_db(&status) else {
+            continue;
+        };
+        let (found, to_do) = draft_state(catalog, rules, &choices, &name, rolls.as_ref());
+        summaries.push((
+            DraftSummary {
+                id: id.to_string(),
+                name,
+                status,
+                player,
+                pending: to_do.len() as u32,
+                class_name: catalog
+                    .root(&choices, Slot::Class)
+                    .map(|item| item.name.clone()),
+                species_name: catalog
+                    .root(&choices, Slot::Species)
+                    .map(|item| item.name.clone()),
+                background_name: catalog
+                    .root(&choices, Slot::Background)
+                    .map(|item| item.name.clone()),
+                totals: totals(&found, &choices, None),
                 choices,
                 rolls,
-            })
-        })
-        .collect())
+            },
+            found,
+        ));
+    }
+    let skills = worlds
+        .values()
+        .flat_map(|(_, catalog)| catalog_skills(catalog))
+        .collect();
+    Ok((summaries, skills))
+}
+
+/// One draft's decisions and open steps, from the functions the builder page
+/// calls: the board's count and the player's to-do list cannot disagree.
+fn draft_state(
+    catalog: &Catalog,
+    rules: &CampaignRules,
+    choices: &DraftChoices,
+    name: &str,
+    rolls: Option<&Rolls>,
+) -> (Vec<Decision>, Vec<Pending>) {
+    let decisions = decisions(catalog, choices, rules.starting_level);
+    let to_do = pending(Some(catalog), rules, choices, name, rolls, &decisions);
+    (decisions, to_do)
 }
 
 /// One draft's builder page, or `Missing` when it is not the caller's to see.
@@ -268,14 +337,12 @@ async fn read_ready(pool: &PgPool, id: Uuid, subject: &str, role: Role) -> Build
         }
     };
     let level = draft.rules.starting_level;
-    let decisions = decisions(&catalog, &draft.choices, level);
-    let to_do = pending(
-        Some(&catalog),
+    let (decisions, to_do) = draft_state(
+        &catalog,
         &draft.rules,
         &draft.choices,
         &draft.name,
         draft.rolls.as_ref(),
-        &decisions,
     );
     let equipment = equipment_plans(&catalog, &draft.choices, &draft.rules);
     BuilderView::Ready(Box::new(BuilderData {
@@ -859,6 +926,17 @@ pub async fn update_draft(id: &str, patch: DraftPatch) -> Result<BuilderView, St
             choices.equipment.insert(owner, option);
             (draft.name, choices)
         }
+        DraftPatch::Detail { key, value } => {
+            let value = validate_detail(&key, &value).map_err(str::to_owned)?;
+            let mut choices = draft.choices;
+            // An emptied field is no field; the sheet stores only what it shows.
+            if value.is_empty() {
+                choices.details.remove(&key);
+            } else {
+                choices.details.insert(key, value);
+            }
+            (draft.name, choices)
+        }
     };
     sqlx::query(
         "UPDATE character_drafts SET name = $2, choices = $3, updated_at = now() WHERE id = $1",
@@ -951,6 +1029,125 @@ pub async fn roll_abilities(id: &str) -> Result<BuilderView, String> {
     .await;
     transaction.commit().await.map_err(database_code)?;
     Ok(read_ready(&pool, id, &principal.subject, role).await)
+}
+
+/// The player hands their own finished draft to the DM. The to-do list is
+/// recomputed here from the world's real catalog and campaign rules, so a page
+/// that went stale cannot submit an unfinished character.
+pub async fn submit_draft(id: &str) -> Option<String> {
+    let (state, principal, _) = match member() {
+        Ok(member) => member,
+        Err(code) => return Some(code.into()),
+    };
+    let Some(pool) = state.database.pool().await else {
+        return Some("database_unavailable".into());
+    };
+    let id = match Uuid::parse_str(id) {
+        Ok(id) => id,
+        Err(_) => return Some("draft_not_found".into()),
+    };
+    let mut transaction = match pool.begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => return Some(database_code(error)),
+    };
+    // Own, still a draft and in an open campaign, with the row locked.
+    let draft = match locked_own_draft(&mut transaction, id, &principal.subject).await {
+        Ok(draft) => draft,
+        Err(code) => return Some(code),
+    };
+    let catalog = match catalog(&mut *transaction, &draft.world_id, &draft.rules.sources).await {
+        Ok(catalog) => catalog,
+        Err(error) => return Some(database_code(error)),
+    };
+    let (_, to_do) = draft_state(
+        &catalog,
+        &draft.rules,
+        &draft.choices,
+        &draft.name,
+        draft.rolls.as_ref(),
+    );
+    if let Err(code) = submit_refusal(&to_do) {
+        return Some(code.into());
+    }
+    if let Err(error) = sqlx::query(
+        "UPDATE character_drafts SET status = 'submitted', updated_at = now()
+          WHERE id = $1 AND status = 'draft'",
+    )
+    .bind(id)
+    .execute(&mut *transaction)
+    .await
+    {
+        return Some(database_code(error));
+    }
+    audit(
+        &mut transaction,
+        &principal.subject,
+        "character_draft.submit",
+        json!({"draftId": id, "subject": draft.subject}),
+    )
+    .await;
+    match transaction.commit().await {
+        Ok(()) => None,
+        Err(error) => Some(database_code(error)),
+    }
+}
+
+/// A GM or admin sends a submitted draft back with a note the player can read.
+pub async fn request_changes(id: &str, note: &str) -> Option<String> {
+    let (state, principal, role) = match member() {
+        Ok(member) => member,
+        Err(code) => return Some(code.into()),
+    };
+    if role == Role::Player {
+        return Some("permission_denied".into());
+    }
+    let note = match validate_note(note) {
+        Ok(note) => note,
+        Err(code) => return Some(code.into()),
+    };
+    let Some(pool) = state.database.pool().await else {
+        return Some("database_unavailable".into());
+    };
+    let id = match Uuid::parse_str(id) {
+        Ok(id) => id,
+        Err(_) => return Some("draft_not_found".into()),
+    };
+    let mut transaction = match pool.begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => return Some(database_code(error)),
+    };
+    // A GM reads every adopted world's drafts, as the party board lists them, so
+    // this keeps the same scope as `grant_reroll`.
+    let draft = match draft_row(&mut *transaction, id, true).await {
+        Ok(Some(draft)) => draft,
+        Ok(None) => return Some("draft_not_found".into()),
+        Err(error) => return Some(database_code(error)),
+    };
+    if draft.status != DraftStatus::Submitted {
+        return Some("not_submitted".into());
+    }
+    if let Err(error) = sqlx::query(
+        "UPDATE character_drafts SET status = 'draft', dm_note = $2, updated_at = now()
+          WHERE id = $1",
+    )
+    .bind(id)
+    .bind(&note)
+    .execute(&mut *transaction)
+    .await
+    {
+        return Some(database_code(error));
+    }
+    audit(
+        &mut transaction,
+        &principal.subject,
+        "character_draft.request_changes",
+        json!({"draftId": id, "subject": draft.subject}),
+    )
+    .await;
+    match transaction.commit().await {
+        Ok(()) => None,
+        Err(error) => Some(database_code(error)),
+    }
 }
 
 /// A GM grants one more roll by clearing the stored dice.

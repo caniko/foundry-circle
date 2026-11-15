@@ -178,6 +178,8 @@ pub struct DraftChoices {
     /// The class or background uuid → the equipment option it picked: `kit`,
     /// `kit2`, … or `gold`.
     pub equipment: BTreeMap<String, String>,
+    /// The sheet's free text, by allowlisted key; all optional.
+    pub details: BTreeMap<String, String>,
 }
 
 impl DraftChoices {
@@ -254,6 +256,11 @@ pub enum DraftPatch {
         owner: String,
         /// One of the options that owner offers under the campaign's mode.
         option: String,
+    },
+    Detail {
+        /// One of `DETAIL_KEYS`; anything else is refused.
+        key: String,
+        value: String,
     },
 }
 
@@ -523,6 +530,9 @@ pub struct ClassDetails {
     pub source: String,
     pub hit_die: String,
     pub primary_ability: String,
+    /// The class casts spells (`system.spellcasting.progression` is set and not
+    /// `none`); until slice 8, its spells are picked in Foundry.
+    pub caster: bool,
     /// The features the class grants, with their descriptions.
     pub features: Vec<Feature>,
     pub decisions: Vec<Decision>,
@@ -1253,6 +1263,9 @@ pub fn class_details(catalog: &Catalog, choices: &DraftChoices, level: u8) -> Op
             .unwrap_or_default()
             .to_owned(),
         primary_ability,
+        caster: class.system["spellcasting"]["progression"]
+            .as_str()
+            .is_some_and(|progression| !progression.is_empty() && progression != "none"),
         features: found.features.split_off(features_from),
         decisions: found.decisions.split_off(decisions_from),
     })
@@ -1773,6 +1786,107 @@ pub fn granted_traits(decisions: &[Decision], choices: &DraftChoices) -> BTreeSe
     granted
 }
 
+/// The trait options a decision holds, with the labels the catalog resolved:
+/// what it grants and what its pools offer.
+pub fn trait_options(decision: &Decision) -> Vec<&Opt> {
+    match &decision.kind {
+        DecisionKind::Trait {
+            grants, choices, ..
+        } => grants
+            .iter()
+            .chain(choices.iter().flat_map(|pool| pool.options.iter()))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The party's skill coverage: every skill a draft holds, read from the same
+/// `granted_traits` the pages use and labelled by the trait options the catalog
+/// resolved, plus the skills of those options nobody holds. The DM board's
+/// table and the pickers therefore name a skill the same way.
+/// Every skill the world's rules content names (key → label): the full set a
+/// party's coverage is measured against, read from the synced trait options.
+pub fn catalog_skills(catalog: &Catalog) -> BTreeMap<String, String> {
+    let mut skills = BTreeMap::new();
+    for item in &catalog.items {
+        for advancement in item
+            .traits
+            .as_object()
+            .into_iter()
+            .flat_map(|map| map.values())
+        {
+            let grants = advancement["grants"].as_array().into_iter().flatten();
+            let options = advancement["choices"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|pool| pool["options"].as_array().into_iter().flatten());
+            for option in grants.chain(options) {
+                if let (Some(key), Some(label)) = (option["key"].as_str(), option["label"].as_str())
+                    && key.starts_with("skills:")
+                    && !key.ends_with('*')
+                {
+                    skills
+                        .entry(key.to_owned())
+                        .or_insert_with(|| label.to_owned());
+                }
+            }
+        }
+    }
+    skills
+}
+
+pub fn party_summary(
+    drafts: &[(DraftSummary, Vec<Decision>)],
+    world_skills: &BTreeMap<String, String>,
+) -> PartySummary {
+    let mut labels: BTreeMap<String, String> = world_skills.clone();
+    let mut held: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (summary, decisions) in drafts {
+        for option in decisions.iter().flat_map(trait_options) {
+            if option.value.starts_with("skills:") && !option.label.is_empty() {
+                labels
+                    .entry(option.value.clone())
+                    .or_insert_with(|| option.label.clone());
+            }
+        }
+        let name = if summary.name.trim().is_empty() {
+            summary.player.clone()
+        } else {
+            summary.name.clone()
+        };
+        for key in granted_traits(decisions, &summary.choices) {
+            if key.starts_with("skills:") {
+                held.entry(key).or_default().insert(name.clone());
+            }
+        }
+    }
+    let label = |key: &str| labels.get(key).cloned().unwrap_or_else(|| key.to_owned());
+    let mut skills: Vec<(String, Vec<String>)> = held
+        .iter()
+        .map(|(key, names)| (label(key), names.iter().cloned().collect()))
+        .collect();
+    skills.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut uncovered: Vec<String> = labels
+        .keys()
+        .filter(|key| !held.contains_key(*key))
+        .map(|key| label(key))
+        .collect();
+    uncovered.sort();
+    uncovered.dedup();
+    PartySummary { skills, uncovered }
+}
+
+/// Whether a draft may be submitted: nothing may be left on the to-do list.
+/// `submit_draft` recomputes that list from the world's real content first.
+pub fn submit_refusal(pending: &[Pending]) -> Result<(), &'static str> {
+    if pending.is_empty() {
+        Ok(())
+    } else {
+        Err("draft_incomplete")
+    }
+}
+
 fn decision_label(decision: &Decision) -> String {
     match &decision.kind {
         DecisionKind::Unsupported { .. } => format!("{} (not supported yet)", decision.title),
@@ -1807,7 +1921,24 @@ pub struct DraftSummary {
     pub player: String,
     pub choices: DraftChoices,
     pub rolls: Option<Rolls>,
+    /// What the player still owes, from the same rule the builder page uses.
     pub pending: u32,
+    /// The chosen roots' names, so the board reads names instead of uuids.
+    pub class_name: Option<String>,
+    pub species_name: Option<String>,
+    pub background_name: Option<String>,
+    /// Base scores plus every ability bonus; the board shows these.
+    pub totals: Scores,
+}
+
+/// The party's skill coverage, as the DM board's table reads it.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PartySummary {
+    /// Skill label → the characters who have it, by character name.
+    pub skills: Vec<(String, Vec<String>)>,
+    /// The skills of the party's content that nobody holds.
+    pub uncovered: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -1818,6 +1949,8 @@ pub struct CharactersData {
     pub mine: Vec<DraftSummary>,
     /// Empty for players.
     pub party: Vec<DraftSummary>,
+    /// The party's skill coverage; empty for players.
+    pub coverage: PartySummary,
     /// The world the driver reports Ready; only it can sync its catalog.
     pub ready_world: Option<String>,
 }
@@ -1911,6 +2044,67 @@ pub fn modifier(score: u8) -> i8 {
     (i8::try_from(score).unwrap_or(i8::MAX) - 10).div_euclid(2)
 }
 
+/// A level-one character's hit points: the class's hit die maximum plus the
+/// Constitution modifier of the totals, never below 0. Levels above one, and
+/// the average-or-roll method, wait for slice 9.
+pub fn hit_points(hit_die: &str, con: u8) -> u16 {
+    let die = hit_die
+        .trim()
+        .strip_prefix('d')
+        .and_then(|sides| sides.parse::<u8>().ok())
+        .unwrap_or(0);
+    u16::try_from(i16::from(die) + i16::from(modifier(con))).unwrap_or(0)
+}
+
+/// The sheet fields the details step may store, with their page labels.
+pub const DETAIL_LABELS: [(&str, &str); 15] = [
+    ("alignment", "Alignment"),
+    ("faith", "Faith"),
+    ("gender", "Gender"),
+    ("age", "Age"),
+    ("height", "Height"),
+    ("weight", "Weight"),
+    ("eyes", "Eyes"),
+    ("hair", "Hair"),
+    ("skin", "Skin"),
+    ("appearance", "Appearance"),
+    ("trait", "Personality trait"),
+    ("ideal", "Ideal"),
+    ("bond", "Bond"),
+    ("flaw", "Flaw"),
+    ("backstory", "Backstory"),
+];
+
+/// How long one detail may be, as the actor fields it becomes.
+pub const DETAIL_MAX: usize = 2000;
+
+/// What a draft may store for one sheet field: an allowlisted key, and at most
+/// `DETAIL_MAX` characters once trimmed. The page and `update_draft` share this
+/// one rule; an empty value clears the field.
+pub fn validate_detail(key: &str, value: &str) -> Result<String, &'static str> {
+    if !DETAIL_LABELS.iter().any(|(field, _)| *field == key) {
+        return Err("invalid_detail");
+    }
+    let value = value.trim();
+    if value.chars().count() > DETAIL_MAX {
+        return Err("invalid_detail");
+    }
+    Ok(value.to_owned())
+}
+
+/// How long a DM's note may be, as the board's textarea allows.
+pub const NOTE_MAX: usize = 1000;
+
+/// The note a DM's "request changes" stores, trimmed; one to `NOTE_MAX`
+/// characters, since a note that says nothing is no note.
+pub fn validate_note(note: &str) -> Result<String, &'static str> {
+    let note = note.trim();
+    if note.is_empty() || note.chars().count() > NOTE_MAX {
+        return Err("invalid_note");
+    }
+    Ok(note.to_owned())
+}
+
 /// The exact rule checks for one method; error codes match the server fns.
 pub fn validate_scores(
     method: AbilityMethod,
@@ -2001,7 +2195,10 @@ pub fn pending(
         (None, _) => Some(("method", "Choose an ability method")),
         (Some(AbilityMethod::Roll), _) if rolls.is_none() => Some(("roll", "Roll your abilities")),
         (Some(_), None) => Some(("abilities", "Assign your ability scores")),
-        (Some(_), Some(_)) => None,
+        // The GM may have changed the rules since: the scores must still pass.
+        (Some(method), Some(base)) => validate_scores(method, &base, rolls, rules)
+            .err()
+            .map(|_| ("abilities", "Fix your ability scores for the current rules")),
     };
     if let Some((key, label)) = abilities {
         pending.push(Pending {
@@ -2495,7 +2692,7 @@ mod tests {
                 .iter()
                 .map(|option| option.label.as_str())
                 .collect::<Vec<_>>(),
-            ["History", "Insight", "Medicine", "Perception", "Religion"]
+            ["History", "Insight", "Medicine", "Persuasion", "Religion"]
         );
 
         // Divine Order's choice arrives through the class's ItemGrant.
@@ -3565,5 +3762,277 @@ mod tests {
         // With it, the same kit embeds the SRD chain shirt.
         let plans = equipment_plans(&catalog, &with_class(CLERIC), &CampaignRules::default());
         assert_eq!(plans[0].options[0].items[0].uuid, CHAIN_SHIRT);
+    }
+
+    /// One party row, as `summaries` builds it for the board.
+    fn party_row(
+        name: &str,
+        choices: DraftChoices,
+        decisions: Vec<Decision>,
+    ) -> (DraftSummary, Vec<Decision>) {
+        (
+            DraftSummary {
+                id: "0b6f4c2e-0000-4000-8000-000000000000".into(),
+                name: name.into(),
+                status: DraftStatus::Draft,
+                player: "Piotr".into(),
+                pending: 0,
+                class_name: None,
+                species_name: None,
+                background_name: None,
+                totals: Scores::default(),
+                choices,
+                rolls: None,
+            },
+            decisions,
+        )
+    }
+
+    #[test]
+    fn submit_requires_an_empty_todo_list() {
+        let catalog = catalog();
+        let rules = CampaignRules::default();
+        let mut choices = DraftChoices {
+            method: Some(AbilityMethod::StandardArray),
+            base: Some(scores(15, 14, 13, 12, 10, 8)),
+            class: Some(CLERIC.into()),
+            species: Some(HUMAN.into()),
+            background: Some(ACOLYTE.into()),
+            ..DraftChoices::default()
+        };
+        let to_do = |choices: &DraftChoices| {
+            let found = decisions(&catalog, choices, rules.starting_level);
+            pending(Some(&catalog), &rules, choices, "Al", None, &found)
+        };
+        // Everything the class, the species, the background and the equipment
+        // ask for is still open, so nothing is submitted.
+        let open = to_do(&choices);
+        assert!(open.len() >= 6, "{open:?}");
+        assert_eq!(submit_refusal(&open), Err("draft_incomplete"));
+
+        // Answer every decision the walker opens, then whatever answering opened
+        // in turn: the Human's feat is only chosen here.
+        for _ in 0..3 {
+            for decision in decisions(&catalog, &choices, rules.starting_level) {
+                let values: Vec<String> = match &decision.kind {
+                    DecisionKind::Trait { choices: pools, .. } => pools
+                        .iter()
+                        .flat_map(|pool| {
+                            pool.options
+                                .iter()
+                                .take(usize::from(pool.count))
+                                .map(|option| option.value.clone())
+                        })
+                        .collect(),
+                    DecisionKind::Items { count, options } => options
+                        .iter()
+                        .take(usize::from(*count))
+                        .map(|option| option.value.clone())
+                        .collect(),
+                    DecisionKind::Size { options } => {
+                        options.first().cloned().into_iter().collect()
+                    }
+                    DecisionKind::Asi { .. } => {
+                        let mut deltas = BTreeMap::new();
+                        if let DecisionKind::Asi {
+                            points, cap, open, ..
+                        } = &decision.kind
+                        {
+                            let mut left = *points;
+                            for key in open {
+                                if left == 0 {
+                                    break;
+                                }
+                                let give = left.min(*cap);
+                                deltas.insert(key.clone(), give);
+                                left -= give;
+                            }
+                        }
+                        choices.asi.insert(decision.key.clone(), deltas);
+                        continue;
+                    }
+                    DecisionKind::Unsupported { .. } => Vec::new(),
+                };
+                choices.picks.insert(decision.key.clone(), values);
+            }
+        }
+        choices.equipment.insert(CLERIC.into(), "kit".into());
+        choices.equipment.insert(ACOLYTE.into(), "kit".into());
+
+        let done = to_do(&choices);
+        assert_eq!(done, Vec::new(), "{done:?}");
+        assert_eq!(submit_refusal(&done), Ok(()));
+        // No usable scores, no submit either.
+        assert_eq!(
+            submit_refusal(&[Pending {
+                step: Step::Abilities,
+                key: "abilities".into(),
+                label: "Assign your ability scores".into(),
+            }]),
+            Err("draft_incomplete")
+        );
+    }
+
+    #[test]
+    fn pending_rechecks_scores_against_the_current_rules() {
+        let choices = DraftChoices {
+            method: Some(AbilityMethod::Manual),
+            base: Some(scores(18, 10, 10, 10, 10, 10)),
+            ..DraftChoices::default()
+        };
+        let open = |rules: &CampaignRules| {
+            pending(None, rules, &choices, "Al", None, &[])
+                .into_iter()
+                .any(|item| item.key == "abilities")
+        };
+        let manual = CampaignRules {
+            ability_methods: vec![AbilityMethod::Manual],
+            ..CampaignRules::default()
+        };
+        assert!(!open(&manual));
+        // The GM turned manual scores off after the draft was finished.
+        assert!(open(&CampaignRules::default()));
+    }
+
+    #[test]
+    fn party_summary_reports_uncovered_skills() {
+        let catalog = catalog();
+        let cleric = format!("{CLERIC}#2wUNkQzS4vL9nR6D#1");
+        let al = DraftChoices {
+            class: Some(CLERIC.into()),
+            background: Some(ACOLYTE.into()),
+            picks: BTreeMap::from([(
+                cleric.clone(),
+                ["skills:his", "skills:med"].map(str::to_owned).to_vec(),
+            )]),
+            ..DraftChoices::default()
+        };
+        // The background grants Insight and Religion; the class picked History
+        // and Medicine, leaving Persuasion (`skills:per`) of the five it offers.
+        let found = decisions(&catalog, &al, 1);
+        // Coverage is measured against every skill the world's content names,
+        // not only the pools these drafts happened to open.
+        let world = catalog_skills(&catalog);
+        assert!(world.contains_key("skills:ath"), "{world:?}");
+        let party = party_summary(&[party_row("Al", al.clone(), found)], &world);
+        assert_eq!(
+            party
+                .skills
+                .iter()
+                .map(|(skill, names)| (skill.as_str(), names.as_slice()))
+                .collect::<Vec<_>>(),
+            [
+                ("History", &["Al".to_owned()][..]),
+                ("Insight", &["Al".to_owned()][..]),
+                ("Medicine", &["Al".to_owned()][..]),
+                ("Religion", &["Al".to_owned()][..]),
+            ]
+        );
+        assert!(party.uncovered.contains(&"Persuasion".to_owned()));
+        assert!(party.uncovered.contains(&"Athletics".to_owned()));
+        assert!(!party.uncovered.contains(&"Insight".to_owned()));
+
+        // A second character who picks Persuasion covers it (Athletics stays a gap), and the
+        // table lists both names for History.
+        let bryn = DraftChoices {
+            class: Some(CLERIC.into()),
+            picks: BTreeMap::from([(
+                cleric,
+                ["skills:his", "skills:per"].map(str::to_owned).to_vec(),
+            )]),
+            ..DraftChoices::default()
+        };
+        let party = party_summary(
+            &[
+                party_row("Al", al.clone(), decisions(&catalog, &al, 1)),
+                party_row("Bryn", bryn.clone(), decisions(&catalog, &bryn, 1)),
+            ],
+            &world,
+        );
+        assert!(!party.uncovered.contains(&"Persuasion".to_owned()));
+        assert!(party.uncovered.contains(&"Athletics".to_owned()));
+        assert_eq!(
+            party
+                .skills
+                .iter()
+                .find(|(skill, _)| skill == "History")
+                .map(|(_, names)| names.clone()),
+            Some(vec!["Al".to_owned(), "Bryn".to_owned()])
+        );
+
+        // An unnamed draft counts under its player's name.
+        let empty = party_summary(
+            &[party_row("", DraftChoices::default(), Vec::new())],
+            &BTreeMap::new(),
+        );
+        assert!(empty.skills.is_empty());
+        assert!(empty.uncovered.is_empty());
+    }
+
+    #[test]
+    fn details_accept_only_allowlisted_keys() {
+        // The plan's allowlist, and nothing else.
+        assert_eq!(
+            DETAIL_LABELS.map(|(key, _)| key),
+            [
+                "alignment",
+                "faith",
+                "gender",
+                "age",
+                "height",
+                "weight",
+                "eyes",
+                "hair",
+                "skin",
+                "appearance",
+                "trait",
+                "ideal",
+                "bond",
+                "flaw",
+                "backstory",
+            ]
+        );
+        assert_eq!(
+            validate_detail("backstory", "  Raised in the temple.  "),
+            Ok("Raised in the temple.".into())
+        );
+        // Every field is optional; an emptied one stores nothing.
+        assert_eq!(validate_detail("alignment", "   "), Ok(String::new()));
+        assert_eq!(
+            validate_detail("password", "hunter2"),
+            Err("invalid_detail")
+        );
+        assert_eq!(validate_detail("Backstory", "x"), Err("invalid_detail"));
+        assert_eq!(
+            validate_detail("ideal", &"x".repeat(DETAIL_MAX + 1)),
+            Err("invalid_detail")
+        );
+        assert_eq!(
+            validate_detail("ideal", &"x".repeat(DETAIL_MAX)),
+            Ok("x".repeat(DETAIL_MAX))
+        );
+    }
+
+    #[test]
+    fn note_bounds() {
+        assert_eq!(
+            validate_note("  Pick a different deity. \n"),
+            Ok("Pick a different deity.".into())
+        );
+        assert_eq!(validate_note("   "), Err("invalid_note"));
+        assert_eq!(
+            validate_note(&"x".repeat(NOTE_MAX + 1)),
+            Err("invalid_note")
+        );
+        assert_eq!(
+            validate_note(&"x".repeat(NOTE_MAX)),
+            Ok("x".repeat(NOTE_MAX))
+        );
+        // The hit points the review step shows are level one's.
+        assert_eq!(hit_points("d8", 13), 9);
+        assert_eq!(hit_points("d12", 8), 11);
+        // A CON modifier can only take a level-one character so far.
+        assert_eq!(hit_points("d4", 1), 0);
+        assert_eq!(hit_points("", 10), 0);
     }
 }

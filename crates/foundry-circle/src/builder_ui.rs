@@ -9,16 +9,18 @@ use dioxus::prelude::*;
 use tartan_ui_core::{Feedback, FeedbackKind, FilterChoice, FilterOption, ResourceLink};
 use tartan_ui_dioxus::{
     CardGrid, CheckboxFilterGroup, DashboardHeader, DetailDisclosure, EmptyState, FeedbackBanner,
-    Field, Panel, ResourceCard, SelectField,
+    Field, Panel, ResourceCard, SelectField, TagList,
 };
 
 use crate::{
     ConsoleShell, Role, Route,
     builder::{
-        AbilityMethod, AbilityRoll, BuilderView, CampaignRules, CampaignView, CharactersView,
-        ClassDetails, ClassOption, Decision, DecisionKind, DraftPatch, DraftSummary, EquipmentPlan,
-        Opt, OriginDetails, POINT_BUY_BUDGET, PackInfo, Pending, Rolls, SRD_ATTRIBUTION, Scores,
-        Slot, Step, TraitMode, ability_label, modifier, point_buy_cost, size_label, validate_asi,
+        AbilityMethod, AbilityRoll, BuilderData, BuilderView, CampaignRules, CampaignView,
+        CharactersView, ClassDetails, ClassOption, DETAIL_LABELS, DETAIL_MAX, Decision,
+        DecisionKind, DraftPatch, DraftStatus, DraftSummary, EquipmentPlan, NOTE_MAX, Opt,
+        OriginDetails, POINT_BUY_BUDGET, PackInfo, PartySummary, Pending, Rolls, SRD_ATTRIBUTION,
+        Scores, Slot, Step, TraitMode, ability_label, hit_points, modifier, point_buy_cost,
+        size_label, trait_options, validate_asi,
     },
 };
 
@@ -63,6 +65,16 @@ async fn update_draft(
 #[server]
 async fn roll_abilities(id: String) -> Result<Result<BuilderView, String>, ServerFnError> {
     Ok(crate::http::builder_store::roll_abilities(&id).await)
+}
+
+#[server]
+async fn submit_draft(id: String) -> Result<Option<String>, ServerFnError> {
+    Ok(crate::http::builder_store::submit_draft(&id).await)
+}
+
+#[server]
+async fn request_changes(id: String, note: String) -> Result<Option<String>, ServerFnError> {
+    Ok(crate::http::builder_store::request_changes(&id, &note).await)
 }
 
 // Slice one ships these two server functions; the board controls that call
@@ -115,6 +127,15 @@ pub fn CharactersPage() -> Element {
             }
         });
     });
+    let ask = EventHandler::new(move |(id, note): (String, String)| {
+        spawn(async move {
+            match request_changes(id, note).await {
+                Ok(None) => reload.restart(),
+                Ok(Some(code)) => error.set(Some(code_message(&code).into())),
+                Err(_) => error.set(Some(UNAVAILABLE.into())),
+            }
+        });
+    });
     let view = match &*view.read() {
         Some(Ok(view)) => view.clone(),
         _ => CharactersView::SignedOut,
@@ -125,7 +146,7 @@ pub fn CharactersPage() -> Element {
     };
     rsx! {
         ConsoleShell { account,
-            CharactersBoard { view, create, save, sync, error: error() }
+            CharactersBoard { view, create, save, sync, ask, error: error() }
         }
     }
 }
@@ -134,7 +155,7 @@ pub fn CharactersPage() -> Element {
 #[component]
 pub fn BuilderPage(id: String) -> Element {
     let load = id.clone();
-    let view = use_server_future(move || {
+    let mut reload = use_server_future(move || {
         let id = load.clone();
         async move { builder_view(id).await }
     })?;
@@ -159,12 +180,13 @@ pub fn BuilderPage(id: String) -> Element {
             busy.set(false);
         });
     });
+    let roll_id = id.clone();
     let roll = EventHandler::new(move |()| {
         if busy() {
             return;
         }
         busy.set(true);
-        let id = id.clone();
+        let id = roll_id.clone();
         spawn(async move {
             match roll_abilities(id).await {
                 Ok(Ok(view)) => fresh.set(Some(view)),
@@ -174,7 +196,28 @@ pub fn BuilderPage(id: String) -> Element {
             busy.set(false);
         });
     });
-    let mut view = match (fresh(), &*view.read()) {
+    // Submitting shows the server's own answer: the closed draft, its status and
+    // whatever note the DM left last time.
+    let submit_id = id.clone();
+    let submit = EventHandler::new(move |()| {
+        if busy() {
+            return;
+        }
+        busy.set(true);
+        let id = submit_id.clone();
+        spawn(async move {
+            match submit_draft(id).await {
+                Ok(None) => {
+                    fresh.set(None);
+                    reload.restart();
+                }
+                Ok(Some(code)) => error.set(Some(code_message(&code).into())),
+                Err(_) => error.set(Some(UNAVAILABLE.into())),
+            }
+            busy.set(false);
+        });
+    });
+    let mut view = match (fresh(), &*reload.read()) {
         (Some(view), _) => view,
         (None, Some(Ok(view))) => view.clone(),
         _ => BuilderView::Missing,
@@ -184,7 +227,7 @@ pub fn BuilderPage(id: String) -> Element {
     }
     rsx! {
         ConsoleShell { account: None,
-            BuilderSheet { view, patch, roll, error: error() }
+            BuilderSheet { view, patch, roll, submit, error: error() }
         }
     }
 }
@@ -215,6 +258,10 @@ fn code_message(code: &str) -> &'static str {
         "asi_cap" => "That ability cannot take more than the background allows.",
         "asi_locked" => "The background does not improve that ability.",
         "asi_max" => "No ability score may rise above 20.",
+        "invalid_detail" => "That sheet field is not one the builder stores, or it is too long.",
+        "draft_incomplete" => "Finish everything on the to do list before submitting.",
+        "not_submitted" => "That draft is not waiting for review.",
+        "invalid_note" => "Write a note of one to a thousand characters.",
         "world_not_ready" => "Start the session and open the world, then sync again.",
         "world_mismatch" => "The running world is not this campaign's world.",
         "not_dnd5e" => "The running world does not use the dnd5e system.",
@@ -234,6 +281,7 @@ fn CharactersBoard(
     create: EventHandler<String>,
     save: EventHandler<(String, bool, CampaignRules)>,
     sync: EventHandler<String>,
+    ask: EventHandler<(String, String)>,
     error: Option<String>,
 ) -> Element {
     let content = match view {
@@ -324,11 +372,12 @@ fn CharactersBoard(
                     }
                     Panel {
                         title: Some("Party".to_string()),
-                        description: Some("Every draft in your worlds, with its honest rolls.".to_string()),
+                        description: Some("Every draft in your worlds, with its honest rolls and what it still owes.".to_string()),
                         if data.party.is_empty() {
                             p { class: "tartan-muted", "Nobody has started a character yet." }
                         } else {
-                            PartyTable { drafts: data.party.clone() }
+                            PartyTable { drafts: data.party.clone(), ask }
+                            PartySkills { coverage: data.coverage.clone() }
                         }
                     }
                 }
@@ -465,18 +514,26 @@ fn CampaignRulesForm(
     }
 }
 
-/// Name, player, method, scores and the dice behind each roll.
+/// The DM board: every draft with its status, what it still owes, its class,
+/// species, background, totals and the dice behind its rolls; a submitted draft
+/// can be sent back with a note.
 #[component]
-fn PartyTable(drafts: Vec<DraftSummary>) -> Element {
+fn PartyTable(drafts: Vec<DraftSummary>, ask: EventHandler<(String, String)>) -> Element {
     rsx! {
         table { class: "builder-party",
             thead {
                 tr {
                     th { "Character" }
                     th { "Player" }
+                    th { "Status" }
+                    th { "To do" }
+                    th { "Class" }
+                    th { "Species" }
+                    th { "Background" }
                     th { "Method" }
                     th { "Scores" }
                     th { "Rolls" }
+                    th { "Review" }
                 }
             }
             tbody {
@@ -484,8 +541,13 @@ fn PartyTable(drafts: Vec<DraftSummary>) -> Element {
                     tr { key: "{draft.id}",
                         td { a { href: "/api/console/characters/{draft.id}", {draft_title(&draft)} } }
                         td { {draft.player.clone()} }
+                        td { span { class: "tartan-tag", {draft.status.label()} } }
+                        td { {draft.pending.to_string()} }
+                        td { {draft.class_name.clone().unwrap_or_else(|| "–".into())} }
+                        td { {draft.species_name.clone().unwrap_or_else(|| "–".into())} }
+                        td { {draft.background_name.clone().unwrap_or_else(|| "–".into())} }
                         td { {method_label(draft.choices.method)} }
-                        td { {scores_line(draft.choices.base)} }
+                        td { {scores_line(draft.choices.base.map(|_| draft.totals))} }
                         td {
                             if let Some(rolls) = &draft.rolls {
                                 for (index, set) in rolls.sets.iter().enumerate() {
@@ -496,6 +558,84 @@ fn PartyTable(drafts: Vec<DraftSummary>) -> Element {
                                 }
                             }
                         }
+                        td {
+                            ChangeRequest {
+                                id: draft.id.clone(),
+                                name: draft_title(&draft),
+                                submitted: draft.status == DraftStatus::Submitted,
+                                ask,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A submitted draft's "request changes" note; a draft that is not waiting for
+/// review has the form disabled rather than hidden, so the board stays one shape.
+#[component]
+fn ChangeRequest(
+    id: String,
+    name: String,
+    submitted: bool,
+    ask: EventHandler<(String, String)>,
+) -> Element {
+    let mut note = use_signal(String::new);
+    let field = format!("note-{id}");
+    rsx! {
+        div { class: "builder-note",
+            label { r#for: "{field}", class: "tartan-muted", "Request changes to {name}" }
+            textarea {
+                id: "{field}",
+                name: "{field}",
+                maxlength: "{NOTE_MAX}",
+                disabled: !submitted,
+                value: "{note}",
+                oninput: move |event: FormEvent| note.set(event.value()),
+            }
+            button {
+                class: "tartan-button",
+                r#type: "button",
+                disabled: !submitted,
+                onclick: {
+                    let id = id.clone();
+                    move |_| ask.call((id.clone(), note()))
+                },
+                "Request changes"
+            }
+        }
+    }
+}
+
+/// The skill coverage table: one row per skill somebody holds, then the skills
+/// nobody in the party has.
+#[component]
+fn PartySkills(coverage: PartySummary) -> Element {
+    rsx! {
+        h3 { "Skill coverage" }
+        if coverage.skills.is_empty() && coverage.uncovered.is_empty() {
+            p { class: "tartan-muted", "No skills chosen yet." }
+        }
+        table { class: "builder-party",
+            thead {
+                tr {
+                    th { "Skill" }
+                    th { "Characters" }
+                }
+            }
+            tbody {
+                for (skill, names) in coverage.skills.clone() {
+                    tr { key: "{skill}",
+                        td { "{skill}" }
+                        td { {names.join(", ")} }
+                    }
+                }
+                for skill in coverage.uncovered.clone() {
+                    tr { key: "uncovered-{skill}", class: "tartan-muted",
+                        td { "{skill}" }
+                        td { "nobody" }
                     }
                 }
             }
@@ -509,6 +649,7 @@ fn BuilderSheet(
     view: BuilderView,
     patch: EventHandler<DraftPatch>,
     roll: EventHandler<()>,
+    submit: EventHandler<()>,
     error: Option<String>,
 ) -> Element {
     let BuilderView::Ready(data) = view else {
@@ -664,9 +805,11 @@ fn BuilderSheet(
                         onchange: move |event: FormEvent| patch.call(DraftPatch::Name(event.value())),
                     }
                 }
+                DetailsStep { details: data.choices.details.clone(), editable, patch }
             }
-            if !data.pending.is_empty() {
-                PendingList { pending: data.pending.clone() }
+            section { id: "review", class: "builder-step-body", aria_label: "Review",
+                h2 { "Review" }
+                ReviewStep { data: data.as_ref().clone(), submit }
             }
         div { class: "builder-sticky",
             span { "{data.pending.len()} to do" }
@@ -817,6 +960,208 @@ fn PendingList(pending: Vec<Pending>) -> Element {
                 li { key: "{item.key}",
                     a { href: "#{item.step.anchor()}", "{item.label}" }
                 }
+            }
+        }
+    }
+}
+
+/// The details step's three groups of optional sheet fields.
+const DETAIL_GROUPS: [(&str, &[&str]); 3] = [
+    (
+        "About you",
+        &["alignment", "faith", "gender", "age", "height", "weight"],
+    ),
+    ("Appearance", &["eyes", "hair", "skin", "appearance"]),
+    ("Story", &["trait", "ideal", "bond", "flaw", "backstory"]),
+];
+
+/// The optional sheet fields: three native disclosure groups of textareas.
+#[component]
+fn DetailsStep(
+    details: BTreeMap<String, String>,
+    editable: bool,
+    patch: EventHandler<DraftPatch>,
+) -> Element {
+    rsx! {
+        p { class: "tartan-muted", "All of this is optional; your DM reads it with the rest of the draft." }
+        for (group, fields) in DETAIL_GROUPS {
+            details { class: "builder-details", open: true, key: "{group}",
+                summary { "{group}" }
+                for field in fields.iter() {
+                    DetailField {
+                        key: "{field}",
+                        field: (*field).to_string(),
+                        value: details.get(*field).cloned().unwrap_or_default(),
+                        editable,
+                        patch,
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One sheet field, with the label the actor's own field carries.
+#[component]
+fn DetailField(
+    field: String,
+    value: String,
+    editable: bool,
+    patch: EventHandler<DraftPatch>,
+) -> Element {
+    let label = DETAIL_LABELS
+        .iter()
+        .find(|(key, _)| *key == field.as_str())
+        .map_or_else(|| field.clone(), |(_, label)| (*label).to_owned());
+    let id = format!("detail-{field}");
+    let key = field.clone();
+    rsx! {
+        Field { id: id.clone(), label,
+            textarea {
+                id: "{id}",
+                name: "{id}",
+                maxlength: "{DETAIL_MAX}",
+                disabled: !editable,
+                value: "{value}",
+                onchange: move |event: FormEvent| patch.call(DraftPatch::Detail {
+                    key: key.clone(),
+                    value: event.value(),
+                }),
+            }
+        }
+    }
+}
+
+/// The review step: the sheet in brief, the to-do list and the submit button.
+#[component]
+fn ReviewStep(data: BuilderData, submit: EventHandler<()>) -> Element {
+    // The labels the decisions hold for the trait keys the draft already has.
+    let mut labels: BTreeMap<String, String> = BTreeMap::new();
+    let mut features = Vec::new();
+    for details in [
+        data.class.as_ref().map(|class| &class.decisions),
+        data.species_details
+            .as_ref()
+            .map(|origin| &origin.decisions),
+        data.background_details
+            .as_ref()
+            .map(|origin| &origin.decisions),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for decision in details {
+            for option in trait_options(decision) {
+                labels
+                    .entry(option.value.clone())
+                    .or_insert_with(|| option.label.clone());
+            }
+        }
+    }
+    if let Some(class) = &data.class {
+        features.extend(class.features.iter().cloned());
+    }
+    for origin in [&data.species_details, &data.background_details]
+        .into_iter()
+        .flatten()
+    {
+        features.extend(origin.features.iter().cloned());
+    }
+    let proficiencies: Vec<String> = data
+        .granted
+        .iter()
+        .map(|key| labels.get(key).cloned().unwrap_or_else(|| key.clone()))
+        .collect();
+    let rows: Vec<(String, &str, u8, String)> = Scores::LABELS
+        .iter()
+        .map(|(field, label)| {
+            let total = data.totals.get(field).unwrap_or(0);
+            let modifier = modifier(total);
+            let modifier = if modifier >= 0 {
+                format!("+{modifier}")
+            } else {
+                modifier.to_string()
+            };
+            (field.to_string(), *label, total, modifier)
+        })
+        .collect();
+    let hit_point_total = data.class.as_ref().map(|class| {
+        (
+            class.hit_die.clone(),
+            hit_points(&class.hit_die, data.totals.con),
+        )
+    });
+    rsx! {
+        p { class: "tartan-muted",
+            "Level 1"
+            if let Some(class) = &data.class {
+                " · {class.name} ({class.source})"
+            }
+            if let Some(origin) = &data.species_details {
+                " · {origin.name}"
+            }
+            if let Some(origin) = &data.background_details {
+                " · {origin.name}"
+            }
+        }
+        div { class: "builder-abilities",
+            for (key, label, total, modifier) in rows {
+                div { class: "builder-ability", key: "{key}",
+                    span { class: "builder-ability__label", "{label}" }
+                    span { class: "builder-ability__math", "{total}" }
+                    span { class: "builder-ability__modifier", "({modifier})" }
+                }
+            }
+        }
+        if let Some((hit_die, hit_points)) = hit_point_total {
+            p { "Hit points {hit_points} (level 1: the {hit_die} maximum plus your Constitution modifier)" }
+        }
+        h3 { "Proficiencies" }
+        if proficiencies.is_empty() {
+            p { class: "tartan-muted", "Nothing yet; choose a class and an origin." }
+        } else {
+            TagList { tags: proficiencies }
+        }
+        h3 { "Features" }
+        for feature in features {
+            DetailDisclosure { key: "{feature.name}", label: feature.name.clone(),
+                p { {feature.text.clone()} }
+            }
+        }
+        h3 { "Equipment" }
+        if data.equipment.is_empty() {
+            p { class: "tartan-muted", "Nothing yet." }
+        }
+        for plan in &data.equipment {
+            p { key: "{plan.owner}",
+                "{plan.owner_name}: "
+                match plan.chosen(&data.choices) {
+                    Some(option) => rsx! { "{option.label}" },
+                    None => rsx! { "not chosen yet" },
+                }
+            }
+        }
+        h3 { "To do" }
+        if data.pending.is_empty() {
+            p { class: "tartan-muted", "Everything is answered." }
+        } else {
+            PendingList { pending: data.pending.clone() }
+        }
+        if data.class.as_ref().is_some_and(|class| class.caster) {
+            p { class: "tartan-muted", "Pick your spells in Foundry once your GM approves this character." }
+        }
+        if data.status == DraftStatus::Draft {
+            button {
+                id: "draft-submit",
+                class: "tartan-button",
+                r#type: "button",
+                disabled: !data.editable || !data.pending.is_empty(),
+                onclick: move |_| submit.call(()),
+                "Submit for review"
+            }
+        } else {
+            p { class: "tartan-muted",
+                "{data.status.label()} — your DM reviews it, and any note they leave shows at the top of this page."
             }
         }
     }
@@ -1611,6 +1956,10 @@ mod tests {
             },
             rolls,
             pending: 0,
+            class_name: None,
+            species_name: None,
+            background_name: None,
+            totals: Scores::default(),
         }
     }
 
@@ -1630,6 +1979,7 @@ mod tests {
             campaigns: vec![campaign(true)],
             mine: vec![summary("Al", AbilityMethod::StandardArray, None)],
             party: Vec::new(),
+            coverage: PartySummary::default(),
             ready_world: Some("canary".into()),
         }
     }
@@ -1684,6 +2034,7 @@ mod tests {
             source: "Character Classes".into(),
             hit_die: "d8".into(),
             primary_ability: "Wisdom".into(),
+            caster: true,
             features: vec![crate::builder::Feature {
                 name: "Divine Order".into(),
                 text: "You have dedicated yourself to one sacred role.".into(),
@@ -1721,8 +2072,9 @@ mod tests {
             let create = EventHandler::new(|_: String| ());
             let save = EventHandler::new(|_: (String, bool, CampaignRules)| ());
             let sync = EventHandler::new(|_: String| ());
+            let ask = EventHandler::new(|_: (String, String)| ());
             rsx! {
-                CharactersBoard { view, create, save, sync, error: None }
+                CharactersBoard { view, create, save, sync, ask, error: None }
             }
         }
         dioxus::ssr::render_element(rsx! {
@@ -1735,8 +2087,9 @@ mod tests {
         fn Harness(view: BuilderView) -> Element {
             let patch = EventHandler::new(|_: DraftPatch| ());
             let roll = EventHandler::new(|()| ());
+            let submit = EventHandler::new(|()| ());
             rsx! {
-                BuilderSheet { view, patch, roll, error: None }
+                BuilderSheet { view, patch, roll, submit, error: None }
             }
         }
         dioxus::ssr::render_element(rsx! {
@@ -1904,6 +2257,7 @@ mod tests {
             source: "Character Classes".into(),
             hit_die: "d8".into(),
             primary_ability: "Dexterity".into(),
+            caster: false,
             features: Vec::new(),
             decisions: vec![Decision {
                 key: format!("{uuid}#4doj2kFD8sIYiX8X#1"),
@@ -1918,7 +2272,7 @@ mod tests {
                         count: 2,
                         options: [
                             ("skills:ins", "Insight"),
-                            ("skills:per", "Perception"),
+                            ("skills:prc", "Perception"),
                             ("skills:slt", "Sleight of Hand"),
                             ("skills:ste", "Stealth"),
                         ]
@@ -1937,12 +2291,12 @@ mod tests {
     fn expertise_options_are_never_already_had() {
         // The walker offers an Expertise decision only the skills the draft is
         // proficient with, so every offer must stay pickable.
-        let granted = ["skills:ins", "skills:per", "skills:ste"]
+        let granted = ["skills:ins", "skills:prc", "skills:ste"]
             .map(str::to_owned)
             .to_vec();
         let html = render_class(expertise_class(TraitMode::Expertise), granted);
         assert!(html.contains("Gain expertise in a trait"));
-        for value in ["skills:ins", "skills:per", "skills:slt", "skills:ste"] {
+        for value in ["skills:ins", "skills:prc", "skills:slt", "skills:ste"] {
             assert!(
                 html.contains(&format!("value=\"{value}\"")),
                 "{value} missing"
@@ -2073,6 +2427,150 @@ mod tests {
         assert!(html.contains("12 + 2 = 14"), "{html}");
         assert!(html.contains("10 + 1 = 11"), "{html}");
         assert!(html.contains("(+2)"), "{html}");
+    }
+
+    /// Whether the review step's submit button is disabled: the rendered
+    /// opening tag alone, so a disabled field elsewhere cannot answer for it.
+    fn submit_disabled(html: &str) -> bool {
+        let tag = html
+            .split("<button")
+            .find(|chunk| chunk.contains("draft-submit"))
+            .expect("a submit button");
+        tag[..tag.find('>').expect("the tag ends")].contains("disabled")
+    }
+
+    #[test]
+    fn review_shows_summary_and_blocks_submit_while_pending() {
+        let uuid = "Compendium.dnd5e.classes24.Item.phbclcCleric0000";
+        let mut data = builder_data(CampaignRules::default());
+        data.choices.class = Some(uuid.into());
+        data.class = Some(cleric_details(uuid));
+        // The cleric's pool labelled Insight, so the review names the skill the
+        // draft holds rather than its key.
+        data.granted = vec!["skills:ins".into()];
+        data.totals = Scores {
+            str: 15,
+            dex: 14,
+            con: 13,
+            int: 12,
+            wis: 10,
+            cha: 8,
+        };
+        data.equipment = vec![EquipmentPlan {
+            owner: uuid.into(),
+            owner_name: "Cleric".into(),
+            options: vec![crate::builder::EquipmentOption {
+                id: "kit".into(),
+                label: "Kit: Chain Shirt, Shield, Mace, 7 GP".into(),
+                items: Vec::new(),
+                gp: 7,
+                wealth: None,
+                manual: Vec::new(),
+            }],
+        }];
+        data.choices.equipment.insert(uuid.into(), "kit".into());
+        data.choices
+            .details
+            .insert("backstory".into(), "Raised in the temple.".into());
+        data.pending = vec![Pending {
+            step: Step::Class,
+            key: "class-skills".into(),
+            label: "Skill Proficiencies".into(),
+        }];
+        let html = render_sheet(BuilderView::Ready(Box::new(data.clone())));
+
+        // The sheet in brief: totals, level-one hit points, proficiencies,
+        // features, the equipment answer and the open work.
+        assert!(
+            html.contains("Hit points 9 (level 1: the d8 maximum"),
+            "{html}"
+        );
+        assert!(html.contains("(+2)"), "{html}");
+        assert!(html.contains("Insight"), "{html}");
+        assert!(html.contains("<summary>Divine Order</summary>"), "{html}");
+        assert!(
+            html.contains("Cleric: Kit: Chain Shirt, Shield, Mace, 7 GP"),
+            "{html}"
+        );
+        assert!(html.contains("Skill Proficiencies"), "{html}");
+        // A caster picks spells in Foundry until the builder has a spell step.
+        assert!(html.contains("Pick your spells in Foundry"), "{html}");
+        // The optional details are three disclosures of textareas.
+        assert!(html.contains("id=\"detail-backstory\""), "{html}");
+        assert!(html.contains("Raised in the temple."), "{html}");
+        assert!(html.contains("About you"), "{html}");
+        // Nothing is submitted while a choice is open.
+        assert!(html.contains("Submit for review"), "{html}");
+        assert!(submit_disabled(&html), "{html}");
+
+        // Answering the last choice enables it.
+        data.pending.clear();
+        let html = render_sheet(BuilderView::Ready(Box::new(data)));
+        assert!(!submit_disabled(&html), "{html}");
+    }
+
+    #[test]
+    fn dm_board_shows_status_pending_and_note_form() {
+        let mut data = data(Role::Gm);
+        let mut draft = summary("Bryn", AbilityMethod::Roll, Some(rolls()));
+        draft.status = DraftStatus::Submitted;
+        draft.pending = 3;
+        draft.class_name = Some("Cleric".into());
+        draft.species_name = Some("Human".into());
+        draft.background_name = Some("Acolyte".into());
+        data.party = vec![draft];
+        data.coverage = PartySummary {
+            skills: vec![("Insight".into(), vec!["Bryn".into()])],
+            uncovered: vec!["Perception".into()],
+        };
+        let html = render_board(CharactersView::Ready(Box::new(data)));
+
+        // One row per draft with what the DM reviews: status, open work, the
+        // roots' names, the scores and the honest dice.
+        assert!(html.contains("Submitted"), "{html}");
+        assert!(html.contains("<td>3</td>"), "{html}");
+        assert!(html.contains("Cleric"), "{html}");
+        assert!(html.contains("Human"), "{html}");
+        assert!(html.contains("Acolyte"), "{html}");
+        assert!(html.contains("4 3 1 6"), "{html}");
+        // The note form, enabled for a submitted draft.
+        assert!(html.contains("Request changes to Bryn"), "{html}");
+        assert!(
+            html.contains("note-0b6f4c2e-0000-4000-8000-000000000000"),
+            "{html}"
+        );
+        assert!(html.contains("maxlength=\"1000\""), "{html}");
+        let tag = html
+            .split("<button")
+            .find(|chunk| chunk.contains("Request changes"))
+            .expect("a request button");
+        assert!(
+            !tag[..tag.find('>').expect("tag ends")].contains("disabled"),
+            "{html}"
+        );
+
+        // The coverage table names what the party has and what nobody has.
+        assert!(html.contains("Skill coverage"), "{html}");
+        assert!(html.contains("Perception"), "{html}");
+        assert!(html.contains("nobody"), "{html}");
+    }
+
+    #[test]
+    fn player_sees_the_dm_note() {
+        let mut data = builder_data(CampaignRules::default());
+        data.status = DraftStatus::Submitted;
+        data.editable = false;
+        data.dm_note = Some("Pick a deity that fits the campaign.".into());
+        let html = render_sheet(BuilderView::Ready(Box::new(data)));
+
+        assert!(
+            html.contains("DM note: Pick a deity that fits the campaign."),
+            "{html}"
+        );
+        assert!(html.contains("Submitted"), "{html}");
+        assert!(html.contains("your DM reviews it"), "{html}");
+        // A submitted draft offers no second submit.
+        assert!(!html.contains("Submit for review"), "{html}");
     }
 
     #[test]

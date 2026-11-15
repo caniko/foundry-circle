@@ -114,7 +114,7 @@
             "count": 3,
             "options": [
               { "key": "skills:ins", "label": "Insight" },
-              { "key": "skills:per", "label": "Perception" },
+              { "key": "skills:per", "label": "Persuasion" },
               { "key": "skills:ste", "label": "Stealth" },
               { "key": "tool:thief", "label": "Thieves' Tools" }
             ]

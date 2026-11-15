@@ -25,16 +25,16 @@ mutations are not implemented.
 Session zero runs in the console. A GM opens character creation for an adopted
 world and picks the ability methods the players may use; PostgreSQL holds the
 rules and the drafts (`campaign_rules`, `character_drafts`) while Foundry stays
-authoritative for world documents. Nothing here writes to Foundry yet.
+authoritative for world documents. Approval is the only write to Foundry.
 
 - `GET /api/console/characters` lists your drafts and, for GMs, the session-zero
   rules and the party board; `/api/console/characters/{id}` is one draft.
 - Server functions: `characters_view`, `builder_view`, `save_rules`,
   `create_draft`, `update_draft`, `roll_abilities`, `grant_reroll`,
-  `delete_draft`, `submit_draft` and `request_changes`. Every mutation rejects a
-  missing session with `not_signed_in`, a wrong role with `permission_denied`,
-  and re-validates the scores, the name, the draft's owner and the campaign's
-  open flag.
+  `delete_draft`, `submit_draft`, `request_changes` and `approve_draft`. Every
+  mutation rejects a missing session with `not_signed_in`, a wrong role with
+  `permission_denied`, and re-validates the scores, the name, the draft's owner
+  and the campaign's open flag.
 - Ability scores follow the chosen method: the standard array, 27-point buy,
   4d6 drop lowest or manual. Rolls come from the server's OS random source,
   are written once per draft, and `update_draft` never writes the `rolls`
@@ -110,6 +110,41 @@ back to `draft` with `request_changes` and a note of one to a thousand
 characters: it is stored in `dm_note`, audited, and shown at the top of the
 player's sheet.
 
+### Approval
+
+`approve_draft` is the only operation that writes to Foundry. An admin, or the GM
+holding the running session for the draft's world, approves a `submitted` draft
+while the driver reports the world `Ready` and its id is the draft's own; the
+draft row is locked for the whole approval, so two approvals cannot both create.
+The broker recomputes the to-do list from the world's real content (the same
+function `submit_draft` uses) and refuses an unfinished draft with
+`draft_incomplete`. A player who has never entered the world gets their Foundry
+user here, through the same call entry makes, and the mapping is recorded in
+`foundry_users`; no password is set — entry does that on the player's first join.
+The draft becomes `approved` with Foundry's `actor_id` only after the world has
+answered, and a best-effort chat message posts the name, class, method and rolls.
+Refusals are audited with their code; the codes are `permission_denied`,
+`world_not_ready`, `world_mismatch`, `draft_not_submitted`, `draft_incomplete`,
+`module_missing`, `module_outdated`, `foundry_rejected` and the two database
+codes.
+
+The companion module's `createCharacter(args)` does the world write (below):
+it returns an existing actor whose `flags["foundry-circle"].draftId` matches the
+draft, so a retry after a timeout never creates a second one, builds the actor in
+memory, applies every advancement with dnd5e's own `apply`/`automaticApplicationValue`
+in `AdvancementManager`'s order, and calls `Actor.create` once. The player owns the
+sheet through `CONST.DOCUMENT_OWNERSHIP_LEVELS.OWNER` and their user points at it.
+The broker never sends JavaScript, only the one bounded JSON argument
+(`WorldOp::CharacterCreate`), which `POST /api/v1/world/commands` does not expose.
+
+**C4 and C5 must pass on a disposable dnd5e 6.1.0 world before canix pins this
+revision.** Build the fixture character (Human, Acolyte, Cleric 1) by hand there,
+approve the same draft, fetch both actors and compare `system.abilities`,
+`system.skills`, `system.tools`, `system.traits`, hit points and the multiset of
+item names; every granted item must carry `flags.dnd5e.sourceId` and
+`advancementOrigin`. The player must then open the sheet as owner and
+`game.users.get(id).character.id` must equal the new actor's id.
+
 ### Rules content
 
 Content is the world's own compendium packs, cached per world in
@@ -126,7 +161,9 @@ The module also reports the world's compendium uuid redirects
 dnd5e points a premium module's pack prefixes at the SRD packs while that module
 is inactive, so every lookup in the builder applies them and a kit that names
 the Player's Handbook's equipment resolves the SRD item. A module older than
-the function sends no redirects and syncs as before.
+the function sends no redirects and syncs as before. Its `createCharacter(args)`
+is the one world write; a module without the function fails closed with
+`module_outdated`.
 
 Install the module from this flake:
 

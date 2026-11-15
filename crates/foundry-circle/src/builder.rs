@@ -9,7 +9,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::Role;
 
@@ -1953,6 +1953,11 @@ pub struct CharactersData {
     pub coverage: PartySummary,
     /// The world the driver reports Ready; only it can sync its catalog.
     pub ready_world: Option<String>,
+    /// The viewer may approve: an admin, or the GM holding the running
+    /// session, while a world is ready. Only a hint; the approval re-checks.
+    pub can_approve: bool,
+    /// Where an approved character is played: `<playBaseUrl>/_circle/enter`.
+    pub play_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -2240,6 +2245,155 @@ pub fn pending(
     pending
 }
 
+/// The one `CharacterCreate` argument an approved draft becomes.
+///
+/// The scores are the draft's base: every bonus arrives as the advancement that
+/// grants it, so the module applies each exactly once. A decision's answer is
+/// the apply data its advancement takes, and every advancement without one is
+/// absent, which is what makes the module ask for the system's automatic value
+/// (`6.1.0:module/documents/advancement/advancement.mjs#L336-L350`).
+pub fn create_args(
+    catalog: &Catalog,
+    rules: &CampaignRules,
+    choices: &DraftChoices,
+    name: &str,
+    rolls: Option<&Rolls>,
+    draft_id: &str,
+    owner_user_id: &str,
+) -> Result<Value, &'static str> {
+    let level = rules.starting_level;
+    let decisions = decisions(catalog, choices, level);
+    // The same rule as submit: a draft with anything still open never reaches a
+    // world. `approve_draft` recomputes this from the world's real content.
+    submit_refusal(&pending(
+        Some(catalog),
+        rules,
+        choices,
+        name,
+        rolls,
+        &decisions,
+    ))?;
+    // dnd5e applies level 0 (species, then background) before the class, so the
+    // module adds its roots in that order.
+    let mut roots = Vec::with_capacity(3);
+    for (slot, kind) in [
+        (Slot::Species, "species"),
+        (Slot::Background, "background"),
+        (Slot::Class, "class"),
+    ] {
+        let item = catalog.root(choices, slot).ok_or("invalid_draft")?;
+        roots.push(json!({"uuid": item.uuid, "kind": kind}));
+    }
+    let mut answers = serde_json::Map::new();
+    for decision in &decisions {
+        let answer = match &decision.kind {
+            // A Trait's data is everything it grants plus what the player chose;
+            // its own `apply` writes both into the actor's traits.
+            DecisionKind::Trait { grants, .. } => {
+                let chosen: BTreeSet<&str> = grants
+                    .iter()
+                    .map(|option| option.value.as_str())
+                    .chain(
+                        choices
+                            .picks
+                            .get(&decision.key)
+                            .into_iter()
+                            .flatten()
+                            .map(String::as_str),
+                    )
+                    .collect();
+                json!({"chosen": chosen})
+            }
+            // ItemChoice and ItemGrant take the documents to embed.
+            DecisionKind::Items { .. } => json!({
+                "selected": choices.picks.get(&decision.key).cloned().unwrap_or_default()
+            }),
+            // The background's bonus: the configuration's own fixed points and
+            // the player's assignment, which `apply` adds to the base scores.
+            DecisionKind::Asi { fixed, .. } => {
+                let mut assignments = fixed.clone();
+                for (key, delta) in choices.asi.get(&decision.key).into_iter().flatten() {
+                    let total = assignments
+                        .get(key)
+                        .copied()
+                        .unwrap_or(0)
+                        .saturating_add(*delta);
+                    assignments.insert(key.clone(), total);
+                }
+                assignments.retain(|_, delta| *delta > 0);
+                json!({"type": "asi", "assignments": assignments})
+            }
+            DecisionKind::Size { .. } => {
+                let size = choices
+                    .picks
+                    .get(&decision.key)
+                    .and_then(|values| values.first())
+                    .ok_or("invalid_draft")?;
+                json!({"size": size})
+            }
+            // `pending` refused an unresolved unsupported step above.
+            DecisionKind::Unsupported { .. } => continue,
+        };
+        answers.insert(decision.key.clone(), answer);
+    }
+
+    // The chosen kits' documents and coin, or the gold that replaces a kit; the
+    // manual lines are what the DM still hands out.
+    let mut items: Vec<(String, u32)> = Vec::new();
+    let mut gp = 0_u32;
+    let mut wealth: Vec<String> = Vec::new();
+    let mut manual: Vec<String> = Vec::new();
+    for plan in equipment_plans(catalog, choices, rules) {
+        let option = plan.chosen(choices).ok_or("draft_incomplete")?;
+        gp = gp.saturating_add(option.gp);
+        wealth.extend(option.wealth.clone());
+        manual.extend(option.manual.clone());
+        for item in &option.items {
+            match items.iter_mut().find(|(uuid, _)| *uuid == item.uuid) {
+                Some((_, count)) => *count = count.saturating_add(item.count),
+                None => items.push((item.uuid.clone(), item.count)),
+            }
+        }
+    }
+
+    let base = choices.base.ok_or("invalid_draft")?;
+    let mut details = serde_json::Map::new();
+    let mut biography = String::new();
+    for (key, _) in DETAIL_LABELS {
+        let Some(value) = choices.details.get(key) else {
+            continue;
+        };
+        // The biography is the one details field with a path of its own.
+        if key == "backstory" {
+            biography = value.clone();
+        } else {
+            details.insert(key.to_owned(), json!(value));
+        }
+    }
+    let items: Vec<Value> = items
+        .iter()
+        .map(|(uuid, quantity)| json!({"uuid": uuid, "quantity": quantity}))
+        .collect();
+    Ok(json!({
+        "draftId": draft_id,
+        "name": name.trim(),
+        "ownerUserId": owner_user_id,
+        "level": level,
+        "abilities": {
+            "str": base.str, "dex": base.dex, "con": base.con,
+            "int": base.int, "wis": base.wis, "cha": base.cha
+        },
+        "details": details,
+        "biography": biography,
+        "roots": roots,
+        "choices": answers,
+        "items": items,
+        "gp": gp,
+        "wealth": wealth,
+        "manual": manual
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2352,6 +2506,167 @@ mod tests {
                 total,
             }),
         }
+    }
+
+    /// The fixture draft the approval tests use: Human, Acolyte, Cleric 1, every
+    /// choice answered, kit for both owners.
+    fn fixture_cleric() -> DraftChoices {
+        let key =
+            |uuid: &str, advancement: &str, level: u8| format!("{uuid}#{advancement}#{level}");
+        DraftChoices {
+            method: Some(AbilityMethod::StandardArray),
+            base: Some(scores(15, 14, 13, 12, 10, 8)),
+            class: Some(CLERIC.into()),
+            species: Some(HUMAN.into()),
+            background: Some(ACOLYTE.into()),
+            picks: BTreeMap::from([
+                (key(HUMAN, "dLxv96vt2B2KOEe2", 0), vec!["med".to_owned()]),
+                (
+                    key(VERSATILE, "KB8IQLwyuL6SOFnv", 0),
+                    vec![MAGIC_INITIATE.to_owned()],
+                ),
+                (
+                    key(ACOLYTE, "McRHkSL3WnG2Po7g", 0),
+                    vec![
+                        "languages:standard:dwarvish".to_owned(),
+                        "languages:standard:elvish".to_owned(),
+                    ],
+                ),
+                (
+                    key(CLERIC, "2wUNkQzS4vL9nR6D", 1),
+                    vec!["skills:his".to_owned(), "skills:ins".to_owned()],
+                ),
+                (
+                    key(DIVINE_ORDER, "V8GfnoZYTe1PLXPI", 1),
+                    vec![PROTECTOR.to_owned()],
+                ),
+            ]),
+            asi: BTreeMap::from([(
+                key(ACOLYTE, "kDI6zoUamHzFTvHG", 0),
+                BTreeMap::from([("int".to_owned(), 2), ("wis".to_owned(), 1)]),
+            )]),
+            equipment: BTreeMap::from([
+                (CLERIC.to_owned(), "kit".to_owned()),
+                (ACOLYTE.to_owned(), "kit".to_owned()),
+            ]),
+            details: BTreeMap::from([
+                ("alignment".to_owned(), "Neutral".to_owned()),
+                ("backstory".to_owned(), "Raised in the temple.".to_owned()),
+            ]),
+        }
+    }
+
+    #[test]
+    fn create_args_for_the_fixture_cleric() {
+        const NEW_CALLIGRAPHER: &str = "Compendium.dnd5e.equipment24.Item.phbtulCalligraph";
+        const BOOK: &str = "Compendium.dnd5e.equipment24.Item.phbagBook0000000";
+        const PARCHMENT: &str = "Compendium.dnd5e.equipment24.Item.phbagParchment00";
+        const ROBE: &str = "Compendium.dnd5e.equipment24.Item.phbagRobe0000000";
+        const DRAFT: &str = "0b6f4c2e-0000-4000-8000-000000000000";
+        let catalog = catalog();
+        let args = create_args(
+            &catalog,
+            &CampaignRules::default(),
+            &fixture_cleric(),
+            "Al",
+            None,
+            DRAFT,
+            "playercase000001",
+        )
+        .expect("a finished draft");
+
+        // Every answer in dnd5e's own apply-data shape, and nothing else: an
+        // advancement without one is asked for its automatic value.
+        let key =
+            |uuid: &str, advancement: &str, level: u8| format!("{uuid}#{advancement}#{level}");
+        let choices = json!({
+            key(ACOLYTE, "kDI6zoUamHzFTvHG", 0): {"type": "asi", "assignments": {"int": 2, "wis": 1}},
+            key(ACOLYTE, "Lk1ScjOCqRDtX2Tg", 0): {
+                "chosen": ["skills:ins", "skills:rel", "tool:art:calligrapher"]
+            },
+            key(ACOLYTE, "McRHkSL3WnG2Po7g", 0): {
+                "chosen": [
+                    "languages:standard:common",
+                    "languages:standard:dwarvish",
+                    "languages:standard:elvish"
+                ]
+            },
+            key(CLERIC, "U6GGwY4ZKiXqXBQN", 1): {"chosen": ["weapon:sim"]},
+            key(CLERIC, "Z9K5kHYMLvroIMpT", 1): {
+                "chosen": ["armor:med", "armor:shl", "saves:cha", "saves:wis"]
+            },
+            key(CLERIC, "2wUNkQzS4vL9nR6D", 1): {"chosen": ["skills:his", "skills:ins"]},
+            key(DIVINE_ORDER, "V8GfnoZYTe1PLXPI", 1): {"selected": [PROTECTOR]},
+            key(HUMAN, "dLxv96vt2B2KOEe2", 0): {"size": "med"},
+            key(PROTECTOR, "Pw2NhGslXxcl0btG", 1): {"chosen": ["armor:hvy", "weapon:mar"]},
+            key(VERSATILE, "KB8IQLwyuL6SOFnv", 0): {"selected": [MAGIC_INITIATE]}
+        });
+        let expected = json!({
+            "draftId": DRAFT,
+            "name": "Al",
+            "ownerUserId": "playercase000001",
+            "level": 1,
+            // The base scores: the background's bonus is applied by its own
+            // advancement, not added twice here.
+            "abilities": {"str": 15, "dex": 14, "con": 13, "int": 12, "wis": 10, "cha": 8},
+            "details": {"alignment": "Neutral"},
+            "biography": "Raised in the temple.",
+            "roots": [
+                {"uuid": HUMAN, "kind": "species"},
+                {"uuid": ACOLYTE, "kind": "background"},
+                {"uuid": CLERIC, "kind": "class"}
+            ],
+            "choices": choices,
+            "items": [
+                {"uuid": CHAIN_SHIRT, "quantity": 1},
+                {"uuid": SHIELD, "quantity": 1},
+                {"uuid": MACE, "quantity": 1},
+                {"uuid": PRIESTS_PACK, "quantity": 1},
+                {"uuid": NEW_CALLIGRAPHER, "quantity": 1},
+                {"uuid": BOOK, "quantity": 1},
+                {"uuid": PARCHMENT, "quantity": 10},
+                {"uuid": ROBE, "quantity": 1}
+            ],
+            "gp": 15,
+            "wealth": [],
+            "manual": ["any holy focus", "any holy focus"]
+        });
+        assert_eq!(args, expected);
+    }
+
+    #[test]
+    fn create_args_refuse_a_draft_with_pending_items() {
+        let catalog = catalog();
+        let rules = CampaignRules::default();
+        let unfinished = |choices: DraftChoices| {
+            create_args(
+                &catalog,
+                &rules,
+                &choices,
+                "Al",
+                None,
+                "0b6f4c2e-0000-4000-8000-000000000000",
+                "playercase000001",
+            )
+        };
+        // The class's two skills are unanswered.
+        let mut choices = fixture_cleric();
+        choices
+            .picks
+            .remove(&format!("{CLERIC}#2wUNkQzS4vL9nR6D#1"));
+        assert_eq!(unfinished(choices), Err("draft_incomplete"));
+        // No equipment answer is the same refusal, from the same list submit uses.
+        let mut choices = fixture_cleric();
+        choices.equipment.remove(CLERIC);
+        assert_eq!(unfinished(choices), Err("draft_incomplete"));
+        // A draft with no scores is not a character.
+        let mut choices = fixture_cleric();
+        choices.base = None;
+        assert_eq!(unfinished(choices), Err("draft_incomplete"));
+        // An unanswered size, and the roots it belongs to, refuse too.
+        let mut choices = fixture_cleric();
+        choices.species = None;
+        assert_eq!(unfinished(choices), Err("draft_incomplete"));
     }
 
     #[test]

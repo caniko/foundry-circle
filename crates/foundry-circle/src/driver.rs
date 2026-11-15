@@ -3,7 +3,7 @@ use std::{future::Future, pin::Pin};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::builder::{PackInfo, Redirect};
+use crate::builder::{PackInfo, Redirect, Scores};
 
 /// The lifecycle state exposed by the readiness endpoint and console.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -78,6 +78,11 @@ pub enum WorldOp {
         pack: String,
         after: Option<String>,
         limit: u32,
+    },
+    /// One character from an approved draft, through the companion module's
+    /// `createCharacter`: the one world write the broker performs.
+    CharacterCreate {
+        args: Value,
     },
 }
 
@@ -167,16 +172,64 @@ pub trait FoundryDriver: Send + Sync {
 }
 
 /// Deterministic driver used by unit tests and the initial VM test.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone)]
 pub struct FakeDriver {
     state: WorldState,
+    /// The draft ids it has already created an actor for, so a retried
+    /// approval answers `created: false` instead of a second actor.
+    created: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
+    /// Every account operation it was asked for, in order, so a test can read
+    /// what entry and approval asked the world to do.
+    accounts: std::sync::Arc<std::sync::Mutex<Vec<AccountOp>>>,
+}
+
+impl std::fmt::Debug for FakeDriver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `AccountOp` deliberately has no `Debug`: a password never reaches a
+        // log through a driver value.
+        formatter
+            .debug_struct("FakeDriver")
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
 }
 
 impl FakeDriver {
-    pub const fn new(state: WorldState) -> Self {
-        Self { state }
+    pub fn new(state: WorldState) -> Self {
+        Self {
+            state,
+            created: std::sync::Arc::default(),
+            accounts: std::sync::Arc::default(),
+        }
+    }
+
+    /// The account operations this fake has answered.
+    pub fn accounts(&self) -> Vec<AccountOp> {
+        self.accounts
+            .lock()
+            .expect("fake Foundry driver lock poisoned")
+            .clone()
+    }
+
+    /// One actor per draft id; a second call returns the first one's id.
+    fn character_create(&self, args: &Value) -> Result<Value, WorldError> {
+        let draft = args["draftId"].as_str().unwrap_or_default().to_owned();
+        let manual = args.get("manual").cloned().unwrap_or_else(|| json!([]));
+        let mut created = self
+            .created
+            .lock()
+            .expect("fake Foundry driver lock poisoned");
+        let fresh = created.insert(draft.clone());
+        Ok(json!({
+            "id": format!("a{}", draft.replace('-', "")),
+            "created": fresh,
+            "manual": manual,
+        }))
     }
 }
+
+/// The user a fake `EnsureUser` creates.
+const FAKE_USER: &str = "playercase000001";
 
 impl FoundryDriver for FakeDriver {
     fn snapshot(&self) -> WorldSnapshot {
@@ -191,7 +244,45 @@ impl FoundryDriver for FakeDriver {
         op: WorldOp,
     ) -> Pin<Box<dyn Future<Output = Result<Value, WorldError>> + Send + '_>> {
         let result = if self.state == WorldState::Ready {
-            fake_call(op)
+            validate_op(&op).and_then(|()| match op {
+                WorldOp::CharacterCreate { args } => self.character_create(&args),
+                other => fake_call(other),
+            })
+        } else {
+            Err(WorldError::NotReady)
+        };
+        Box::pin(std::future::ready(result))
+    }
+
+    fn account(
+        &self,
+        op: AccountOp,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, WorldError>> + Send + '_>> {
+        let result = if self.state == WorldState::Ready {
+            self.accounts
+                .lock()
+                .expect("fake Foundry driver lock poisoned")
+                .push(op.clone());
+            match op {
+                AccountOp::UserNames => Ok(json!({"names": ["Gamemaster"]})),
+                // A user id means the mapping already exists; no id means the
+                // world creates the user, as Foundry's own script reports it.
+                AccountOp::EnsureUser {
+                    user_id,
+                    name,
+                    role,
+                    ..
+                } => {
+                    let created = user_id.is_none();
+                    Ok(json!({
+                        "id": user_id.unwrap_or_else(|| FAKE_USER.to_owned()),
+                        "name": name,
+                        "role": role,
+                        "created": created,
+                    }))
+                }
+                AccountOp::SetPassword { user_id, .. } => Ok(json!({"id": user_id})),
+            }
         } else {
             Err(WorldError::NotReady)
         };
@@ -204,7 +295,6 @@ const FAKE_PACK: &str = "dnd5e.classes24";
 const FAKE_CLASS: &str = "phbclcCleric0000";
 
 fn fake_call(op: WorldOp) -> Result<Value, WorldError> {
-    validate_op(&op)?;
     match op {
         WorldOp::ListDocuments {
             collection,
@@ -256,6 +346,8 @@ fn fake_call(op: WorldOp) -> Result<Value, WorldError> {
             let next_cursor = (items.len() == limit as usize).then(|| FAKE_CLASS.to_owned());
             Ok(json!({"items": items, "nextCursor": next_cursor}))
         }
+        // Answered by `FakeDriver::call`, which keeps the actors it created.
+        WorldOp::CharacterCreate { .. } => Err(WorldError::Unsupported("character".into())),
     }
 }
 
@@ -365,8 +457,180 @@ pub(crate) fn validate_op(op: &WorldOp) -> Result<(), WorldError> {
                 id_check(after)?;
             }
         }
+        WorldOp::CharacterCreate { args } => character_create_check(args)?,
     }
     Ok(())
+}
+
+/// Bound every field of a `CharacterCreate` argument before the module sees it:
+/// the module trusts its argument, so this is the one place its shape is
+/// checked. Nothing here names a document the world must hold; the module
+/// refuses an unresolvable uuid itself.
+fn character_create_check(args: &Value) -> Result<(), WorldError> {
+    text_check(args.get("name"), "name", 1, 100)?;
+    let draft = text_check(args.get("draftId"), "draftId", 1, 64)?;
+    if !draft
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(invalid("draftId must be a UUID"));
+    }
+    let owner = args
+        .get("ownerUserId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("ownerUserId must be a string"))?;
+    id_check(owner)?;
+    let level = args
+        .get("level")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid("level must be a number"))?;
+    if !(1..=20).contains(&level) {
+        return Err(invalid("level must be 1..=20"));
+    }
+    let abilities = args
+        .get("abilities")
+        .and_then(Value::as_object)
+        .filter(|abilities| abilities.len() == Scores::LABELS.len())
+        .ok_or_else(|| invalid("abilities must hold exactly the six scores"))?;
+    for (key, _) in Scores::LABELS {
+        let value = abilities
+            .get(key)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| invalid("abilities must hold str..cha as numbers"))?;
+        if !(1..=30).contains(&value) {
+            return Err(invalid("an ability must be 1..=30"));
+        }
+    }
+    let roots = args
+        .get("roots")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid("roots must be an array"))?;
+    if !(1..=3).contains(&roots.len()) {
+        return Err(invalid("roots must hold 1..=3 documents"));
+    }
+    for root in roots {
+        uuid_check(root.get("uuid"), "a root uuid")?;
+        if !matches!(
+            root.get("kind").and_then(Value::as_str),
+            Some("species" | "background" | "class")
+        ) {
+            return Err(invalid("a root kind must be species, background or class"));
+        }
+    }
+    if let Some(choices) = args.get("choices") {
+        let choices = choices
+            .as_object()
+            .ok_or_else(|| invalid("choices must be an object"))?;
+        if choices.len() > 200 {
+            return Err(invalid("choices must hold at most 200 answers"));
+        }
+        for (key, data) in choices {
+            // `<compendium uuid>#<advancement id>#<level>`.
+            let valid = (1..=300).contains(&key.len())
+                && key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'#' | b'-'));
+            if !valid {
+                return Err(invalid(
+                    "a choice key must be <uuid>#<advancement id>#<level>",
+                ));
+            }
+            // Every apply-data shape is small; one bound covers Trait,
+            // ItemChoice, Size and the ability bonuses.
+            let size = serde_json::to_string(data).unwrap_or_default().len();
+            if !data.is_object() || size > 4000 {
+                return Err(invalid(
+                    "a choice answer must be an object of at most 4000 bytes",
+                ));
+            }
+        }
+    }
+    let items = args
+        .get("items")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if items.len() > 100 {
+        return Err(invalid("items must hold at most 100 documents"));
+    }
+    for item in items {
+        uuid_check(item.get("uuid"), "an item uuid")?;
+        let quantity = item
+            .get("quantity")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| invalid("an item needs a quantity"))?;
+        if !(1..=999).contains(&quantity) {
+            return Err(invalid("an item quantity must be 1..=999"));
+        }
+    }
+    if let Some(gp) = args.get("gp").filter(|gp| !gp.is_null()) {
+        let gp = gp.as_u64().ok_or_else(|| invalid("gp must be a number"))?;
+        if gp > 1_000_000 {
+            return Err(invalid("gp must be at most 1000000"));
+        }
+    }
+    for (key, max) in [("wealth", 20), ("manual", 100)] {
+        let list = args
+            .get(key)
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if list.len() > max {
+            return Err(invalid("too many entries"));
+        }
+        for entry in list {
+            text_check(Some(entry), key, 1, 2000)?;
+        }
+    }
+    text_check(args.get("biography"), "biography", 0, 2000)?;
+    if let Some(details) = args.get("details") {
+        let details = details
+            .as_object()
+            .ok_or_else(|| invalid("details must be an object"))?;
+        if details.len() > 32 {
+            return Err(invalid("details must hold at most 32 fields"));
+        }
+        for (key, value) in details {
+            if key.len() > 32 {
+                return Err(invalid("a detail key must be at most 32 characters"));
+            }
+            text_check(Some(value), key, 0, 2000)?;
+        }
+    }
+    Ok(())
+}
+
+fn invalid(message: &str) -> WorldError {
+    WorldError::Invalid(message.to_owned())
+}
+
+fn text_check<'a>(
+    value: Option<&'a Value>,
+    key: &str,
+    min: usize,
+    max: usize,
+) -> Result<&'a str, WorldError> {
+    let text = value
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid(&format!("{key} must be a string")))?;
+    if !(min..=max).contains(&text.chars().count()) {
+        return Err(invalid(&format!("{key} must be {min}..={max} characters")));
+    }
+    Ok(text)
+}
+
+fn uuid_check(uuid: Option<&Value>, what: &str) -> Result<(), WorldError> {
+    let uuid = uuid
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid(&format!("{what} must be a string")))?;
+    let valid = uuid.len() <= 200
+        && uuid.starts_with("Compendium.")
+        && uuid
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+    valid
+        .then_some(())
+        .ok_or_else(|| invalid(&format!("{what} must be a Compendium. uuid")))
 }
 
 fn collection_check(collection: &str) -> Result<(), WorldError> {
@@ -1247,6 +1511,7 @@ mod live {
                 CATALOG_PAGE,
                 json!({"pack": pack, "after": after, "limit": limit}),
             ),
+            WorldOp::CharacterCreate { args } => (CHARACTER_CREATE, args),
         };
         let args = serde_json::to_string(&args).map_err(|_| WorldError::Browser)?;
         let script = script.replace("__ARGS__", &args);
@@ -1317,6 +1582,20 @@ mod live {
         if (!api) return { error: "unsupported", message: "module_missing" };
         if (api.apiVersion !== 1) return { error: "unsupported", message: "module_outdated" };
         const reply = await api.catalogPage({ pack: args.pack, after: args.after, limit: args.limit });
+        if (reply?.error) return reply;
+        return { ok: reply };
+    }"#;
+
+    const CHARACTER_CREATE: &str = r#"async function() {
+        const args = __ARGS__;
+        const api = game.modules.get("foundry-circle")?.api;
+        if (!api) return { error: "unsupported", message: "module_missing" };
+        if (api.apiVersion !== 1) return { error: "unsupported", message: "module_outdated" };
+        // A module older than the character write fails closed, never half-way.
+        if (typeof api.createCharacter !== "function") {
+            return { error: "unsupported", message: "module_outdated" };
+        }
+        const reply = await api.createCharacter(args);
         if (reply?.error) return reply;
         return { ok: reply };
     }"#;
@@ -1841,6 +2120,137 @@ mod live {
             }))
             .unwrap();
             assert!(!parsed.redirects[0].valid());
+        }
+
+        #[test]
+        fn character_create_validates_bounds() {
+            fn args() -> Value {
+                json!({
+                    "draftId": "0b6f4c2e-0000-4000-8000-000000000000",
+                    "name": "Al",
+                    "ownerUserId": "playeruser000001",
+                    "level": 1,
+                    "abilities": {"str": 15, "dex": 14, "con": 13, "int": 12, "wis": 10, "cha": 8},
+                    "details": {"alignment": "Neutral"},
+                    "biography": "",
+                    "roots": [{
+                        "uuid": "Compendium.dnd5e.classes24.Item.phbclcCleric0000",
+                        "kind": "class"
+                    }],
+                    "choices": {
+                        "Compendium.dnd5e.classes24.Item.phbclcCleric0000#2wUNkQzS4vL9nR6D#1":
+                            {"chosen": ["skills:his", "skills:ins"]}
+                    },
+                    "items": [{
+                        "uuid": "Compendium.dnd5e.equipment24.Item.phbwepMace000000",
+                        "quantity": 1
+                    }],
+                    "gp": 7,
+                    "wealth": [],
+                    "manual": ["any holy focus"]
+                })
+            }
+            fn check(args: Value) -> Result<(), WorldError> {
+                validate_op(&WorldOp::CharacterCreate { args })
+            }
+            assert_eq!(check(args()), Ok(()));
+
+            let mut bad = args();
+            bad["name"] = json!("");
+            assert!(matches!(check(bad), Err(WorldError::Invalid(_))));
+            let mut bad = args();
+            bad["name"] = json!("n".repeat(101));
+            assert!(matches!(check(bad), Err(WorldError::Invalid(_))));
+            let mut bad = args();
+            bad["level"] = json!(0);
+            assert!(matches!(check(bad), Err(WorldError::Invalid(_))));
+            let mut bad = args();
+            bad["level"] = json!(21);
+            assert!(matches!(check(bad), Err(WorldError::Invalid(_))));
+            let mut bad = args();
+            bad["abilities"]["str"] = json!(31);
+            assert!(matches!(check(bad), Err(WorldError::Invalid(_))));
+            let mut bad = args();
+            bad["abilities"].as_object_mut().unwrap().remove("cha");
+            assert!(matches!(check(bad), Err(WorldError::Invalid(_))));
+            let mut bad = args();
+            bad["roots"] = json!([]);
+            assert!(matches!(check(bad), Err(WorldError::Invalid(_))));
+            let mut bad = args();
+            bad["roots"] = json!([
+                {"uuid": "Actor.a1", "kind": "class"},
+                {"uuid": "Actor.a2", "kind": "species"},
+                {"uuid": "Actor.a3", "kind": "background"},
+                {"uuid": "Actor.a4", "kind": "class"}
+            ]);
+            assert!(matches!(check(bad), Err(WorldError::Invalid(_))));
+            let mut bad = args();
+            bad["roots"][0]["kind"] = json!("subclass");
+            assert!(matches!(check(bad), Err(WorldError::Invalid(_))));
+            let mut bad = args();
+            bad["items"] = json!([{"uuid": "Item.mace", "quantity": 1}]);
+            assert!(matches!(check(bad), Err(WorldError::Invalid(_))));
+            let mut bad = args();
+            bad["items"] = json!([{"uuid": "Compendium.dnd5e.equipment24.Item.phbwepMace000000", "quantity": 0}]);
+            assert!(matches!(check(bad), Err(WorldError::Invalid(_))));
+            let mut bad = args();
+            bad["choices"] = json!("chosen");
+            assert!(matches!(check(bad), Err(WorldError::Invalid(_))));
+            let mut bad = args();
+            bad["biography"] = json!("b".repeat(2001));
+            assert!(matches!(check(bad), Err(WorldError::Invalid(_))));
+            let mut bad = args();
+            bad["details"]["appearance"] = json!("a".repeat(2001));
+            assert!(matches!(check(bad), Err(WorldError::Invalid(_))));
+        }
+
+        #[test]
+        fn fake_character_create_is_idempotent_per_draft() {
+            use crate::driver::FakeDriver;
+
+            let driver = FakeDriver::new(WorldState::Ready);
+            let args = json!({
+                "draftId": "0b6f4c2e-0000-4000-8000-000000000000",
+                "name": "Al",
+                "manual": ["any holy focus"],
+            });
+            let first = driver.character_create(&args).unwrap();
+            let again = driver.character_create(&args).unwrap();
+            // A timed-out approval that is retried finds its own actor.
+            assert_eq!(first["created"], json!(true));
+            assert_eq!(again["created"], json!(false));
+            assert_eq!(first["id"], again["id"]);
+            assert_eq!(again["manual"], json!(["any holy focus"]));
+
+            let other = driver
+                .character_create(&json!({"draftId": "another-draft"}))
+                .unwrap();
+            assert_eq!(other["created"], json!(true));
+            assert_ne!(other["id"], first["id"]);
+        }
+
+        #[test]
+        fn character_create_fails_closed_without_the_module_function() {
+            assert!(
+                CHARACTER_CREATE.contains(r#"game.modules.get("foundry-circle")?.api"#),
+                "the script must read the module API only"
+            );
+            assert!(CHARACTER_CREATE.contains(
+                r#"if (!api) return { error: "unsupported", message: "module_missing" };"#
+            ));
+            assert!(CHARACTER_CREATE.contains(
+                r#"if (api.apiVersion !== 1) return { error: "unsupported", message: "module_outdated" };"#
+            ));
+            // A module that predates `createCharacter` is out of date, not missing.
+            assert!(CHARACTER_CREATE.contains(
+                r#"if (typeof api.createCharacter !== "function") {
+            return { error: "unsupported", message: "module_outdated" };
+        }"#
+            ));
+            // The one argument reaches the module whole, as a JSON literal.
+            assert!(CHARACTER_CREATE.contains("const args = __ARGS__;"));
+            assert!(CHARACTER_CREATE.contains("api.createCharacter(args)"));
+            assert!(CHARACTER_CREATE.contains("return { ok: reply };"));
         }
 
         #[test]

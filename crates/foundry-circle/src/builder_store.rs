@@ -13,17 +13,17 @@ use uuid::Uuid;
 
 use super::{AppState, Caller, auth, console_actor, console_caller, session};
 use crate::{
-    Role,
+    Role, adoption,
     builder::{
         AbilityMethod, BuilderData, BuilderView, CampaignRules, CampaignView, Catalog, CatalogItem,
         CharactersData, CharactersView, Decision, DraftChoices, DraftPatch, DraftStatus,
         DraftSummary, PackInfo, PartySummary, Pending, Redirect, Rolls, Scores, Slot,
-        catalog_skills, class_details, classes, decisions, equipment_plans, granted_traits,
-        origin_details, origin_options, party_summary, pending, prune_picks, roll_sets,
-        submit_refusal, totals, validate_asi, validate_detail, validate_equipment, validate_note,
-        validate_pick, validate_scores,
+        catalog_skills, class_details, classes, create_args, decisions, equipment_plans,
+        granted_traits, origin_details, origin_options, party_summary, pending, prune_picks,
+        roll_sets, submit_refusal, totals, validate_asi, validate_detail, validate_equipment,
+        validate_note, validate_pick, validate_scores,
     },
-    driver::{CatalogPacks, FoundryDriver, WorldOp, WorldState},
+    driver::{CatalogPacks, FoundryDriver, WorldError, WorldOp, WorldState},
 };
 
 /// An at most five drafts per player and world rule.
@@ -78,6 +78,8 @@ pub async fn characters_view() -> CharactersView {
             party: Vec::new(),
             coverage: PartySummary::default(),
             ready_world: None,
+            can_approve: false,
+            play_url: super::join(&state.console.play_url, "/_circle/enter"),
         }));
     };
     let campaigns = match campaigns(&pool, role).await {
@@ -109,6 +111,18 @@ pub async fn characters_view() -> CharactersView {
     let ready_world = (snapshot.state == WorldState::Ready)
         .then_some(snapshot.id)
         .flatten();
+    // A GM approves through the session they hold; an admin through either.
+    let holding = session::open(&pool)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "failed to read the open Foundry Circle session");
+            None
+        })
+        .is_some_and(|open| {
+            open.phase == crate::SessionPhase::Running && open.holder == principal.subject
+        });
+    let can_approve =
+        ready_world.is_some() && (role == Role::Admin || (role == Role::Gm && holding));
     CharactersView::Ready(Box::new(CharactersData {
         role,
         campaigns,
@@ -116,6 +130,8 @@ pub async fn characters_view() -> CharactersView {
         party,
         coverage,
         ready_world,
+        can_approve,
+        play_url: super::join(&state.console.play_url, "/_circle/enter"),
     }))
 }
 
@@ -1090,6 +1106,264 @@ pub async fn submit_draft(id: &str) -> Option<String> {
         Ok(()) => None,
         Err(error) => Some(database_code(error)),
     }
+}
+
+/// Approve one submitted draft: create its Actor in Foundry through dnd5e's own
+/// advancement code, assign it to the player, and record the id. The row stays
+/// locked for the whole approval, so two approvals cannot both create.
+pub async fn approve_draft(id: &str) -> Option<String> {
+    let (state, principal, role) = match member() {
+        Ok(member) => member,
+        Err(code) => return Some(code.into()),
+    };
+    let Some(pool) = state.database.pool().await else {
+        return Some("database_unavailable".into());
+    };
+    let draft_id = match Uuid::parse_str(id) {
+        Ok(id) => id,
+        Err(_) => return Some("draft_not_found".into()),
+    };
+    match approve(&state, &pool, draft_id, &principal, role).await {
+        Ok(()) => None,
+        Err(code) => {
+            // Every outcome is audited, refusals included.
+            if let Err(error) = session::insert_audit_for(
+                &pool,
+                "character_draft",
+                Some(&principal.subject),
+                "character_draft.approve",
+                "refused",
+                json!({"draftId": draft_id, "code": code}),
+            )
+            .await
+            {
+                tracing::warn!(%error, "failed to write the approval refusal audit entry");
+            }
+            Some(code)
+        }
+    }
+}
+
+/// Everything approval requires, checked under the draft row lock and the
+/// running session's lease row lock (held until the caller commits, as
+/// `adoption::enter` holds it, so stop/setup transitions cannot change the holder
+/// or world mid-write): an admin, or that session's GM; a submitted draft; and
+/// the driver serving the draft's world, up.
+async fn approval_checks(
+    transaction: &mut Transaction<'_, Postgres>,
+    state: &AppState,
+    id: Uuid,
+    principal: &auth::Principal,
+    role: Role,
+) -> Result<DraftRow, String> {
+    let draft = draft_row(&mut **transaction, id, true)
+        .await
+        .map_err(database_code)?
+        .ok_or_else(|| "draft_not_found".to_owned())?;
+    let holder: Option<String> = sqlx::query_scalar(
+        "SELECT holder FROM game_session
+          WHERE ended_at IS NULL AND phase = 'running' AND world_id = $1
+          FOR UPDATE",
+    )
+    .bind(&draft.world_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(database_code)?;
+    let allowed = role == Role::Admin
+        || (role == Role::Gm && holder.as_deref() == Some(principal.subject.as_str()));
+    if !allowed {
+        return Err("permission_denied".into());
+    }
+    if draft.status != DraftStatus::Submitted {
+        return Err("draft_not_submitted".into());
+    }
+    let snapshot = state.driver.snapshot();
+    if snapshot.state != WorldState::Ready {
+        return Err("world_not_ready".into());
+    }
+    if snapshot.id.as_deref() != Some(draft.world_id.as_str()) {
+        return Err("world_mismatch".into());
+    }
+    Ok(draft)
+}
+
+/// The approval itself, under the locked draft row. Foundry is the authority:
+/// nothing is written until it has created the actor, and the row only records
+/// what Foundry answered.
+async fn approve(
+    state: &AppState,
+    pool: &PgPool,
+    id: Uuid,
+    principal: &auth::Principal,
+    role: Role,
+) -> Result<(), String> {
+    // Two phases, one connection at a time (the pool is small, and a second
+    // connection taken under the session lock can starve it). Phase one checks
+    // everything under the locks and commits the owner's mapping, so a later
+    // timed-out create never orphans a new user; phase two relocks, rechecks and
+    // writes.
+    let mut transaction = pool.begin().await.map_err(database_code)?;
+    let draft = approval_checks(&mut transaction, state, id, principal, role).await?;
+    // A4: a player who never entered has no Foundry user yet; approval makes it
+    // through the same function entry uses.
+    player_user(&mut transaction, state.driver.as_ref(), &draft).await?;
+    transaction.commit().await.map_err(database_code)?;
+
+    let mut transaction = pool.begin().await.map_err(database_code)?;
+    let draft = approval_checks(&mut transaction, state, id, principal, role).await?;
+    let owner = adoption::mapped_user(&mut *transaction, &draft.subject, &draft.world_id)
+        .await
+        .map_err(database_code)?
+        .ok_or_else(|| "foundry_rejected".to_owned())?;
+    let catalog = catalog(&mut *transaction, &draft.world_id, &draft.rules.sources)
+        .await
+        .map_err(database_code)?;
+    let args = create_args(
+        &catalog,
+        &draft.rules,
+        &draft.choices,
+        &draft.name,
+        draft.rolls.as_ref(),
+        &id.to_string(),
+        &owner,
+    )?;
+    let reply = state
+        .driver
+        .call(WorldOp::CharacterCreate { args })
+        .await
+        .map_err(|error| approval_code(&error))?;
+    let actor_id = reply["id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "foundry_rejected".to_owned())?
+        .to_owned();
+    sqlx::query(
+        "UPDATE character_drafts SET status = 'approved', actor_id = $2, updated_at = now()
+          WHERE id = $1 AND status = 'submitted'",
+    )
+    .bind(id)
+    .bind(&actor_id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(database_code)?;
+    audit(
+        &mut transaction,
+        &principal.subject,
+        "character_draft.approve",
+        json!({
+            "draftId": id,
+            "subject": draft.subject,
+            "actorId": actor_id,
+            "foundryUserId": owner,
+            "created": reply["created"],
+            "manual": reply["manual"],
+        }),
+    )
+    .await;
+    transaction.commit().await.map_err(database_code)?;
+
+    // Best effort: the world's chat says who joined. A failed post is not a
+    // failed character.
+    let class = catalog
+        .root(&draft.choices, Slot::Class)
+        .map_or_else(|| "adventurer".to_owned(), |item| item.name.clone());
+    let content = approval_message(
+        &draft.name,
+        &class,
+        draft.rules.starting_level,
+        &draft.choices,
+        draft.rolls.as_ref(),
+    );
+    if let Err(error) = state.driver.call(WorldOp::ChatCreate { content }).await {
+        tracing::warn!(%error, "the approval chat message was not posted");
+    }
+    Ok(())
+}
+
+/// The draft player's Foundry user id. An existing mapping is used as it is (its
+/// role is never touched, so a GM approving their own character stays a GM).
+/// Only an unmapped player gets a new player-role user; `approve` commits that
+/// mapping in its first phase, before the actor is written, so a timed-out create
+/// never leaves an actor owned by a user the broker forgot. Entry sets the
+/// password on the player's first join, not here.
+async fn player_user(
+    transaction: &mut Transaction<'_, Postgres>,
+    driver: &dyn FoundryDriver,
+    draft: &DraftRow,
+) -> Result<String, String> {
+    if let Some(user_id) =
+        adoption::mapped_user(&mut **transaction, &draft.subject, &draft.world_id)
+            .await
+            .map_err(database_code)?
+    {
+        return Ok(user_id);
+    }
+    let display_name: Option<String> = sqlx::query_scalar(
+        "SELECT COALESCE(display_name, email, subject) FROM principals WHERE subject = $1",
+    )
+    .bind(&draft.subject)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(database_code)?;
+    adoption::ensure_mapped_user(
+        transaction,
+        driver,
+        &draft.subject,
+        display_name.as_deref().unwrap_or(&draft.subject),
+        &draft.world_id,
+        adoption::PLAYER_ROLE,
+        None,
+    )
+    .await
+    .map_err(|error| match error {
+        adoption::EnterError::Database => "database_unavailable".to_owned(),
+        _ => "foundry_rejected".to_owned(),
+    })
+}
+
+/// The code a failed character write reports: the module's own two refusals keep
+/// their names, and everything else is the world refusing it.
+fn approval_code(error: &WorldError) -> String {
+    match error {
+        WorldError::Unsupported(code)
+            if matches!(code.as_str(), "module_missing" | "module_outdated") =>
+        {
+            code.clone()
+        }
+        WorldError::NotReady => "world_not_ready".into(),
+        _ => "foundry_rejected".into(),
+    }
+}
+
+/// The chat line an approval posts: the character, its class and level, the
+/// ability method with its scores, and the dice behind a roll.
+fn approval_message(
+    name: &str,
+    class: &str,
+    level: u8,
+    choices: &DraftChoices,
+    rolls: Option<&Rolls>,
+) -> String {
+    let method = choices.method.map_or("chosen", AbilityMethod::label);
+    let mut message =
+        format!("{name} the {class} (level {level}) is ready to play. Abilities: {method}");
+    if let Some(base) = choices.base {
+        let scores: Vec<String> = base.values().iter().map(u8::to_string).collect();
+        message.push_str(&format!(". {}", scores.join(" ")));
+    }
+    if let Some(rolls) = rolls {
+        let sets: Vec<String> = rolls
+            .sets
+            .iter()
+            .map(|set| {
+                let dice: Vec<String> = set.dice.iter().map(u8::to_string).collect();
+                format!("{} = {}", dice.join(" "), set.total)
+            })
+            .collect();
+        message.push_str(&format!(". Rolls: {}", sets.join(", ")));
+    }
+    message.push('.');
+    message
 }
 
 /// A GM or admin sends a submitted draft back with a note the player can read.

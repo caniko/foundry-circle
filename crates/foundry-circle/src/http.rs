@@ -1747,6 +1747,14 @@ mod tests {
         assert!(body["message"].as_str().unwrap().contains("4000"));
     }
 
+    #[test]
+    fn character_create_is_not_a_public_command() {
+        // Only approval writes a character; the JSON surface never names it.
+        let (status, Json(body)) = parse_command("character.create", &json!({})).unwrap_err();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "capability_unsupported");
+    }
+
     #[tokio::test]
     async fn capabilities_only_advertise_implemented_surfaces() {
         let body = body(capabilities().await.into_response()).await;

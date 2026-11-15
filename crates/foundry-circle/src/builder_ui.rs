@@ -77,6 +77,11 @@ async fn request_changes(id: String, note: String) -> Result<Option<String>, Ser
     Ok(crate::http::builder_store::request_changes(&id, &note).await)
 }
 
+#[server]
+async fn approve_draft(id: String) -> Result<Option<String>, ServerFnError> {
+    Ok(crate::http::builder_store::approve_draft(&id).await)
+}
+
 // Slice one ships these two server functions; the board controls that call
 // them arrive with the DM board.
 #[server]
@@ -136,6 +141,15 @@ pub fn CharactersPage() -> Element {
             }
         });
     });
+    let approve = EventHandler::new(move |id: String| {
+        spawn(async move {
+            match approve_draft(id).await {
+                Ok(None) => reload.restart(),
+                Ok(Some(code)) => error.set(Some(code_message(&code).into())),
+                Err(_) => error.set(Some(UNAVAILABLE.into())),
+            }
+        });
+    });
     let view = match &*view.read() {
         Some(Ok(view)) => view.clone(),
         _ => CharactersView::SignedOut,
@@ -146,7 +160,7 @@ pub fn CharactersPage() -> Element {
     };
     rsx! {
         ConsoleShell { account,
-            CharactersBoard { view, create, save, sync, ask, error: error() }
+            CharactersBoard { view, create, save, sync, ask, approve, error: error() }
         }
     }
 }
@@ -261,8 +275,11 @@ fn code_message(code: &str) -> &'static str {
         "invalid_detail" => "That sheet field is not one the builder stores, or it is too long.",
         "draft_incomplete" => "Finish everything on the to do list before submitting.",
         "not_submitted" => "That draft is not waiting for review.",
+        "draft_not_submitted" => "Only a submitted draft can be approved.",
+        "invalid_draft" => "That draft is missing its class, species or background.",
+        "foundry_rejected" => "Foundry refused to create the character; nothing was written.",
         "invalid_note" => "Write a note of one to a thousand characters.",
-        "world_not_ready" => "Start the session and open the world, then sync again.",
+        "world_not_ready" => "Start the session and open the world, then try again.",
         "world_mismatch" => "The running world is not this campaign's world.",
         "not_dnd5e" => "The running world does not use the dnd5e system.",
         "module_missing" => {
@@ -282,6 +299,7 @@ fn CharactersBoard(
     save: EventHandler<(String, bool, CampaignRules)>,
     sync: EventHandler<String>,
     ask: EventHandler<(String, String)>,
+    approve: EventHandler<String>,
     error: Option<String>,
 ) -> Element {
     let content = match view {
@@ -376,7 +394,13 @@ fn CharactersBoard(
                         if data.party.is_empty() {
                             p { class: "tartan-muted", "Nobody has started a character yet." }
                         } else {
-                            PartyTable { drafts: data.party.clone(), ask }
+                            PartyTable {
+                                drafts: data.party.clone(),
+                                can_approve: data.can_approve,
+                                play_url: data.play_url.clone(),
+                                ask,
+                                approve,
+                            }
                             PartySkills { coverage: data.coverage.clone() }
                         }
                     }
@@ -516,9 +540,16 @@ fn CampaignRulesForm(
 
 /// The DM board: every draft with its status, what it still owes, its class,
 /// species, background, totals and the dice behind its rolls; a submitted draft
-/// can be sent back with a note.
+/// can be sent back with a note or approved into the world, and an approved one
+/// links to where it is played.
 #[component]
-fn PartyTable(drafts: Vec<DraftSummary>, ask: EventHandler<(String, String)>) -> Element {
+fn PartyTable(
+    drafts: Vec<DraftSummary>,
+    can_approve: bool,
+    play_url: Option<String>,
+    ask: EventHandler<(String, String)>,
+    approve: EventHandler<String>,
+) -> Element {
     rsx! {
         table { class: "builder-party",
             thead {
@@ -564,6 +595,31 @@ fn PartyTable(drafts: Vec<DraftSummary>, ask: EventHandler<(String, String)>) ->
                                 name: draft_title(&draft),
                                 submitted: draft.status == DraftStatus::Submitted,
                                 ask,
+                            }
+                            // Approve is the one world write: only an admin or
+                            // the session-holding GM while the world is ready.
+                            if can_approve && draft.status == DraftStatus::Submitted {
+                                button {
+                                    id: "approve-{draft.id}",
+                                    class: "tartan-button",
+                                    r#type: "button",
+                                    // The server refuses an unfinished draft too.
+                                    disabled: draft.pending > 0,
+                                    onclick: {
+                                        let id = draft.id.clone();
+                                        move |_| approve.call(id.clone())
+                                    },
+                                    "Approve"
+                                }
+                            }
+                            if draft.status == DraftStatus::Approved
+                                && let Some(url) = &play_url {
+                                a {
+                                    id: "play-{draft.id}",
+                                    class: "tartan-button",
+                                    href: "{url}",
+                                    "Play in Foundry"
+                                }
                             }
                         }
                     }
@@ -1981,6 +2037,8 @@ mod tests {
             party: Vec::new(),
             coverage: PartySummary::default(),
             ready_world: Some("canary".into()),
+            can_approve: false,
+            play_url: None,
         }
     }
 
@@ -2073,8 +2131,9 @@ mod tests {
             let save = EventHandler::new(|_: (String, bool, CampaignRules)| ());
             let sync = EventHandler::new(|_: String| ());
             let ask = EventHandler::new(|_: (String, String)| ());
+            let approve = EventHandler::new(|_: String| ());
             rsx! {
-                CharactersBoard { view, create, save, sync, ask, error: None }
+                CharactersBoard { view, create, save, sync, ask, approve, error: None }
             }
         }
         dioxus::ssr::render_element(rsx! {
@@ -2553,6 +2612,55 @@ mod tests {
         assert!(html.contains("Skill coverage"), "{html}");
         assert!(html.contains("Perception"), "{html}");
         assert!(html.contains("nobody"), "{html}");
+    }
+
+    #[test]
+    fn approve_is_offered_only_when_allowed() {
+        let submitted = |name: &str| {
+            let mut draft = summary(name, AbilityMethod::StandardArray, None);
+            draft.status = DraftStatus::Submitted;
+            draft
+        };
+        // An admin, or the GM holding the running session, while a world is ready.
+        let mut data = data(Role::Gm);
+        data.party = vec![submitted("Bryn")];
+        data.can_approve = true;
+        let html = render_board(CharactersView::Ready(Box::new(data.clone())));
+        assert!(html.contains("id=\"approve-0b6f4c2e-0000-4000-8000-000000000000\""));
+        assert!(html.contains(">Approve</button>"), "{html}");
+
+        // The session is held by another GM, or no world is ready.
+        let mut held = data.clone();
+        held.can_approve = false;
+        let html = render_board(CharactersView::Ready(Box::new(held)));
+        assert!(!html.contains("Approve"), "{html}");
+
+        // Only a submitted draft may be approved.
+        let mut pending = data;
+        pending.party[0].status = DraftStatus::Draft;
+        let html = render_board(CharactersView::Ready(Box::new(pending)));
+        assert!(!html.contains("id=\"approve-"), "{html}");
+    }
+
+    #[test]
+    fn approved_draft_links_to_the_play_host() {
+        let mut data = data(Role::Gm);
+        let mut draft = summary("Bryn", AbilityMethod::Roll, Some(rolls()));
+        draft.status = DraftStatus::Approved;
+        data.party = vec![draft];
+        data.play_url = Some("https://play.example.test/_circle/enter".into());
+        let html = render_board(CharactersView::Ready(Box::new(data.clone())));
+        assert!(
+            html.contains("href=\"https://play.example.test/_circle/enter\""),
+            "{html}"
+        );
+        assert!(html.contains("Play in Foundry"), "{html}");
+
+        // A draft that has not reached Foundry has nothing to open there.
+        let mut unapproved = data;
+        unapproved.party[0].status = DraftStatus::Submitted;
+        let html = render_board(CharactersView::Ready(Box::new(unapproved)));
+        assert!(!html.contains("Play in Foundry"), "{html}");
     }
 
     #[test]

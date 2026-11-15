@@ -158,6 +158,86 @@ async fn mapped_users(pool: &PgPool, world: &str) -> Result<Vec<String>, sqlx::E
         .await
 }
 
+/// The principal's Foundry user in this world, created when there is none.
+///
+/// This is the one place a player's user is made: entry calls it with the
+/// entering principal, and approval calls it with the draft's player, who may
+/// never have entered. The id it returns may already exist (a mapped user), in
+/// which case only its role is ensured. It never sets a password; entry derives
+/// one afterwards.
+pub(crate) async fn ensure_named_user(
+    driver: &dyn FoundryDriver,
+    display_name: &str,
+    role: u8,
+    mapped: Option<&str>,
+) -> Result<(String, bool), EnterError> {
+    // A same-named user created between the name read and the create is a race,
+    // not a reason to adopt their account: reread once and retry.
+    let mut ensured = None;
+    for attempt in 0..2 {
+        let names = match driver.account(AccountOp::UserNames).await {
+            Ok(value) => value
+                .get("names")
+                .and_then(Value::as_array)
+                .map(|names| {
+                    names
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+            Err(error) => return Err(enter_error(error)),
+        };
+        let name = unique_name(display_name, &names);
+        match driver
+            .account(AccountOp::EnsureUser {
+                user_id: mapped.map(str::to_owned),
+                name,
+                role,
+                reuse_by_name: false,
+            })
+            .await
+        {
+            Ok(value) => {
+                ensured = Some(value);
+                break;
+            }
+            Err(error) if attempt == 0 => {
+                tracing::debug!(%error, "retrying Foundry user creation after a name race");
+            }
+            Err(error) => return Err(enter_error(error)),
+        }
+    }
+    let Some(ensured) = ensured else {
+        return Err(EnterError::Foundry);
+    };
+    let Some(user_id) = ensured["id"].as_str().map(str::to_owned) else {
+        return Err(EnterError::Foundry);
+    };
+    Ok((user_id, ensured["created"].as_bool().unwrap_or(false)))
+}
+
+/// Ensure the principal's Foundry user and record the mapping in the same
+/// transaction as the caller's other work.
+pub(crate) async fn ensure_mapped_user(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    driver: &dyn FoundryDriver,
+    subject: &str,
+    display_name: &str,
+    world: &str,
+    role: u8,
+    mapped: Option<String>,
+) -> Result<String, EnterError> {
+    let (user_id, _) = ensure_named_user(driver, display_name, role, mapped.as_deref()).await?;
+    if mapped.as_deref() != Some(user_id.as_str()) {
+        remember_user(&mut **transaction, subject, world, &user_id)
+            .await
+            .map_err(|_| EnterError::Database)?;
+    }
+    Ok(user_id)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AdoptionError {
     /// No bootstrap admin cookie: the broker restarted, or Setup was never
@@ -562,50 +642,17 @@ pub(crate) async fn enter(
     let mapped = mapped_user(&mut *transaction, subject, world)
         .await
         .map_err(|_| EnterError::Database)?;
-    // A same-named user created between the name read and the create is a
-    // race, not a reason to adopt their account: reread once and retry.
-    let mut ensured = None;
-    for attempt in 0..2 {
-        let names = match driver.account(AccountOp::UserNames).await {
-            Ok(value) => value
-                .get("names")
-                .and_then(Value::as_array)
-                .map(|names| {
-                    names
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default(),
-            Err(error) => return Err(enter_error(error)),
-        };
-        let name = unique_name(display_name, &names);
-        match driver
-            .account(AccountOp::EnsureUser {
-                user_id: mapped.clone(),
-                name,
-                role,
-                reuse_by_name: false,
-            })
-            .await
-        {
-            Ok(value) => {
-                ensured = Some(value);
-                break;
-            }
-            Err(error) if attempt == 0 => {
-                tracing::debug!(%error, "retrying Foundry user creation after a name race");
-            }
-            Err(error) => return Err(enter_error(error)),
-        }
-    }
-    let Some(ensured) = ensured else {
-        return Err(EnterError::Foundry);
-    };
-    let Some(user_id) = ensured["id"].as_str().map(str::to_owned) else {
-        return Err(EnterError::Foundry);
-    };
+    // Themselves, and never a stranger's same-named account.
+    let user_id = ensure_mapped_user(
+        &mut transaction,
+        driver,
+        subject,
+        display_name,
+        world,
+        role,
+        mapped,
+    )
+    .await?;
     let password = derive_password(&secret, world, &user_id);
     driver
         .account(AccountOp::SetPassword {
@@ -614,11 +661,6 @@ pub(crate) async fn enter(
         })
         .await
         .map_err(enter_error)?;
-    if mapped.as_deref() != Some(user_id.as_str()) {
-        remember_user(&mut *transaction, subject, world, &user_id)
-            .await
-            .map_err(|_| EnterError::Database)?;
-    }
     let cookie = driver::join_session(base_url, &user_id, &password)
         .await
         .map_err(|_| EnterError::Foundry)?;
@@ -724,6 +766,60 @@ mod tests {
     fn only_the_holder_enters_as_a_gm() {
         assert_eq!(member_role(true), GM_ROLE);
         assert_eq!(member_role(false), PLAYER_ROLE);
+    }
+
+    #[tokio::test]
+    async fn approval_creates_the_players_user_like_entry_does() {
+        use crate::driver::{FakeDriver, FoundryDriver, WorldState};
+
+        // A4: a player who never entered has no mapped user, so approval makes
+        // one through the same function entry uses — the world's names, a unique
+        // name, the player role, never a reuse by name.
+        let driver = FakeDriver::new(WorldState::Ready);
+        let (user_id, created) = super::ensure_named_user(&driver, "Robin", PLAYER_ROLE, None)
+            .await
+            .expect("the fake world creates a user");
+        assert_eq!(user_id, "playercase000001");
+        assert!(created);
+        let ensured = driver
+            .accounts()
+            .into_iter()
+            .find_map(|op| match op {
+                AccountOp::EnsureUser {
+                    user_id,
+                    name,
+                    role,
+                    reuse_by_name,
+                } => Some((user_id, name, role, reuse_by_name)),
+                _ => None,
+            })
+            .expect("an EnsureUser");
+        assert_eq!(ensured, (None, "Robin".to_owned(), PLAYER_ROLE, false));
+        // Approval never sets a password; the player's first entry does.
+        assert!(
+            !driver
+                .accounts()
+                .iter()
+                .any(|op| matches!(op, AccountOp::SetPassword { .. }))
+        );
+
+        // A mapped user is found again instead of a second one being created.
+        let (again, created) =
+            super::ensure_named_user(&driver, "Robin", PLAYER_ROLE, Some(&user_id))
+                .await
+                .expect("the mapped user");
+        assert_eq!(again, user_id);
+        assert!(!created);
+        let asked = driver.accounts();
+        assert!(matches!(
+            asked.last(),
+            Some(AccountOp::EnsureUser { user_id: Some(id), .. }) if id == &user_id
+        ));
+        // `driver.account` answered at all: the fake stands in for the page.
+        assert_eq!(
+            driver.account(AccountOp::UserNames).await.unwrap()["names"][0],
+            "Gamemaster"
+        );
     }
 
     #[test]

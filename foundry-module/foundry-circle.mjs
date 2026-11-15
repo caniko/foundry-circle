@@ -1,7 +1,8 @@
 /**
- * Foundry Circle's companion module: the read-only compendium reads the broker's
- * catalog sync needs. The broker calls this API from its own GM page only;
- * nothing here writes a document and nothing is cached between calls.
+ * Foundry Circle's companion module: the compendium reads the broker's catalog
+ * sync needs, and the one character write the broker's approval performs. The
+ * broker calls this API from its own GM page only; nothing is cached between
+ * calls and no caller ever supplies JavaScript.
  */
 
 const MODULE_ID = "foundry-circle";
@@ -13,7 +14,9 @@ const ENRICHER = /@\w+\[[^\]]*\](?:\{([^}]*)\})?/g;
 
 Hooks.once("init", () => {
   const module = game.modules.get(MODULE_ID);
-  if ( module ) module.api = { apiVersion: API_VERSION, catalogPacks, catalogPage, uuidRedirects };
+  if ( module ) module.api = {
+    apiVersion: API_VERSION, catalogPacks, catalogPage, uuidRedirects, createCharacter
+  };
 });
 
 /** Every Item pack this world offers. */
@@ -102,6 +105,200 @@ function uuidRedirects() {
     .filter(([from, to]) => from.startsWith("Compendium.") && typeof to === "string")
     .map(([from, to]) => ({ from, to }))
     .sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0));
+}
+
+/**
+ * Create one character from the broker's approved draft: the one world write.
+ *
+ * The broker sends the decisions its own walker resolved, keyed
+ * `<compendium uuid>#<advancement id>#<level>`; this builds the actor in memory,
+ * lets dnd5e's own advancement code apply them in the order `AdvancementManager`
+ * uses for a new class item, and writes once. A failure throws before the
+ * `Actor.create`, so no half-built character is left in the world.
+ *
+ * @param {object} args  The validated `CharacterCreate` argument.
+ * @returns {Promise<object>} `{id, created, manual}`, or `{error, message}`.
+ */
+async function createCharacter(args) {
+  if ( game.system.id !== "dnd5e" ) return { error: "unsupported", message: "not_dnd5e" };
+  if ( !args?.draftId || !args.name || !args.ownerUserId || !Array.isArray(args.roots) ) {
+    return { error: "invalid", message: "draftId, name, ownerUserId and roots are required" };
+  }
+  const manual = Array.isArray(args.manual) ? args.manual : [];
+  // Retry-safe: an approval that timed out after the write returns its actor
+  // rather than creating a second one.
+  try {
+    // A replay still completes the owner's assignment, which may be what failed.
+    const existing = game.actors.find(actor => actor.flags?.[MODULE_ID]?.draftId === args.draftId);
+    if ( existing ) {
+      await assignCharacter(args.ownerUserId, existing.id);
+      return { id: existing.id, created: false, manual };
+    }
+    const actor = await buildCharacter(args);
+    // The document class the world configured (`Actor.implementation`,
+    // common/abstract/document.mjs:182; `Document.create`, :721).
+    const created = await Actor.create(actor.toObject());
+    if ( !created ) throw new Error("Foundry refused the character");
+    await assignCharacter(args.ownerUserId, created.id);
+    return { id: created.id, created: true, manual };
+  } catch ( error ) {
+    console.error(`${MODULE_ID} | character creation failed`, error);
+    return { error: "invalid", message: String(error?.message ?? error) };
+  }
+}
+
+/**
+ * The in-memory actor the recipe builds, or a thrown error naming what the
+ * world is missing. Nothing here writes.
+ * @param {object} args  The validated `CharacterCreate` argument.
+ * @returns {Promise<Actor5e>}
+ */
+async function assignCharacter(userId, actorId) {
+  // The player owns the sheet and their user opens it (`User#character`,
+  // common/documents/user.mjs:57; `Document#update`, common/abstract/document.mjs:740).
+  // A cancelled update resolves to undefined, so the write is checked.
+  const user = game.users.get(userId);
+  if ( !user ) throw new Error("the owner user does not exist");
+  if ( user.character?.id === actorId ) return;
+  const updated = await user.update({ character: actorId });
+  if ( !updated ) throw new Error("Foundry refused the character assignment");
+}
+
+async function buildCharacter(args) {
+  const choices = args.choices ?? {};
+  const sources = new Map(); // in-page item id → the compendium uuid it came from
+  const applied = new Set(); // `<uuid>#<advancement id>#<level>`, once each
+  const level = args.level ?? 1;
+  // `Actor.implementation` is the system's actor class
+  // (common/abstract/document.mjs:182); ownership uses the named levels, never
+  // literals (common/constants.mjs:470-497).
+  const actor = new Actor.implementation({
+    name: args.name,
+    type: "character",
+    system: {
+      abilities: Object.fromEntries(
+        Object.entries(args.abilities ?? {}).map(([ability, value]) => [ability, { value }])
+      ),
+      details: { ...(args.details ?? {}), biography: { value: args.biography ?? "" } }
+    },
+    ownership: {
+      default: CONST.DOCUMENT_OWNERSHIP_LEVELS.NONE,
+      [args.ownerUserId]: CONST.DOCUMENT_OWNERSHIP_LEVELS.OWNER
+    },
+    flags: { [MODULE_ID]: { draftId: args.draftId } }
+  });
+
+  /**
+   * Embed one compendium document, with the fresh id and `_stats` a granted item
+   * gets (module/documents/advancement/advancement.mjs:381-397).
+   */
+  const add = async uuid => {
+    const document = await fromUuid(uuid); // client/utils/helpers.mjs:161
+    if ( !document ) throw new Error(`the world has no ${uuid}`);
+    // The system's own import: a fresh id and `_stats.compendiumSource`, no
+    // world ownership (common/abstract/world-collection.mjs:109).
+    const { _stats } = game.items.fromCompendium(document);
+    const data = document.clone({ _stats, _id: foundry.utils.randomID() }, { keepId: true }).toObject();
+    actor.updateSource({ items: [data] }); // common/abstract/data.mjs:669
+    const item = actor.items.get(data._id);
+    if ( !item ) throw new Error(`could not embed ${uuid}`);
+    sources.set(item.id, uuid);
+    return item;
+  };
+
+  /** The compendium uuid an embedded item came from: a root's, or the
+   *  `flags.dnd5e.sourceId` its advancement stamped on it. */
+  const sourceOf = item => sources.get(item.id) ?? item.flags?.dnd5e?.sourceId ?? null;
+
+  /**
+   * Apply one item's advancements at one level: the broker's answer for the
+   * choice, else the system's own automatic value, and `false` there means a
+   * choice nobody made (module/documents/advancement/advancement.mjs:330-350).
+   */
+  const apply = async (item, at) => {
+    // `advancement.byLevel`, built per level by `Item#_prepareAdvancement`
+    // (module/documents/item.mjs:625-637).
+    for ( const advancement of item.advancement?.byLevel?.[at] ?? [] ) {
+      if ( !advancement.appliesToClass ) continue; // advancement.mjs:110
+      // ponytail: spell choices wait for slice 8, exactly as the broker's walker
+      // skips them; the player picks those spells in Foundry for now.
+      const configuration = advancement.configuration ?? {};
+      if ( (advancement.type === "ItemChoice")
+        && ((configuration.type === "spell") || (configuration.restriction?.type === "spell")) ) continue;
+      // ponytail: one key per source document, as the broker's decision keys;
+      // add an occurrence index if the content ever grants a feature twice.
+      const key = `${sourceOf(item)}#${advancement.id}#${at}`;
+      if ( applied.has(key) ) continue;
+      applied.add(key);
+      const data = choices[key] ?? await advancement.automaticApplicationValue(at);
+      if ( data === false ) throw new Error(`the draft has no answer for ${key}`);
+      await advancement.apply(at, data);
+    }
+  };
+
+  /**
+   * One item at one level, then every item the applies created, lowest level
+   * first: the synthetic steps a level's new items get
+   * (module/applications/advancement/advancement-manager.mjs:729-760).
+   */
+  const run = async (item, at) => {
+    const before = new Set(actor.items.map(embedded => embedded.id));
+    await apply(item, at);
+    for ( const added of actor.items ) {
+      if ( before.has(added.id) ) continue;
+      for ( let inner = 0; inner <= at; inner++ ) await run(added, inner);
+    }
+  };
+
+  // Species and background first, as level 0 is applied before the class
+  // (module/applications/advancement/advancement-manager.mjs:401-425).
+  for ( const root of args.roots.filter(entry => entry.kind !== "class") ) {
+    await run(await add(root.uuid), 0);
+  }
+  const classRoot = args.roots.find(entry => entry.kind === "class");
+  if ( !classRoot ) throw new Error("the draft has no class");
+  const classItem = await add(classRoot.uuid);
+  // A new class starts at level 0 and is the character's original class, which
+  // is what its level-one automatic values read
+  // (module/applications/advancement/advancement-manager.mjs:241-261).
+  classItem.updateSource({ "system.levels": 0 });
+  actor.updateSource({ "system.details.originalClass": classItem.id });
+  for ( let at = 1; at <= level; at++ ) {
+    const species = actor.items.find(item => item.type === "race");
+    if ( species ) await run(species, at);
+    await run(classItem, at);
+    for ( const item of [...actor.items] ) {
+      if ( (item.id === classItem.id) || (item.id === species?.id) ) continue;
+      await run(item, at);
+    }
+    classItem.updateSource({ "system.levels": at });
+    // A level's derived data is what the next level reads
+    // (common/abstract/data.mjs:524).
+    actor.reset();
+  }
+
+  // The kit's documents, each with the quantity the rules list.
+  for ( const entry of args.items ?? [] ) {
+    const item = await add(entry.uuid);
+    item.updateSource({ "system.quantity": entry.quantity });
+  }
+
+  // Starting gold: the kits' own coin plus any wealth formula the draft chose
+  // instead of a kit (client/dice/roll.mjs:29,274).
+  let gp = args.gp ?? 0;
+  for ( const formula of args.wealth ?? [] ) {
+    const roll = await new Roll(formula, actor.getRollData()).evaluate();
+    gp += Math.floor(roll.total);
+  }
+  actor.updateSource({ "system.currency.gp": gp });
+
+  // A level-one character starts at full health: the derived maximum is the
+  // class's hit points plus Constitution
+  // (module/data/actor/character.mjs:248-258).
+  actor.reset();
+  const hp = actor.system.attributes.hp;
+  if ( hp.max !== null ) actor.updateSource({ "system.attributes.hp.value": hp.max });
+  return actor;
 }
 
 /**

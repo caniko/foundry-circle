@@ -4,6 +4,22 @@ All notable changes to Foundry Circle are documented here.
 
 ## Unreleased
 
+- Approve a submitted character into Foundry: the only world write. An admin, or
+  the GM holding the running session for the draft's world, approves while the
+  driver reports that world `Ready`; the draft row stays locked for the whole
+  approval, `dnd5e`'s own advancement code builds the actor inside the companion
+  module and one `Actor.create` writes it, then dnd5e's answer is recorded as
+  `actor_id` beside `status = 'approved'`. `create_args` is one pure function
+  with one exact-JSON test (Human, Acolyte, Cleric 1): roots in species,
+  background, class order, Trait `{chosen}`, ItemChoice `{selected}`, ability
+  bonuses `{type: "asi", assignments}`, Size `{size}`, the chosen kits'
+  documents, their gold and any wealth formula, and nothing for the advancements
+  dnd5e answers itself. The module returns an existing actor with the same
+  `foundry-circle.draftId` first, so a retry after a timeout never creates a
+  second character; the player's Foundry user is created through the same call
+  entry makes when they never joined, and a chat line posts the name, class,
+  method and rolls. `WorldOp::CharacterCreate` bounds every string and count and
+  is not exposed by `POST /api/v1/world/commands`.
 - Finish the character builder's player flow and give the DM oversight. The
   details step stores the fifteen allowlisted sheet fields (2000 characters
   each, unknown keys refused), and the review step shows the sheet in brief —

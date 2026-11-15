@@ -28,6 +28,9 @@ pub mod auth;
 #[path = "session.rs"]
 pub mod session;
 
+#[path = "builder_store.rs"]
+pub mod builder_store;
+
 #[path = "play.rs"]
 pub mod play;
 
@@ -456,17 +459,37 @@ async fn live_game(foundry_url: Option<&str>) -> LiveGame {
     }
 }
 
-/// Resolve what the signed-in (or not) caller of the console should see.
-pub async fn console_view() -> ConsoleView {
+/// Who is asking for a console page or action: the OIDC subject, its role and
+/// the resolved display name, or the two refusals the pages render.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one short-lived value per console request; a box would only add an allocation"
+)]
+pub(crate) enum Caller {
+    SignedOut,
+    /// Authenticated but not in the access group.
+    Denied {
+        name: String,
+    },
+    Member {
+        state: AppState,
+        principal: auth::Principal,
+        name: String,
+        role: Role,
+    },
+}
+
+/// Resolve the console caller from the fullstack request context.
+pub(crate) fn console_caller() -> Caller {
     use dioxus::fullstack::FullstackContext;
     let Some(context) = FullstackContext::current() else {
-        return ConsoleView::SignedOut;
+        return Caller::SignedOut;
     };
     let (Some(state), Some(principal)) = (
         context.extension::<AppState>(),
         context.extension::<auth::Principal>(),
     ) else {
-        return ConsoleView::SignedOut;
+        return Caller::SignedOut;
     };
     let name = principal
         .display_name
@@ -474,12 +497,32 @@ pub async fn console_view() -> ConsoleView {
         .or_else(|| principal.email.clone())
         .unwrap_or_else(|| principal.subject.clone());
     let Some(auth) = state.auth.as_ref() else {
-        return ConsoleView::SignedOut;
+        return Caller::SignedOut;
     };
     if !principal.groups.contains(&auth.access_group) {
-        return ConsoleView::Denied { name };
+        return Caller::Denied { name };
     }
     let role = principal.role(&auth.admin_group, auth.gm_group.as_deref());
+    Caller::Member {
+        state,
+        principal,
+        name,
+        role,
+    }
+}
+
+/// Resolve what the signed-in (or not) caller of the console should see.
+pub async fn console_view() -> ConsoleView {
+    let (state, principal, name, role) = match console_caller() {
+        Caller::SignedOut => return ConsoleView::SignedOut,
+        Caller::Denied { name } => return ConsoleView::Denied { name },
+        Caller::Member {
+            state,
+            principal,
+            name,
+            role,
+        } => (state, principal, name, role),
+    };
     let links = &state.console;
     let game = live_game(links.foundry_url.as_deref()).await;
     let open = match state.database.pool().await {
@@ -571,13 +614,13 @@ async fn active_session_users(pool: &PgPool) -> Vec<SessionUser> {
 /// SameSite=Lax lets through) does not.
 fn console_actor() -> Option<(AppState, auth::Principal)> {
     use dioxus::fullstack::FullstackContext;
-    let context = FullstackContext::current()?;
-    let state = context.extension::<AppState>()?;
-    let principal = context.extension::<auth::Principal>()?;
-    let auth = state.auth.as_ref()?;
-    if !principal.groups.contains(&auth.access_group) {
+    let Caller::Member {
+        state, principal, ..
+    } = console_caller()
+    else {
         return None;
-    }
+    };
+    let context = FullstackContext::current()?;
     let origin = context
         .parts_mut()
         .headers
@@ -1767,6 +1810,25 @@ mod tests {
         assert!(!same_origin(Some("https://play.vtt.example"), platform));
         assert!(!same_origin(Some("https://vtt.example.evil"), platform));
         assert!(!same_origin(Some("https://vtt.example"), None));
+    }
+
+    /// The builder mutations resolve the caller from the request context; with
+    /// no context they must refuse before touching the database.
+    #[tokio::test]
+    async fn builder_mutations_fail_closed_without_a_session() {
+        assert_eq!(
+            builder_store::save_rules("canary", true, crate::builder::CampaignRules::default())
+                .await,
+            Some("not_signed_in".into())
+        );
+        assert_eq!(
+            builder_store::update_draft(
+                "0b6f4c2e-0000-4000-8000-000000000000",
+                crate::builder::DraftPatch::Name("Al".into()),
+            )
+            .await,
+            Err("not_signed_in".into())
+        );
     }
 
     /// The composed app, as `main` builds it: 3 MiB is fine for one upload and

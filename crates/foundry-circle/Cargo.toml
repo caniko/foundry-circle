@@ -36,6 +36,7 @@ server = [
   "dep:hmac",
   "dep:media-oxide",
   "dep:base64",
+  "dep:getrandom",
 ]
 devtools = ["dioxus/devtools", "tartan-ui-dioxus/devtools"]
 
@@ -57,6 +58,7 @@ hex = { workspace = true, optional = true }
 hmac = { workspace = true, optional = true }
 media-oxide = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
 theme-broker.workspace = true
 
 axum = { workspace = true, optional = true }

@@ -4,17 +4,18 @@
 //! SSR tests need neither a server nor a router.
 
 use dioxus::prelude::*;
-use tartan_ui_core::{Feedback, FeedbackKind, FilterOption, ResourceLink};
+use tartan_ui_core::{Feedback, FeedbackKind, FilterChoice, FilterOption, ResourceLink};
 use tartan_ui_dioxus::{
-    CardGrid, DashboardHeader, EmptyState, FeedbackBanner, Field, Panel, ResourceCard, SelectField,
+    CardGrid, CheckboxFilterGroup, DashboardHeader, EmptyState, FeedbackBanner, Field, Panel,
+    ResourceCard, SelectField,
 };
 
 use crate::{
     ConsoleShell, Role, Route,
     builder::{
         AbilityMethod, AbilityRoll, BuilderView, CampaignRules, CampaignView, CharactersView,
-        DraftPatch, DraftSummary, POINT_BUY_BUDGET, Pending, Rolls, Scores, modifier,
-        point_buy_cost,
+        DraftPatch, DraftSummary, POINT_BUY_BUDGET, PackInfo, Pending, Rolls, SRD_ATTRIBUTION,
+        Scores, modifier, point_buy_cost,
     },
 };
 
@@ -36,6 +37,11 @@ async fn save_rules(
     rules: CampaignRules,
 ) -> Result<Option<String>, ServerFnError> {
     Ok(crate::http::builder_store::save_rules(&world_id, open, rules).await)
+}
+
+#[server]
+async fn sync_catalog(world_id: String) -> Result<Result<Vec<PackInfo>, String>, ServerFnError> {
+    Ok(crate::http::builder_store::sync_catalog(&world_id).await)
 }
 
 #[server]
@@ -97,6 +103,15 @@ pub fn CharactersPage() -> Element {
             });
         },
     );
+    let sync = EventHandler::new(move |world_id: String| {
+        spawn(async move {
+            match sync_catalog(world_id).await {
+                Ok(Ok(_)) => reload.restart(),
+                Ok(Err(code)) => error.set(Some(code_message(&code).into())),
+                Err(_) => error.set(Some(UNAVAILABLE.into())),
+            }
+        });
+    });
     let view = match &*view.read() {
         Some(Ok(view)) => view.clone(),
         _ => CharactersView::SignedOut,
@@ -107,7 +122,7 @@ pub fn CharactersPage() -> Element {
     };
     rsx! {
         ConsoleShell { account,
-            CharactersBoard { view, create, save, error: error() }
+            CharactersBoard { view, create, save, sync, error: error() }
         }
     }
 }
@@ -187,6 +202,14 @@ fn code_message(code: &str) -> &'static str {
         "invalid_scores" => "Those ability scores do not follow the method.",
         "already_rolled" => "These abilities are already rolled.",
         "invalid_name" => "Give the character a name of one to a hundred characters.",
+        "world_not_ready" => "Start the session and open the world, then sync again.",
+        "world_mismatch" => "The running world is not this campaign's world.",
+        "not_dnd5e" => "The running world does not use the dnd5e system.",
+        "module_missing" => {
+            "Enable the Foundry Circle module in the world's Manage Modules, then sync again."
+        }
+        "module_outdated" => "The world runs an older Foundry Circle module; update it first.",
+        "foundry_unavailable" => "Foundry did not answer the catalog read; try again.",
         _ => UNAVAILABLE,
     }
 }
@@ -197,6 +220,7 @@ fn CharactersBoard(
     view: CharactersView,
     create: EventHandler<String>,
     save: EventHandler<(String, bool, CampaignRules)>,
+    sync: EventHandler<String>,
     error: Option<String>,
 ) -> Element {
     let content = match view {
@@ -270,9 +294,19 @@ fn CharactersBoard(
                 if role != Role::Player {
                     Panel {
                         title: Some("Session zero".to_string()),
-                        description: Some("Open character creation and choose the ability methods the players may use.".to_string()),
+                        description: Some("Sync the world's rules content, open character creation and choose what the players may use.".to_string()),
                         for campaign in &data.campaigns {
-                            CampaignRulesForm { campaign: campaign.clone(), save }
+                            // The form's signals start from these props, so any
+                            // server-side change to the rules (a sync's default
+                            // sources, another tab's save) remounts it instead of
+                            // leaving stale choices to be saved back.
+                            CampaignRulesForm {
+                                key: "{campaign.world_id}|{campaign.open}|{serde_json::to_string(&campaign.rules).unwrap_or_default()}",
+                                campaign: campaign.clone(),
+                                ready: data.ready_world.as_deref() == Some(campaign.world_id.as_str()),
+                                save,
+                                sync,
+                            }
                         }
                     }
                     Panel {
@@ -296,16 +330,29 @@ fn CharactersBoard(
     }
 }
 
-/// One campaign's open toggle and allowed methods.
+/// One campaign's open toggle, allowed methods, sources and sync button.
 #[component]
 fn CampaignRulesForm(
     campaign: CampaignView,
+    ready: bool,
     save: EventHandler<(String, bool, CampaignRules)>,
+    sync: EventHandler<String>,
 ) -> Element {
     let mut open = use_signal(|| campaign.open);
     let mut methods = use_signal(|| campaign.rules.ability_methods.clone());
+    let mut sources = use_signal(|| campaign.rules.sources.clone());
     let world_id = campaign.world_id.clone();
     let rules = campaign.rules.clone();
+    let choices: Vec<FilterChoice> = campaign
+        .packs
+        .iter()
+        .map(|pack| FilterChoice {
+            value: pack.id.clone(),
+            label: pack.line(),
+            count: Some(u64::from(pack.count)),
+            checked: sources().contains(&pack.id),
+        })
+        .collect();
     rsx! {
         fieldset { class: "builder-form", key: "{campaign.world_id}",
             legend { {campaign.world_id.clone()} }
@@ -343,6 +390,44 @@ fn CampaignRulesForm(
                     }
                 }
             }
+            if choices.is_empty() {
+                p { class: "tartan-muted",
+                    "No rules content yet. Sync while this world is running to list its packs here."
+                }
+            } else {
+                CheckboxFilterGroup {
+                    legend: "Sources".to_string(),
+                    name: "source".to_string(),
+                    options: choices,
+                    on_change: move |(value, checked): (String, bool)| {
+                        let mut chosen = sources();
+                        if checked {
+                            if !chosen.contains(&value) {
+                                chosen.push(value);
+                            }
+                        } else {
+                            chosen.retain(|source| *source != value);
+                        }
+                        sources.set(chosen);
+                    },
+                }
+            }
+            div { class: "builder-sync",
+                button {
+                    class: "tartan-button",
+                    r#type: "button",
+                    disabled: !ready,
+                    onclick: {
+                        let world_id = world_id.clone();
+                        move |_| sync.call(world_id.clone())
+                    },
+                    "Sync rules content"
+                }
+                match &campaign.synced_at {
+                    Some(at) => rsx! { span { class: "tartan-muted", "Last sync: {at}" } },
+                    None => rsx! { span { class: "tartan-muted", "Never synced." } },
+                }
+            }
             button {
                 class: "tartan-button",
                 r#type: "button",
@@ -355,6 +440,7 @@ fn CampaignRulesForm(
                             open(),
                             CampaignRules {
                                 ability_methods: methods(),
+                                sources: sources(),
                                 ..rules.clone()
                             },
                         ));
@@ -507,6 +593,9 @@ fn BuilderSheet(
         div { class: "builder-sticky",
             span { "{data.pending.len()} to do" }
             a { class: "tartan-button", href: "/api/console/characters", "Back to characters" }
+        }
+        if data.srd_attribution {
+            p { class: "builder-attribution", "{SRD_ATTRIBUTION}" }
         }
     }
 }
@@ -747,6 +836,18 @@ mod tests {
             world_id: "canary".into(),
             open,
             rules: CampaignRules::default(),
+            packs: Vec::new(),
+            synced_at: None,
+        }
+    }
+
+    fn pack() -> PackInfo {
+        PackInfo {
+            id: "dnd5e.classes24".into(),
+            label: "Character Classes".into(),
+            source_book: Some("SRD 5.2".into()),
+            rules_version: Some("modern".into()),
+            count: 12,
         }
     }
 
@@ -799,6 +900,7 @@ mod tests {
             campaigns: vec![campaign(true)],
             mine: vec![summary("Al", AbilityMethod::StandardArray, None)],
             party: Vec::new(),
+            ready_world: Some("canary".into()),
         }
     }
 
@@ -823,6 +925,7 @@ mod tests {
             rolls: None,
             pending: Vec::new(),
             dm_note: None,
+            srd_attribution: false,
         }
     }
 
@@ -831,8 +934,9 @@ mod tests {
         fn Harness(view: CharactersView) -> Element {
             let create = EventHandler::new(|_: String| ());
             let save = EventHandler::new(|_: (String, bool, CampaignRules)| ());
+            let sync = EventHandler::new(|_: String| ());
             rsx! {
-                CharactersBoard { view, create, save, error: None }
+                CharactersBoard { view, create, save, sync, error: None }
             }
         }
         dioxus::ssr::render_element(rsx! {
@@ -889,6 +993,33 @@ mod tests {
         assert!(html.contains("value=\"pointBuy\""));
         assert!(!html.contains("value=\"roll\""));
         assert!(!html.contains("value=\"manual\""));
+    }
+
+    #[test]
+    fn gm_sees_sync_and_source_toggles() {
+        let mut data = data(Role::Gm);
+        data.campaigns[0].packs = vec![pack()];
+        data.campaigns[0].synced_at = Some("2026-11-15 18:20 UTC".into());
+        let html = render_board(CharactersView::Ready(Box::new(data)));
+        assert!(html.contains("Sync rules content"));
+        assert!(html.contains("Last sync: 2026-11-15 18:20 UTC"));
+        assert!(html.contains("name=\"source\""));
+        assert!(html.contains("value=\"dnd5e.classes24\""));
+        assert!(html.contains("Character Classes · SRD 5.2 (12)"));
+    }
+
+    #[test]
+    fn srd_attribution_is_shown_for_srd_sources() {
+        let mut data = builder_data(CampaignRules::default());
+        data.srd_attribution = true;
+        let html = render_sheet(BuilderView::Ready(Box::new(data)));
+        assert!(html.contains("System Reference Document 5.2.1"));
+        assert!(html.contains("Creative Commons Attribution 4.0"));
+
+        let html = render_sheet(BuilderView::Ready(Box::new(builder_data(
+            CampaignRules::default(),
+        ))));
+        assert!(!html.contains("System Reference Document"));
     }
 
     #[test]

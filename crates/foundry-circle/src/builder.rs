@@ -215,6 +215,52 @@ impl DraftStatus {
     }
 }
 
+/// One of the world's Item packs as the companion module lists it. Only packs
+/// the world already offers reach this list; nothing is bundled here.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PackInfo {
+    /// The pack's collection id, for example `dnd5e.classes24`.
+    pub id: String,
+    pub label: String,
+    /// The pack's `flags.dnd5e.sourceBook`, when the system sets one.
+    pub source_book: Option<String>,
+    pub rules_version: Option<String>,
+    /// Documents the catalog holds for this pack.
+    pub count: u32,
+}
+
+impl PackInfo {
+    /// The toggle label: the pack's name and the book behind it.
+    pub fn line(&self) -> String {
+        match &self.source_book {
+            Some(book) => format!("{} · {book}", self.label),
+            None => self.label.clone(),
+        }
+    }
+}
+
+/// One compendium document as the module returns it. `system` is the item's
+/// stored data without its description; `traits` maps a Trait advancement id to
+/// its granted and choosable keys.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogItem {
+    pub uuid: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub item_type: String,
+    pub img: Option<String>,
+    /// The description as plain text.
+    pub text: String,
+    pub system: serde_json::Value,
+    #[serde(default)]
+    pub traits: serde_json::Value,
+}
+
+/// The attribution the SRD 5.2.1 licence requires wherever its content shows.
+pub const SRD_ATTRIBUTION: &str = "This work includes material from the System Reference Document 5.2.1 (\"SRD 5.2.1\") by Wizards of the Coast LLC, available at https://www.dndbeyond.com/srd. The SRD 5.2.1 is licensed under the Creative Commons Attribution 4.0 International License, available at https://creativecommons.org/licenses/by/4.0/legalcode.";
+
 /// One adopted world's session-zero rules as the console lists them.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -222,6 +268,10 @@ pub struct CampaignView {
     pub world_id: String,
     pub open: bool,
     pub rules: CampaignRules,
+    /// The catalog packs the last sync stored, ordered by label.
+    pub packs: Vec<PackInfo>,
+    /// When the catalog was last synced, as shown to the GM.
+    pub synced_at: Option<String>,
 }
 
 /// One draft as the characters page lists it.
@@ -246,6 +296,8 @@ pub struct CharactersData {
     pub mine: Vec<DraftSummary>,
     /// Empty for players.
     pub party: Vec<DraftSummary>,
+    /// The world the driver reports Ready; only it can sync its catalog.
+    pub ready_world: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -269,6 +321,8 @@ pub struct BuilderData {
     pub rolls: Option<Rolls>,
     pub pending: Vec<Pending>,
     pub dm_note: Option<String>,
+    /// An enabled source is SRD 5.2 content, so the page must credit it.
+    pub srd_attribution: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -385,6 +439,7 @@ pub fn pending(choices: &DraftChoices, name: &str, rolls: Option<&Rolls>) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Map;
 
     fn scores(str: u8, dex: u8, con: u8, int: u8, wis: u8, cha: u8) -> Scores {
         Scores {
@@ -521,6 +576,65 @@ mod tests {
         assert_eq!(d6(251), Some(6));
         assert_eq!(d6(252), None);
         assert_eq!(d6(255), None);
+    }
+
+    #[test]
+    fn catalog_fixture_parses() {
+        // C3 replaces these with a live export; until then they are transcribed
+        // from the SRD 5.2 pack sources (see the fixtures' README).
+        let classes: Vec<CatalogItem> =
+            serde_json::from_str(include_str!("../tests/fixtures/catalog/classes24.json"))
+                .expect("classes24 fixture parses");
+        let origins: Vec<CatalogItem> =
+            serde_json::from_str(include_str!("../tests/fixtures/catalog/origins24.json"))
+                .expect("origins24 fixture parses");
+        assert_eq!(
+            origins
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Acolyte", "Human"]
+        );
+
+        let cleric = &classes[0];
+        assert_eq!(cleric.name, "Cleric");
+        assert_eq!(cleric.item_type, "class");
+        assert_eq!(
+            cleric.uuid,
+            "Compendium.dnd5e.classes24.Item.phbclcCleric0000"
+        );
+        // The module emits plain text and strips the description from `system`.
+        assert!(!cleric.text.is_empty() && cleric.text.chars().count() <= 4000);
+        assert!(!cleric.text.contains('<') && !cleric.text.contains('@'));
+        assert!(cleric.system.get("description").is_none());
+        assert_eq!(cleric.system["identifier"], "cleric");
+
+        let skills = &cleric.traits["2wUNkQzS4vL9nR6D"];
+        assert_eq!(skills["choices"][0]["count"], 2);
+        assert_eq!(skills["choices"][0]["options"][1]["label"], "Insight");
+        assert_eq!(skills["grants"].as_array().map(Vec::len), Some(0));
+        let armor = &cleric.traits["Z9K5kHYMLvroIMpT"];
+        assert_eq!(armor["grants"][2]["key"], "armor:med");
+
+        // A wildcard pool arrives expanded, so the builder never resolves one.
+        let acolyte = &origins[0];
+        let languages = &acolyte.traits["McRHkSL3WnG2Po7g"];
+        let options = languages["choices"][0]["options"]
+            .as_array()
+            .expect("options");
+        assert_eq!(options.len(), 10);
+        assert!(
+            options
+                .iter()
+                .all(|option| !option["key"].as_str().unwrap_or_default().ends_with('*'))
+        );
+
+        // A species with no Trait advancement carries an empty map.
+        assert_eq!(origins[1].traits, serde_json::json!({}));
+        assert_eq!(
+            origins[1].system["advancement"].as_object().map(Map::len),
+            Some(2)
+        );
     }
 
     #[test]

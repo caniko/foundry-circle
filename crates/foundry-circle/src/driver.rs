@@ -69,6 +69,14 @@ pub enum WorldOp {
         id: String,
         action: String,
     },
+    /// The world's Item packs, from the companion module's `catalogPacks`.
+    CatalogPacks,
+    /// One page of a pack's items, from the companion module's `catalogPage`.
+    CatalogPage {
+        pack: String,
+        after: Option<String>,
+        limit: u32,
+    },
 }
 
 /// A broker-managed Foundry account operation. The password is only ever a
@@ -104,6 +112,18 @@ pub enum WorldError {
     Timeout,
     #[error("browser failure")]
     Browser,
+}
+
+impl WorldError {
+    /// The code `sync_catalog` reports for a failed catalog call; the companion
+    /// module's two refusals keep their own names so the GM can act on them.
+    pub fn catalog_code(&self) -> &'static str {
+        match self {
+            Self::Unsupported(code) if code == "module_missing" => "module_missing",
+            Self::Unsupported(code) if code == "module_outdated" => "module_outdated",
+            _ => "foundry_unavailable",
+        }
+    }
 }
 
 /// The narrow seam used by the API layer. Foundry Circle only exposes
@@ -167,6 +187,8 @@ impl FoundryDriver for FakeDriver {
 }
 
 const FAKE_ACTOR: &str = "a1";
+const FAKE_PACK: &str = "dnd5e.classes24";
+const FAKE_CLASS: &str = "phbclcCleric0000";
 
 fn fake_call(op: WorldOp) -> Result<Value, WorldError> {
     validate_op(&op)?;
@@ -197,7 +219,52 @@ fn fake_call(op: WorldOp) -> Result<Value, WorldError> {
         WorldOp::SceneActivate { id } => Ok(json!({"id": id, "active": true})),
         WorldOp::CombatUpdate { action } => Ok(json!({"action": action})),
         WorldOp::PlaylistControl { id, action } => Ok(json!({"id": id, "action": action})),
+        WorldOp::CatalogPacks => Ok(json!({
+            "packs": [{
+                "id": FAKE_PACK,
+                "label": "Character Classes",
+                "packageName": "dnd5e",
+                "sourceBook": "SRD 5.2",
+                "rulesVersion": "modern",
+                "count": 1
+            }]
+        })),
+        WorldOp::CatalogPage { pack, after, limit } => {
+            if pack != FAKE_PACK {
+                return Err(WorldError::NotFound);
+            }
+            let items = if after.as_deref().is_none_or(|after| FAKE_CLASS > after) {
+                vec![fake_catalog_item()]
+            } else {
+                Vec::new()
+            };
+            let items: Vec<_> = items.into_iter().take(limit as usize).collect();
+            // The cursor is the pack index id, as the module returns it.
+            let next_cursor = (items.len() == limit as usize).then(|| FAKE_CLASS.to_owned());
+            Ok(json!({"items": items, "nextCursor": next_cursor}))
+        }
     }
+}
+
+/// One class as the companion module emits it.
+fn fake_catalog_item() -> Value {
+    json!({
+        "uuid": format!("Compendium.{FAKE_PACK}.Item.{FAKE_CLASS}"),
+        "name": "Cleric",
+        "type": "class",
+        "img": "systems/dnd5e/icons/classes/cleric.webp",
+        "text": "Cleric.",
+        "system": {"identifier": "cleric", "levels": 1},
+        "traits": {
+            "2wUNkQzS4vL9nR6D": {
+                "grants": [],
+                "choices": [{
+                    "count": 2,
+                    "options": [{"key": "skills:ins", "label": "Insight"}]
+                }]
+            }
+        }
+    })
 }
 
 fn fake_document(collection: &str, id: &str) -> Result<Value, WorldError> {
@@ -265,6 +332,24 @@ pub(crate) fn validate_op(op: &WorldOp) -> Result<(), WorldError> {
             id_check(id)?;
             if !matches!(action.as_str(), "play" | "stop") {
                 return Err(WorldError::Invalid("action must be play or stop".into()));
+            }
+        }
+        WorldOp::CatalogPacks => {}
+        WorldOp::CatalogPage { pack, after, limit } => {
+            if !(1..=50).contains(limit) {
+                return Err(WorldError::Invalid("limit must be 1..=50".into()));
+            }
+            let valid = (1..=100).contains(&pack.len())
+                && pack
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+            if !valid {
+                return Err(WorldError::Invalid(
+                    "pack must be 1..=100 characters of [A-Za-z0-9._-]".into(),
+                ));
+            }
+            if let Some(after) = after {
+                id_check(after)?;
             }
         }
     }
@@ -1144,6 +1229,11 @@ mod live {
             WorldOp::PlaylistControl { id, action } => {
                 (PLAYLIST_CONTROL, json!({"id": id, "action": action}))
             }
+            WorldOp::CatalogPacks => (CATALOG_PACKS, json!({})),
+            WorldOp::CatalogPage { pack, after, limit } => (
+                CATALOG_PAGE,
+                json!({"pack": pack, "after": after, "limit": limit}),
+            ),
         };
         let args = serde_json::to_string(&args).map_err(|_| WorldError::Browser)?;
         let script = script.replace("__ARGS__", &args);
@@ -1194,6 +1284,25 @@ mod live {
                 nextCursor: docs.length === args.limit ? docs[docs.length - 1].id : null
             }
         };
+    }"#;
+
+    /// The companion module's catalog reads: the only caller data is the
+    /// argument JSON, and every reply stays inside the fixed error vocabulary.
+    const CATALOG_PACKS: &str = r#"async function() {
+        const api = game.modules.get("foundry-circle")?.api;
+        if (!api) return { error: "unsupported", message: "module_missing" };
+        if (api.apiVersion !== 1) return { error: "unsupported", message: "module_outdated" };
+        return { ok: { packs: await api.catalogPacks() } };
+    }"#;
+
+    const CATALOG_PAGE: &str = r#"async function() {
+        const args = __ARGS__;
+        const api = game.modules.get("foundry-circle")?.api;
+        if (!api) return { error: "unsupported", message: "module_missing" };
+        if (api.apiVersion !== 1) return { error: "unsupported", message: "module_outdated" };
+        const reply = await api.catalogPage({ pack: args.pack, after: args.after, limit: args.limit });
+        if (reply?.error) return reply;
+        return { ok: reply };
     }"#;
 
     const GET_DOCUMENT: &str = r#"async function() {
@@ -1563,6 +1672,114 @@ mod live {
             );
             assert_eq!(foundry_session_cookie(&headers), Some("abc123".into()));
             assert_eq!(foundry_session_cookie(&HeaderMap::new()), None);
+        }
+
+        #[test]
+        fn catalog_ops_validate_bounds() {
+            fn page(pack: &str, after: Option<&str>, limit: u32) -> WorldOp {
+                WorldOp::CatalogPage {
+                    pack: pack.into(),
+                    after: after.map(str::to_owned),
+                    limit,
+                }
+            }
+            assert_eq!(validate_op(&WorldOp::CatalogPacks), Ok(()));
+            assert_eq!(validate_op(&page("dnd5e.classes24", None, 1)), Ok(()));
+            assert_eq!(validate_op(&page("dnd5e.classes24", None, 50)), Ok(()));
+            assert_eq!(
+                validate_op(&page("dnd5e.classes24", Some("abc123"), 10)),
+                Ok(())
+            );
+            for bad in [
+                page("dnd5e.classes24", None, 0),
+                page("dnd5e.classes24", None, 51),
+                page("dnd5e/classes", None, 10),
+                page("dnd5e classes", None, 10),
+                page(&"d".repeat(101), None, 10),
+                page("dnd5e.classes24", Some("a-b"), 10),
+                page("dnd5e.classes24", Some(&"a".repeat(65)), 10),
+            ] {
+                assert!(
+                    matches!(validate_op(&bad), Err(WorldError::Invalid(_))),
+                    "{bad:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn fake_catalog_page_round_trips_as_catalog_items() {
+            let packs = crate::driver::fake_call(WorldOp::CatalogPacks).unwrap();
+            let pack: crate::builder::PackInfo =
+                serde_json::from_value(packs["packs"][0].clone()).unwrap();
+            assert_eq!(pack.id, "dnd5e.classes24");
+            assert_eq!(pack.source_book.as_deref(), Some("SRD 5.2"));
+            assert_eq!(pack.count, 1);
+
+            let reply = crate::driver::fake_call(WorldOp::CatalogPage {
+                pack: pack.id.clone(),
+                after: None,
+                // A full page yields a cursor; the next one ends the pack.
+                limit: 1,
+            })
+            .unwrap();
+            let items: Vec<crate::builder::CatalogItem> =
+                serde_json::from_value(reply["items"].clone()).unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].name, "Cleric");
+            assert_eq!(items[0].item_type, "class");
+            assert_eq!(
+                items[0].traits["2wUNkQzS4vL9nR6D"]["choices"][0]["count"],
+                2
+            );
+
+            // The returned cursor is the pack index id, and the page after it is
+            // the end of the pack.
+            let cursor = reply["nextCursor"].as_str().unwrap().to_owned();
+            let next = crate::driver::fake_call(WorldOp::CatalogPage {
+                pack: pack.id,
+                after: Some(cursor),
+                limit: 50,
+            })
+            .unwrap();
+            assert_eq!(next["items"].as_array().map(Vec::len), Some(0));
+            assert!(next["nextCursor"].is_null());
+        }
+
+        #[test]
+        fn module_errors_map_to_sync_codes() {
+            let missing = WorldError::Unsupported("module_missing".into());
+            let outdated = WorldError::Unsupported("module_outdated".into());
+            assert_eq!(missing.catalog_code(), "module_missing");
+            assert_eq!(outdated.catalog_code(), "module_outdated");
+            assert_eq!(
+                WorldError::Unsupported("unknown collection".into()).catalog_code(),
+                "foundry_unavailable"
+            );
+            assert_eq!(WorldError::NotReady.catalog_code(), "foundry_unavailable");
+            assert_eq!(WorldError::NotFound.catalog_code(), "foundry_unavailable");
+        }
+
+        #[test]
+        fn catalog_scripts_fail_closed_without_the_module() {
+            for script in [CATALOG_PACKS, CATALOG_PAGE] {
+                assert!(
+                    script.contains(r#"game.modules.get("foundry-circle")?.api"#),
+                    "a catalog script must read the module API only"
+                );
+                assert!(script.contains(
+                    r#"if (!api) return { error: "unsupported", message: "module_missing" };"#
+                ));
+                assert!(script.contains(
+                    r#"if (api.apiVersion !== 1) return { error: "unsupported", message: "module_outdated" };"#
+                ));
+            }
+            // The page script forwards its one JSON argument and never builds a
+            // second query of its own.
+            assert!(CATALOG_PAGE.contains("__ARGS__"));
+            assert!(CATALOG_PAGE.contains("api.catalogPage({ pack: args.pack"));
+            // Both replies use the same `{ ok }` envelope as every other op.
+            assert!(CATALOG_PACKS.contains("return { ok: { packs: await api.catalogPacks() } };"));
+            assert!(CATALOG_PAGE.contains("return { ok: reply };"));
         }
 
         #[test]

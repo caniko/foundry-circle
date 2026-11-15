@@ -4,6 +4,21 @@ All notable changes to Foundry Circle are documented here.
 
 ## Unreleased
 
+- Finish the character builder's player flow and give the DM oversight. The
+  details step stores the fifteen allowlisted sheet fields (2000 characters
+  each, unknown keys refused), and the review step shows the sheet in brief —
+  totals, level-one hit points (the class's hit die maximum plus the
+  Constitution modifier), proficiencies, features, the equipment answer and the
+  to-do list — with "Submit for review" disabled while anything is open.
+  `submit_draft` moves the player's own draft from `draft` to `submitted` in one
+  transaction with the row locked, after recomputing the to-do list from the
+  world's real catalog and campaign rules (`draft_incomplete` otherwise); a
+  submitted draft is read-only. The party board now counts what each draft still
+  owes from the same functions the builder page uses, instead of omitting class
+  decisions and equipment, and adds status, pending counts, class, species,
+  background, totals and a skill coverage table built from `granted_traits`.
+  GMs and admins send a submitted draft back with `request_changes` and a note
+  of one to a thousand characters, audited and shown to the player.
 - Add the equipment step to the character builder: a draft chooses its class's
   kit or gold and its background's, within the campaign's equipment mode. The
   builder reads dnd5e's own `system.startingEquipment` and supports both a

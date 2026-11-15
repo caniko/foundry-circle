@@ -30,10 +30,11 @@ authoritative for world documents. Nothing here writes to Foundry yet.
 - `GET /api/console/characters` lists your drafts and, for GMs, the session-zero
   rules and the party board; `/api/console/characters/{id}` is one draft.
 - Server functions: `characters_view`, `builder_view`, `save_rules`,
-  `create_draft`, `update_draft`, `roll_abilities`, `grant_reroll` and
-  `delete_draft`. Every mutation rejects a missing session with
-  `not_signed_in`, a wrong role with `permission_denied`, and re-validates the
-  scores, the name, the draft's owner and the campaign's open flag.
+  `create_draft`, `update_draft`, `roll_abilities`, `grant_reroll`,
+  `delete_draft`, `submit_draft` and `request_changes`. Every mutation rejects a
+  missing session with `not_signed_in`, a wrong role with `permission_denied`,
+  and re-validates the scores, the name, the draft's owner and the campaign's
+  open flag.
 - Ability scores follow the chosen method: the standard array, 27-point buy,
   4d6 drop lowest or manual. Rolls come from the server's OS random source,
   are written once per draft, and `update_draft` never writes the `rolls`
@@ -82,6 +83,32 @@ a kit becomes one line. The campaign's equipment mode limits the list to kits,
 to gold, or both; `update_draft` re-validates every answer against the options
 the chosen owners offer, and a replaced class or background drops its answer
 beside its picks.
+
+### Details, review and the DM board
+
+The details step is optional prose under fifteen allowlisted keys: alignment,
+faith, gender, age, height, weight, eyes, hair, skin, appearance, personality
+trait, ideal, bond, flaw and backstory. Each is at most 2000 characters, an
+emptied field stores nothing, and any other key is refused (`invalid_detail`).
+
+The review step shows the sheet in brief: the totals the abilities step
+produces, hit points as the class's hit die maximum plus the Constitution
+modifier of the totals (level 1), the proficiencies and features the draft holds,
+the equipment it picked, and the "to do" list. "Submit for review" is only
+enabled while nothing is open. `submit_draft` takes the player's own draft from
+`draft` to `submitted` in one transaction with the row locked, and recomputes the
+to-do list from the world's real catalog and campaign rules first, so a stale
+page cannot submit an unfinished character (`draft_incomplete`). A submitted
+draft is read-only for every edit and every roll.
+
+The party board lists every draft with its status, what it still owes, its class,
+species, background, totals and honest rolls, and a skill coverage table built
+from the same `granted_traits` the sheet reads; the skills nobody in the party
+has are listed as well. The board counts with the same functions the player's
+to-do list uses, so the two never disagree. A GM or admin sends a submitted draft
+back to `draft` with `request_changes` and a note of one to a thousand
+characters: it is stored in `dm_note`, audited, and shown at the top of the
+player's sheet.
 
 ### Rules content
 

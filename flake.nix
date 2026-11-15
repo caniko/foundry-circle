@@ -80,7 +80,15 @@
         if pkgs.stdenv.hostPlatform.isLinux
         then [pkgs.pkg-config]
         else [];
-      src = toolchain.craneLib.cleanCargoSource ./.;
+      # cleanCargoSource keeps only Rust and Cargo files; the broker embeds
+      # its SQL migrations at compile time with `sqlx::migrate!`.
+      src = pkgs.lib.fileset.toSource {
+        root = ./.;
+        fileset = pkgs.lib.fileset.unions [
+          (toolchain.craneLib.fileset.commonCargoSources ./.)
+          ./crates/foundry-circle/migrations
+        ];
+      };
       commonArgs = {
         inherit src;
         pname = "foundry-circle";
@@ -434,6 +442,20 @@
 
       checks = {
         default = cargoPackage;
+        # The packaged broker must embed every migration: an empty migrator
+        # still "succeeds" and leaves the database without tables.
+        packaged-migrations = pkgs.runCommand "packaged-migrations" {} ''
+          set -eu
+          for migration in ${./crates/foundry-circle/migrations}/*.sql; do
+            # sqlx embeds the SQL verbatim; its longest line is distinctive.
+            line=$(awk 'length > max { max = length; line = $0 } END { print line }' "$migration")
+            if ! grep -aqF -- "$line" ${dioxusPackage}/bin/foundry-circle; then
+              echo "packaged broker lacks migration $(basename "$migration")" >&2
+              exit 1
+            fi
+          done
+          touch "$out"
+        '';
         # The public cache must never receive licensed Foundry VTT content.
         published-closure-unlicensed =
           pkgs.runCommand "published-closure-unlicensed" {

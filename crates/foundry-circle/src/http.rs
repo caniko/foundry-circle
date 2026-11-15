@@ -75,6 +75,11 @@ impl ConsoleLinks {
     }
 }
 
+/// `<origin><path>`, when the origin is configured.
+fn join(origin: &Option<String>, path: &str) -> Option<String> {
+    origin.as_ref().map(|origin| format!("{origin}{path}"))
+}
+
 #[derive(Clone, Default)]
 pub struct DatabaseState {
     pool: Arc<RwLock<Option<PgPool>>>,
@@ -476,7 +481,6 @@ pub async fn console_view() -> ConsoleView {
     }
     let role = principal.role(&auth.admin_group, auth.gm_group.as_deref());
     let links = &state.console;
-    let join = |origin: &Option<String>, path: &str| origin.as_ref().map(|o| format!("{o}{path}"));
     let game = live_game(links.foundry_url.as_deref()).await;
     let open = match state.database.pool().await {
         Some(pool) => session::open(&pool).await.unwrap_or_else(|error| {
@@ -733,6 +737,17 @@ fn permission_denied() -> Response {
         .into_response()
 }
 
+/// Where a player enters the running game: the play host's own OIDC gate.
+///
+/// Absent unless the world is running and adopted, because `/_circle/enter`
+/// refuses a lease that is still in setup or not yet adopted.
+fn join_url(open: Option<&session::OpenSession>, links: &ConsoleLinks) -> Option<String> {
+    let running = open.is_some_and(|open| open.phase == SessionPhase::Running && open.adopted);
+    running
+        .then(|| join(&links.play_url, "/_circle/enter"))
+        .flatten()
+}
+
 /// The one open lease, for the API and console. Any access-group member may
 /// see it; only the holder and admins may act on it.
 async fn session_status(
@@ -759,9 +774,10 @@ async fn session_status(
     let view = open
         .as_ref()
         .map(|open| session::view(open, &principal.subject));
+    let join_url = join_url(open.as_ref(), &state.console);
     (
         StatusCode::OK,
-        Json(json!({"session": view, "unmanaged": unmanaged})),
+        Json(json!({"session": view, "unmanaged": unmanaged, "joinUrl": join_url})),
     )
         .into_response()
 }
@@ -1534,6 +1550,50 @@ mod tests {
                 .unwrap();
             assert_eq!(&body[..], b"OIDC is not configured", "{path}");
         }
+    }
+
+    fn open_session(phase: SessionPhase, adopted: bool) -> session::OpenSession {
+        let now = chrono::Utc::now();
+        session::OpenSession {
+            id: Uuid::nil(),
+            holder: "gm".into(),
+            holder_name: "GM".into(),
+            phase,
+            world_id: Some("circle".into()),
+            adopted,
+            started_at: now,
+            last_seen: now,
+        }
+    }
+
+    /// `GET /api/v1/session` only offers the join link once the world is
+    /// running and adopted; the handler needs a database, so the decision is
+    /// what the test pins.
+    #[test]
+    fn join_url_needs_a_running_adopted_game() {
+        let links = ConsoleLinks {
+            play_url: Some("https://play.example".into()),
+            ..ConsoleLinks::default()
+        };
+        assert_eq!(join_url(None, &links), None);
+        for (phase, adopted) in [
+            (SessionPhase::Setup, false),
+            (SessionPhase::Running, false),
+            (SessionPhase::Ending, true),
+        ] {
+            let open = open_session(phase, adopted);
+            assert_eq!(join_url(Some(&open), &links), None, "{phase:?}");
+        }
+        let open = open_session(SessionPhase::Running, true);
+        assert_eq!(
+            join_url(Some(&open), &links).as_deref(),
+            Some("https://play.example/_circle/enter")
+        );
+        assert_eq!(
+            join_url(Some(&open), &ConsoleLinks::default()),
+            None,
+            "an unconfigured play origin has no link"
+        );
     }
 
     fn principal(groups: &[&str]) -> auth::Principal {

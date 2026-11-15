@@ -8,6 +8,11 @@ All notable changes to Foundry Circle are documented here.
   `crates/foundry-circle/migrations`, so the packaged server ran an empty
   migrator and every login failed on a missing table. A `packaged-migrations`
   check now fails when the packaged binary lacks any migration.
+- Let players and GMs join the running game from the desktop app. The session
+  endpoint now reports a `joinUrl`, the play host's `/_circle/enter`, once the
+  world is running and adopted; `foundry-circle-upload` exposes `join_url`
+  using the stored session, and the window opens that URL in the system browser
+  so the play host runs its own OIDC login and Foundry handoff.
 - Foundry Circle is now licensed `EUPL-1.2` (see `LICENSE`), and `media-oxide`
   is consumed under its new `MIT OR Apache-2.0` crate license.
 - Ship the game-master tools on every platform: `foundry-circle-upload` and

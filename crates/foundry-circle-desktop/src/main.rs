@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use dioxus::html::HasFileData;
 use dioxus::prelude::*;
 use foundry_circle_upload::{
-    AudioCodec, Error, Session, convert, forget_session, load_session, login, open_browser,
-    save_session, staged_asset, upload, whoami,
+    AudioCodec, Error, Session, convert, forget_session, join_url, load_session, login,
+    open_browser, save_session, staged_asset, upload, whoami,
 };
 use tartan_ui_core::{Feedback, FeedbackKind};
 use tartan_ui_dioxus::{DashboardHeader, FeedbackBanner, Field, Panel, SHARED_STYLES};
@@ -305,6 +305,49 @@ impl Uploader {
         });
     }
 
+    /// Open the running game in the system browser.
+    ///
+    /// The play host's `/_circle/enter` does the OIDC login and the Foundry
+    /// handoff; the window never renders either (RFC 8252).
+    fn join_game(self) {
+        if self.busy() {
+            return;
+        }
+        let Some(session) = self.session() else {
+            return;
+        };
+        // No `busy`: it serializes sign-ins, and a join only opens a browser.
+        let generation = self.generation();
+        spawn(async move {
+            let result = join_url(&session).await;
+            // A late answer for a replaced session must not speak for it.
+            if !generation.is_current(self.generation()) {
+                return;
+            }
+            match result {
+                Ok(Some(url)) => {
+                    self.note(match open_browser(&url) {
+                        Ok(()) => feedback_info("Your browser opens the game."),
+                        Err(error) => feedback_error(format!(
+                            "could not open a browser ({error}); open {url} manually"
+                        )),
+                    });
+                }
+                Ok(None) => self.note(feedback_info("No game is running yet.")),
+                Err(error) => {
+                    let (text, expired) = describe_error(&error);
+                    self.note(feedback_error(text));
+                    if expired {
+                        self.expire(
+                            generation,
+                            Some("Signed out: the server session expired.".into()),
+                        );
+                    }
+                }
+            }
+        });
+    }
+
     /// Drop the session locally; the server's copy stays valid until it expires.
     fn sign_out(self) {
         self.expire(self.generation(), None);
@@ -463,6 +506,7 @@ fn account_panel(mut uploader: Uploader, signed_in: bool) -> Element {
             .session()
             .map(|session| session.server)
             .unwrap_or_default();
+        let busy = uploader.busy();
         rsx! {
             Panel { title: "Account".to_string(),
                 dl { class: "uploader-account",
@@ -470,6 +514,13 @@ fn account_panel(mut uploader: Uploader, signed_in: bool) -> Element {
                     dd { {account} }
                     dt { "Server" }
                     dd { class: "uploader-path", {server} }
+                }
+                button {
+                    class: "tartan-button",
+                    r#type: "button",
+                    disabled: busy,
+                    onclick: move |_| uploader.join_game(),
+                    "Join game"
                 }
                 button {
                     class: "tartan-button",

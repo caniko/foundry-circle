@@ -4,6 +4,10 @@ All notable changes to Foundry Circle are documented here.
 
 ## Unreleased
 
+- Package the SQL migrations with the broker: the Nix source filter dropped
+  `crates/foundry-circle/migrations`, so the packaged server ran an empty
+  migrator and every login failed on a missing table. A `packaged-migrations`
+  check now fails when the packaged binary lacks any migration.
 - Foundry Circle is now licensed `EUPL-1.2` (see `LICENSE`), and `media-oxide`
   is consumed under its new `MIT OR Apache-2.0` crate license.
 - Ship the game-master tools on every platform: `foundry-circle-upload` and

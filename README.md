@@ -70,6 +70,19 @@ rule validates. Answers live in `DraftChoices::asi` beside the picks and are
 pruned by the same rule, so changing a species or background asks again for
 whatever the new one owes.
 
+### Equipment step
+
+The class and the background each offer their starting equipment: one radio per
+option, and every owner that names a wealth offers it as gold beside its kits.
+A class with a top-level `OR` (the fighter's two kits) offers each kit; a single
+top-level `AND` is one kit. The kit's documents are stored by uuid with their
+counts (`count: null` is one) and its own currency adds plain gold, a category
+such as a holy symbol is listed as "ask your DM for", and a choice nested inside
+a kit becomes one line. The campaign's equipment mode limits the list to kits,
+to gold, or both; `update_draft` re-validates every answer against the options
+the chosen owners offer, and a replaced class or background drops its answer
+beside its picks.
+
 ### Rules content
 
 Content is the world's own compendium packs, cached per world in
@@ -80,6 +93,13 @@ Foundry module, which the broker drives from its own GM page
 running and adopted, its system to be `dnd5e`, and the module below to be
 enabled; otherwise it reports `world_not_ready`, `world_mismatch`, `not_dnd5e`,
 `module_missing`, `module_outdated` or `foundry_unavailable`.
+
+The module also reports the world's compendium uuid redirects
+(`uuidRedirects()`), which the sync stores per world in `builder_redirects`:
+dnd5e points a premium module's pack prefixes at the SRD packs while that module
+is inactive, so every lookup in the builder applies them and a kit that names
+the Player's Handbook's equipment resolves the SRD item. A module older than
+the function sends no redirects and syncs as before.
 
 Install the module from this flake:
 

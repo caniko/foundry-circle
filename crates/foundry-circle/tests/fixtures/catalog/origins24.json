@@ -14,6 +14,65 @@
         "book": ""
       },
       "identifier": "acolyte",
+      "startingEquipment": [
+        {
+          "type": "AND",
+          "requiresProficiency": false,
+          "_id": "jBbYoNZtbWE8sFAK",
+          "group": "",
+          "sort": 100000
+        },
+        {
+          "type": "linked",
+          "requiresProficiency": false,
+          "_id": "SJ6L0ftgjWR0IHqf",
+          "group": "jBbYoNZtbWE8sFAK",
+          "sort": 200000,
+          "key": "Compendium.dnd5e.equipment24.Item.phbtulCalligraph"
+        },
+        {
+          "type": "linked",
+          "requiresProficiency": false,
+          "_id": "JyGC1bsbScRwmhwo",
+          "group": "jBbYoNZtbWE8sFAK",
+          "sort": 300000,
+          "key": "Compendium.dnd5e.equipment24.Item.phbagBook0000000"
+        },
+        {
+          "type": "focus",
+          "requiresProficiency": false,
+          "_id": "mqDqagje0Uupgti8",
+          "group": "jBbYoNZtbWE8sFAK",
+          "sort": 350000,
+          "key": "holy"
+        },
+        {
+          "type": "linked",
+          "requiresProficiency": false,
+          "_id": "0MPEwCGayquuW846",
+          "group": "jBbYoNZtbWE8sFAK",
+          "sort": 475000,
+          "key": "Compendium.dnd5e.equipment24.Item.phbagParchment00",
+          "count": 10
+        },
+        {
+          "type": "linked",
+          "requiresProficiency": false,
+          "_id": "XjrKVdIBjZzoS9w2",
+          "group": "jBbYoNZtbWE8sFAK",
+          "sort": 600000,
+          "key": "Compendium.dnd5e.equipment24.Item.phbagRobe0000000"
+        },
+        {
+          "type": "currency",
+          "requiresProficiency": false,
+          "_id": "l8Xn4SkQ7vRm2JcP",
+          "group": "jBbYoNZtbWE8sFAK",
+          "sort": 700000,
+          "key": "gp",
+          "count": 8
+        }
+      ],
       "wealth": "50",
       "advancement": {
         "kDI6zoUamHzFTvHG": {
@@ -118,6 +177,12 @@
             ]
           }
         ]
+      }
+    },
+    "equipment": {
+      "labels": {
+        "mqDqagje0Uupgti8": "any holy focus",
+        "l8Xn4SkQ7vRm2JcP": "8 GP"
       }
     }
   },

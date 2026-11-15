@@ -3,7 +3,10 @@
 //! Everything here is I/O-free so the wasm bundle and the server agree on the
 //! rules; `builder_store` owns the SQL and `builder_ui` the pages.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet, VecDeque},
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -172,6 +175,9 @@ pub struct DraftChoices {
     pub picks: BTreeMap<String, Vec<String>>,
     /// Decision key → ability → the bonus the player assigned there.
     pub asi: BTreeMap<String, BTreeMap<String, u8>>,
+    /// The class or background uuid → the equipment option it picked: `kit`,
+    /// `kit2`, … or `gold`.
+    pub equipment: BTreeMap<String, String>,
 }
 
 impl DraftChoices {
@@ -242,6 +248,12 @@ pub enum DraftPatch {
         key: String,
         /// Ability key → the bonus the player assigned there.
         deltas: BTreeMap<String, u8>,
+    },
+    Equipment {
+        /// The class or background the equipment belongs to.
+        owner: String,
+        /// One of the options that owner offers under the campaign's mode.
+        option: String,
     },
 }
 
@@ -368,20 +380,109 @@ pub struct CatalogItem {
     pub system: serde_json::Value,
     #[serde(default)]
     pub traits: serde_json::Value,
+    /// The starting-equipment entry labels dnd5e's own
+    /// `EquipmentEntryData#label` produced; a module older than this field
+    /// sends none, which leaves the builder on the item's name or entry type.
+    #[serde(default)]
+    pub equipment: EquipmentLabels,
 }
 
-/// The enabled sources' cached documents: the class step and every decision the
-/// walker resolves read only this. Foundry stays the authority behind it.
+/// The entry labels the module resolved for one item's starting equipment, by
+/// entry id.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct EquipmentLabels {
+    pub labels: BTreeMap<String, String>,
+}
+
+/// One of the world's compendium uuid redirects: the pack prefix dnd5e rewrites
+/// (a premium module's) and the pack it names instead (the SRD one), from
+/// `CONFIG.compendium.uuidRedirects`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Redirect {
+    pub from: String,
+    pub to: String,
+}
+
+impl Redirect {
+    /// Whether the pair is a compendium pack prefix the broker will store; a
+    /// module is not trusted to send anything else.
+    pub fn valid(&self) -> bool {
+        [&self.from, &self.to].into_iter().all(|prefix| {
+            prefix.starts_with("Compendium.")
+                && prefix.len() <= 200
+                && prefix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        })
+    }
+}
+
+/// One world's cached documents and its uuid redirects: the three root slots
+/// may only pick from the enabled `packs`, while a kit's items and a granted
+/// feature resolve anything the world synced. Foundry stays the authority.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Catalog {
     /// The enabled packs, by label; the item's uuid names which one it is.
     pub packs: Vec<PackInfo>,
+    /// Every synced document of the world: the enabled packs' plus those the
+    /// builder never picks from but a kit or a granted feature names.
     pub items: Vec<CatalogItem>,
+    /// The world's own uuid redirects, as dnd5e registers them.
+    pub redirects: Vec<Redirect>,
 }
 
 impl Catalog {
+    /// The document one uuid names, after the world's redirects.
     pub fn get(&self, uuid: &str) -> Option<&CatalogItem> {
-        self.items.iter().find(|item| item.uuid == uuid)
+        let uuid = self.redirect(uuid);
+        self.items.iter().find(|item| item.uuid == uuid.as_ref())
+    }
+
+    /// The uuid a lookup uses: dnd5e points a premium module's pack prefix at
+    /// the SRD pack when that module is not active, so every lookup — the
+    /// walker's, a pool's, a kit's — resolves the SRD document. This is the one
+    /// place the redirects apply.
+    pub fn redirect<'a>(&'a self, uuid: &'a str) -> Cow<'a, str> {
+        for redirect in &self.redirects {
+            let rest = uuid.strip_prefix(redirect.from.as_str()).filter(|rest| {
+                // A pack prefix ends where the document id begins.
+                rest.is_empty() || rest.starts_with('.')
+            });
+            if let Some(rest) = rest {
+                // The world's map holds one entry per pack and no prefix inside
+                // another, so the first match is the rewrite.
+                return Cow::Owned(format!("{}{rest}", redirect.to));
+            }
+        }
+        Cow::Borrowed(uuid)
+    }
+
+    /// Whether a document belongs to one of the enabled sources. Only the three
+    /// root slots are gated this way: a kit's items and a granted feature are
+    /// mandated by a document the player already chose.
+    pub fn enabled(&self, uuid: &str) -> bool {
+        let uuid = self.redirect(uuid);
+        pack_id(&uuid).is_some_and(|id| self.packs.iter().any(|pack| pack.id == id))
+    }
+
+    /// Whether an enabled source offers a document of this type: the one rule
+    /// the three root slots obey.
+    pub fn offers(&self, uuid: &str, item_type: &str) -> bool {
+        self.enabled(uuid)
+            && self
+                .get(uuid)
+                .is_some_and(|item| item.item_type == item_type)
+    }
+
+    /// The document one of the draft's root slots names, while an enabled
+    /// source still offers it.
+    pub fn root<'a>(&'a self, choices: &DraftChoices, slot: Slot) -> Option<&'a CatalogItem> {
+        let uuid = slot.chosen(choices)?;
+        if !self.offers(uuid, slot.item_type()) {
+            return None;
+        }
+        self.get(uuid)
     }
 
     /// The label of the pack a document's uuid names, for grouping by source.
@@ -743,8 +844,11 @@ fn item_choice_options(
 ) -> Vec<Opt> {
     let configuration = &advancement["configuration"];
     let mut options: Vec<Opt> = Vec::new();
+    // The player chooses these, so only packs the GM enabled may offer them.
     for entry in configuration["pool"].as_array().into_iter().flatten() {
-        if let Some(item) = entry["uuid"].as_str().and_then(|uuid| catalog.get(uuid)) {
+        if let Some(item) = entry["uuid"].as_str().and_then(|uuid| catalog.get(uuid))
+            && catalog.enabled(&item.uuid)
+        {
             push_option(&mut options, item, level, held);
         }
     }
@@ -754,7 +858,10 @@ fn item_choice_options(
         let value = restriction["type"].as_str().unwrap_or_default();
         for item in &catalog.items {
             let kind = &item.system["type"];
-            if kind["value"].as_str() == Some(value) && kind["subtype"].as_str() == Some(subtype) {
+            if kind["value"].as_str() == Some(value)
+                && kind["subtype"].as_str() == Some(subtype)
+                && catalog.enabled(&item.uuid)
+            {
                 push_option(&mut options, item, level, held);
             }
         }
@@ -930,11 +1037,14 @@ fn walk(
                         .and_then(|count| u8::try_from(count).ok())
                         .unwrap_or(0);
                     let options = item_choice_options(catalog, advancement, level, &found.held);
+                    // Only a saved pick still on offer opens its own decisions: a
+                    // pack the GM disabled since then no longer counts.
                     chosen = choices
                         .picks
                         .get(&key)
                         .into_iter()
                         .flatten()
+                        .filter(|uuid| options.iter().any(|option| &option.value == *uuid))
                         .collect::<Vec<_>>();
                     Some(if options.len() < usize::from(count) {
                         // The enabled sources cannot satisfy this pool yet.
@@ -1054,12 +1164,12 @@ pub fn decisions(catalog: &Catalog, choices: &DraftChoices, level: u8) -> Vec<De
     // dnd5e applies level 0 (species, then background, with their grants) before
     // level 1 (the class), so Expertise sees background skills. ponytail: each root
     // walks all its levels at once; interleave by level when slice 9 adds levels.
-    for (root, step) in [
-        (&choices.species, Step::Origin),
-        (&choices.background, Step::Origin),
-        (&choices.class, Step::Class),
+    for (slot, step) in [
+        (Slot::Species, Step::Origin),
+        (Slot::Background, Step::Origin),
+        (Slot::Class, Step::Class),
     ] {
-        if let Some(item) = root.as_deref().and_then(|uuid| catalog.get(uuid)) {
+        if let Some(item) = catalog.root(choices, slot) {
             walk(catalog, item, choices, level, step, &mut found);
         }
     }
@@ -1067,9 +1177,10 @@ pub fn decisions(catalog: &Catalog, choices: &DraftChoices, level: u8) -> Vec<De
 }
 
 /// Drop every answer the draft's roots no longer open: a replaced root's own and
-/// nested decisions, and the sub-decisions of an item it no longer picks. The
-/// walker produces keys only for the current roots, so this is the one rule,
-/// and it covers the ability bonuses beside the picks.
+/// nested decisions, the sub-decisions of an item it no longer picks, and the
+/// equipment of a class or background it no longer has. The walker produces keys
+/// only for the current roots, so this is the one rule, and it covers the
+/// ability bonuses and the equipment beside the picks.
 pub fn prune_picks(catalog: &Catalog, choices: &mut DraftChoices, level: u8) {
     let keys: BTreeSet<String> = decisions(catalog, choices, level)
         .into_iter()
@@ -1077,6 +1188,12 @@ pub fn prune_picks(catalog: &Catalog, choices: &mut DraftChoices, level: u8) {
         .collect();
     choices.picks.retain(|key, _| keys.contains(key));
     choices.asi.retain(|key, _| keys.contains(key));
+    let owners: Vec<String> = [&choices.class, &choices.background]
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect();
+    choices.equipment.retain(|owner, _| owners.contains(owner));
 }
 
 /// The documents of one item type the enabled sources offer, by source then name.
@@ -1084,7 +1201,7 @@ fn offered(catalog: &Catalog, item_type: &str) -> Vec<ClassOption> {
     let mut options: Vec<ClassOption> = catalog
         .items
         .iter()
-        .filter(|item| item.item_type == item_type)
+        .filter(|item| item.item_type == item_type && catalog.enabled(&item.uuid))
         .map(|item| ClassOption {
             uuid: item.uuid.clone(),
             name: item.name.clone(),
@@ -1108,15 +1225,12 @@ pub fn origin_options(catalog: &Catalog, slot: Slot) -> Vec<ClassOption> {
 /// The chosen class as its step shows it: hit die, primary ability, features
 /// and the decisions they open.
 pub fn class_details(catalog: &Catalog, choices: &DraftChoices, level: u8) -> Option<ClassDetails> {
-    let class = choices
-        .class
-        .as_deref()
-        .and_then(|uuid| catalog.get(uuid))?;
+    let class = catalog.root(choices, Slot::Class)?;
     // Walk the origin first, as `decisions` does, so class offers (Expertise)
     // see background proficiencies; then keep only what the class opened.
     let mut found = Walk::default();
-    for root in [&choices.species, &choices.background] {
-        if let Some(item) = root.as_deref().and_then(|uuid| catalog.get(uuid)) {
+    for slot in [Slot::Species, Slot::Background] {
+        if let Some(item) = catalog.root(choices, slot) {
             walk(catalog, item, choices, level, Step::Origin, &mut found);
         }
     }
@@ -1177,7 +1291,7 @@ pub fn origin_details(
 ) -> Option<OriginDetails> {
     let mut found = Walk::default();
     for root in [Slot::Species, Slot::Background] {
-        let Some(item) = root.chosen(choices).and_then(|uuid| catalog.get(uuid)) else {
+        let Some(item) = catalog.root(choices, root) else {
             continue;
         };
         let (features_from, decisions_from) = (found.features.len(), found.decisions.len());
@@ -1193,6 +1307,310 @@ pub fn origin_details(
         }
     }
     None
+}
+
+/// One document a kit embeds, with how many of it.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EquipmentItem {
+    pub uuid: String,
+    pub count: u32,
+}
+
+/// One starting-equipment choice: a kit the draft receives, or the gold that
+/// replaces it.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EquipmentOption {
+    /// `kit`, `kit2`, … for an owner with several kits, or `gold`.
+    pub id: String,
+    /// The option's one line, already worded for the page.
+    pub label: String,
+    /// The documents the kit embeds, in the order the rules list them.
+    pub items: Vec<EquipmentItem>,
+    /// Plain gold the kit's own currency entries add.
+    pub gp: u32,
+    /// The owner's wealth formula, on the gold option only.
+    pub wealth: Option<String>,
+    /// What the builder cannot embed, as dnd5e words it: a category such as a
+    /// focus, a choice inside a kit, or a document the synced packs do not
+    /// hold. The DM hands these out.
+    pub manual: Vec<String>,
+}
+
+/// One chosen root's starting equipment and the options it offers.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EquipmentPlan {
+    /// The class or background uuid the options belong to.
+    pub owner: String,
+    pub owner_name: String,
+    pub options: Vec<EquipmentOption>,
+}
+
+impl EquipmentPlan {
+    /// The option the draft picked, when it is still one this plan offers.
+    pub fn chosen<'a>(&'a self, choices: &'a DraftChoices) -> Option<&'a EquipmentOption> {
+        let id = choices.equipment.get(&self.owner)?;
+        self.options.iter().find(|option| &option.id == id)
+    }
+}
+
+/// Every starting-equipment choice the draft's chosen class and background owe
+/// under the campaign's equipment mode: what the equipment step shows and what
+/// `update_draft` validates against. An owner that offers nothing — no kit and
+/// no wealth — asks nothing.
+pub fn equipment_plans(
+    catalog: &Catalog,
+    choices: &DraftChoices,
+    rules: &CampaignRules,
+) -> Vec<EquipmentPlan> {
+    let mut plans = Vec::new();
+    for slot in [Slot::Class, Slot::Background] {
+        let Some(item) = catalog.root(choices, slot) else {
+            continue;
+        };
+        let plan = equipment_plan(catalog, item, rules);
+        if !plan.options.is_empty() {
+            plans.push(plan);
+        }
+    }
+    plans
+}
+
+/// What a draft may store for one owner's equipment: an option the owner offers
+/// under the campaign's mode. The page and `update_draft` share this one rule.
+pub fn validate_equipment(
+    plans: &[EquipmentPlan],
+    owner: &str,
+    option: &str,
+) -> Result<(), &'static str> {
+    let plan = plans
+        .iter()
+        .find(|plan| plan.owner == owner)
+        .ok_or("not_offered")?;
+    plan.options
+        .iter()
+        .any(|offered| offered.id == option)
+        .then_some(())
+        .ok_or("not_offered")
+}
+
+/// One owner's options: each kit the rules offer, then the wealth that replaces
+/// all of them, as the campaign's mode allows.
+fn equipment_plan(catalog: &Catalog, item: &CatalogItem, rules: &CampaignRules) -> EquipmentPlan {
+    let mut options = Vec::new();
+    if rules.equipment != EquipmentMode::Gold {
+        options = kit_options(catalog, item);
+    }
+    if rules.equipment != EquipmentMode::Kit
+        && let Some(wealth) = item.system["wealth"]
+            .as_str()
+            .map(str::trim)
+            .filter(|wealth| !wealth.is_empty())
+    {
+        options.push(EquipmentOption {
+            id: "gold".into(),
+            label: format!("{wealth} GP"),
+            items: Vec::new(),
+            gp: 0,
+            wealth: Some(wealth.to_owned()),
+            manual: Vec::new(),
+        });
+    }
+    EquipmentPlan {
+        owner: item.uuid.clone(),
+        owner_name: item.name.clone(),
+        options,
+    }
+}
+
+/// The kits one document offers: each child of a top-level `OR` (the 2024
+/// classes' "choose A, B or C"), the document's one top-level `AND`, or every
+/// top-level entry when the content lists several.
+fn kit_options(catalog: &Catalog, item: &CatalogItem) -> Vec<EquipmentOption> {
+    let entries: Vec<&Value> = item.system["startingEquipment"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .collect();
+    let top: Vec<&Value> = entries
+        .iter()
+        .copied()
+        .filter(|entry| group(entry).is_empty())
+        .collect();
+    let roots: Vec<&Value> = match top.as_slice() {
+        [entry] if entry_type(entry) == "OR" => children(&entries, entry),
+        [entry] if entry_type(entry) == "AND" => vec![*entry],
+        _ => top,
+    };
+    let mut options = Vec::new();
+    for (index, root) in roots.into_iter().enumerate() {
+        let mut kit = Kit::default();
+        kit.add(catalog, &item.equipment.labels, &entries, root, 0);
+        options.push(EquipmentOption {
+            // The first kit is the plan's plain `kit`, so a class with one kit
+            // stores the same option a background does.
+            id: if index == 0 {
+                "kit".into()
+            } else {
+                format!("kit{}", index + 1)
+            },
+            label: kit.label(),
+            items: kit.items,
+            gp: kit.gp,
+            wealth: None,
+            manual: kit.manual,
+        });
+    }
+    options
+}
+
+/// One kit while it is read: its documents, the gold its entries add, what the
+/// DM hands out, and the page's own words for the option.
+#[derive(Default)]
+struct Kit {
+    items: Vec<EquipmentItem>,
+    gp: u32,
+    manual: Vec<String>,
+    parts: Vec<String>,
+}
+
+/// How deep starting-equipment entries may nest, as `EquipmentEntryData` caps
+/// it; broken content stops here instead of looping.
+const KIT_DEPTH: u8 = 4;
+
+impl Kit {
+    /// Fold one entry, and everything below it, into the kit.
+    fn add(
+        &mut self,
+        catalog: &Catalog,
+        labels: &BTreeMap<String, String>,
+        entries: &[&Value],
+        entry: &Value,
+        depth: u8,
+    ) {
+        if depth >= KIT_DEPTH {
+            return;
+        }
+        match entry_type(entry) {
+            "AND" => {
+                for child in children(entries, entry) {
+                    self.add(catalog, labels, entries, child, depth + 1);
+                }
+            }
+            "OR" => {
+                // ponytail: a choice inside a kit is handed to the DM as one
+                // line; add a picker when a kit needs one.
+                let choices: Vec<String> = children(entries, entry)
+                    .iter()
+                    .map(|child| entry_label(child, labels, catalog))
+                    .collect();
+                if !choices.is_empty() {
+                    let line = format!("choose one: {}", choices.join(", "));
+                    self.manual.push(line.clone());
+                    self.parts.push(line);
+                }
+            }
+            "linked" => {
+                let count = entry_count(entry);
+                match entry["key"].as_str().and_then(|uuid| catalog.get(uuid)) {
+                    Some(item) => {
+                        self.parts.push(counted(&item.name, count));
+                        self.items.push(EquipmentItem {
+                            uuid: item.uuid.clone(),
+                            count,
+                        });
+                    }
+                    None => self.line(entry_label(entry, labels, catalog)),
+                }
+            }
+            "currency" if entry["key"].as_str() == Some("gp") => self.gp += entry_count(entry),
+            _ => self.line(entry_label(entry, labels, catalog)),
+        }
+    }
+
+    /// Note a line the kit cannot embed, in the manual list and the summary.
+    fn line(&mut self, label: String) {
+        self.manual.push(label.clone());
+        self.parts.push(label);
+    }
+
+    /// The option's one line: everything the kit contains, gold included.
+    fn label(&self) -> String {
+        let mut parts = self.parts.clone();
+        if self.gp > 0 {
+            parts.push(format!("{} GP", self.gp));
+        }
+        if parts.is_empty() {
+            "Kit".to_owned()
+        } else {
+            format!("Kit: {}", parts.join(", "))
+        }
+    }
+}
+
+/// An entry's type, as `EquipmentEntryData#TYPES` spells it.
+fn entry_type(entry: &Value) -> &str {
+    entry["type"].as_str().unwrap_or_default()
+}
+
+/// The group an entry sits in; the top level has none, as `''` or null.
+fn group(entry: &Value) -> &str {
+    entry["group"].as_str().unwrap_or_default()
+}
+
+/// How many of an entry a kit grants; dnd5e leaves `count` empty for one.
+fn entry_count(entry: &Value) -> u32 {
+    entry["count"]
+        .as_u64()
+        .filter(|count| *count > 0)
+        .and_then(|count| u32::try_from(count).ok())
+        .unwrap_or(1)
+}
+
+/// The entries of one group, in the order their `sort` gives them.
+fn children<'a>(entries: &[&'a Value], parent: &Value) -> Vec<&'a Value> {
+    let id = parent["_id"].as_str().unwrap_or_default();
+    let mut children: Vec<&Value> = entries
+        .iter()
+        .copied()
+        .filter(|entry| !id.is_empty() && group(entry) == id)
+        .collect();
+    children.sort_by_key(|entry| entry["sort"].as_i64().unwrap_or(0));
+    children
+}
+
+/// An item line: the count only when there is more than one.
+fn counted(name: &str, count: u32) -> String {
+    if count > 1 {
+        format!("{count}× {name}")
+    } else {
+        name.to_owned()
+    }
+}
+
+/// An entry as dnd5e's own `label` getter words it. A linked entry's label is
+/// HTML anchoring the document, so the builder shows the item's name instead; a
+/// module that sends no labels leaves the entry's type.
+fn entry_label(entry: &Value, labels: &BTreeMap<String, String>, catalog: &Catalog) -> String {
+    let linked = entry_type(entry) == "linked";
+    // A linked entry the catalog resolves reads as its item's name.
+    if linked && let Some(item) = entry["key"].as_str().and_then(|uuid| catalog.get(uuid)) {
+        return counted(&item.name, entry_count(entry));
+    }
+    // Otherwise dnd5e's own label. The getter punctuates a count with an HTML
+    // entity, and a linked entry's label is an HTML anchor, so it is reduced to
+    // plain text.
+    if let Some(label) = entry["_id"]
+        .as_str()
+        .and_then(|id| labels.get(id))
+        .filter(|label| !label.is_empty())
+    {
+        let label = label.replace("&times;", "×");
+        return if linked { plain(&label) } else { label };
+    }
+    counted(entry_type(entry), entry_count(entry))
 }
 
 /// What a draft may store for one decision: offered values only, each once,
@@ -1437,6 +1855,8 @@ pub struct BuilderData {
     /// The chosen origin roots' features and the decisions they open.
     pub species_details: Option<OriginDetails>,
     pub background_details: Option<OriginDetails>,
+    /// The starting equipment the chosen class and background owe.
+    pub equipment: Vec<EquipmentPlan>,
     /// The trait keys the draft already holds, for "already have" marks.
     pub granted: Vec<String>,
     /// Base scores plus every ability bonus, fixed and assigned.
@@ -1530,9 +1950,11 @@ pub fn validate_scores(
 
 /// The open steps of one draft, in the order the player should visit them.
 /// `catalog` is what tells a chosen root the enabled sources still offer; a
-/// caller without one cannot see a root fall out of the sources.
+/// caller without one cannot see a root fall out of the sources, nor the
+/// equipment its roots owe.
 pub fn pending(
     catalog: Option<&Catalog>,
+    rules: &CampaignRules,
     choices: &DraftChoices,
     name: &str,
     rolls: Option<&Rolls>,
@@ -1549,9 +1971,7 @@ pub fn pending(
     let offered = match (choices.class.as_deref(), catalog) {
         (None, _) => false,
         (Some(_), None) => true,
-        (Some(uuid), Some(catalog)) => catalog
-            .get(uuid)
-            .is_some_and(|item| item.item_type == Slot::Class.item_type()),
+        (Some(uuid), Some(catalog)) => catalog.offers(uuid, Slot::Class.item_type()),
     };
     if !offered {
         pending.push(Pending {
@@ -1567,9 +1987,7 @@ pub fn pending(
         let offered = match (slot.chosen(choices), catalog) {
             (None, _) => false,
             (Some(_), None) => true,
-            (Some(uuid), Some(catalog)) => catalog
-                .get(uuid)
-                .is_some_and(|item| item.item_type == slot.item_type()),
+            (Some(uuid), Some(catalog)) => catalog.offers(uuid, slot.item_type()),
         };
         if !offered {
             pending.push(Pending {
@@ -1611,6 +2029,17 @@ pub fn pending(
             });
         }
     }
+    if let Some(catalog) = catalog {
+        for plan in equipment_plans(catalog, choices, rules) {
+            if plan.chosen(choices).is_none() {
+                pending.push(Pending {
+                    step: Step::Equipment,
+                    key: plan.owner.clone(),
+                    label: format!("Choose {} starting equipment", plan.owner_name),
+                });
+            }
+        }
+    }
     pending
 }
 
@@ -1621,6 +2050,7 @@ mod tests {
 
     const CLERIC: &str = "Compendium.dnd5e.classes24.Item.phbclcCleric0000";
     const DIVINE_ORDER: &str = "Compendium.dnd5e.classes24.Item.phbclcDivineOrde";
+    const FIGHTER: &str = "Compendium.dnd5e.classes24.Item.phbftrFighter000";
     const ACOLYTE: &str = "Compendium.dnd5e.origins24.Item.phbbgAcolyte0000";
     const HUMAN: &str = "Compendium.dnd5e.origins24.Item.phbspHuman000000";
     const VERSATILE: &str = "Compendium.dnd5e.origins24.Item.phbsptVersatile0";
@@ -1633,6 +2063,13 @@ mod tests {
     const WARLOCK: &str = "Compendium.dnd5e.classes24.Item.phbwlkWarlock000";
     const PACT_OF_THE_BLADE: &str = "Compendium.dnd5e.classes24.Item.phbinvPactBlade0";
     const THIRSTING_BLADE: &str = "Compendium.dnd5e.classes24.Item.phbinvThirstingB";
+    const CHAIN_SHIRT: &str = "Compendium.dnd5e.equipment24.Item.phbarmChainShirt";
+    const SHIELD: &str = "Compendium.dnd5e.equipment24.Item.phbarmShield0000";
+    const MACE: &str = "Compendium.dnd5e.equipment24.Item.phbwepMace000000";
+    const PRIESTS_PACK: &str = "Compendium.dnd5e.equipment24.Item.phbagPriestsPack";
+    const JAVELIN: &str = "Compendium.dnd5e.equipment24.Item.phbwepJavelin000";
+    const PLAYERS_HANDBOOK_EQUIPMENT: &str = "Compendium.dnd-players-handbook.equipment";
+    const SRD_EQUIPMENT: &str = "Compendium.dnd5e.equipment24";
 
     /// The transcribed packs as one campaign's enabled sources.
     fn catalog() -> Catalog {
@@ -1653,6 +2090,11 @@ mod tests {
                 "Feats",
                 include_str!("../tests/fixtures/catalog/feats24.json"),
             ),
+            (
+                "dnd5e.equipment24",
+                "Equipment",
+                include_str!("../tests/fixtures/catalog/equipment24.json"),
+            ),
         ] {
             let items: Vec<CatalogItem> = serde_json::from_str(file).expect("fixture parses");
             catalog.packs.push(PackInfo {
@@ -1664,6 +2106,12 @@ mod tests {
             });
             catalog.items.extend(items);
         }
+        // What dnd5e registers while the premium Player's Handbook is not
+        // active: the 2024 kits and classes still name its packs.
+        catalog.redirects.push(Redirect {
+            from: PLAYERS_HANDBOOK_EQUIPMENT.into(),
+            to: SRD_EQUIPMENT.into(),
+        });
         catalog
     }
 
@@ -1679,6 +2127,13 @@ mod tests {
             .iter()
             .find(|decision| decision.title == title)
             .unwrap_or_else(|| panic!("{title} in {decisions:?}"))
+    }
+
+    fn plan<'a>(plans: &'a [EquipmentPlan], owner: &str) -> &'a EquipmentPlan {
+        plans
+            .iter()
+            .find(|plan| plan.owner == owner)
+            .unwrap_or_else(|| panic!("{owner} in {plans:?}"))
     }
 
     fn scores(str: u8, dex: u8, con: u8, int: u8, wis: u8, cha: u8) -> Scores {
@@ -1882,12 +2337,41 @@ mod tests {
                 .expect("feats24 fixture parses");
         assert_eq!(feats[0].name, "Magic Initiate");
         assert_eq!(feats[0].system["type"]["subtype"], "origin");
+
+        // Slice five: the class and background kits, and the entry labels
+        // dnd5e's own label getter produced.
+        assert_eq!(cleric.system["startingEquipment"][0]["type"], "AND");
+        assert_eq!(
+            cleric
+                .equipment
+                .labels
+                .get("DJWicB3geFrbTgwZ")
+                .map(String::as_str),
+            Some("any holy focus")
+        );
+        let fighter = classes.last().expect("fighter");
+        assert_eq!(fighter.name, "Fighter");
+        assert_eq!(fighter.system["startingEquipment"][0]["type"], "OR");
+        assert_eq!(fighter.system["wealth"], "155");
+        // An item without starting equipment carries empty labels.
+        let equipment: Vec<CatalogItem> =
+            serde_json::from_str(include_str!("../tests/fixtures/catalog/equipment24.json"))
+                .expect("equipment24 fixture parses");
+        assert_eq!(equipment[0].uuid, CHAIN_SHIRT);
+        assert!(equipment[0].equipment.labels.is_empty());
     }
 
     #[test]
     fn pending_lists_name_abilities_and_class() {
         let catalog = catalog();
-        let empty = pending(Some(&catalog), &DraftChoices::default(), "  ", None, &[]);
+        let empty = pending(
+            Some(&catalog),
+            &CampaignRules::default(),
+            &DraftChoices::default(),
+            "  ",
+            None,
+            &[],
+        );
         assert_eq!(empty.len(), 5, "{empty:?}");
         assert_eq!(empty[0].step, Step::Details);
         assert_eq!(empty[0].key, "name");
@@ -1901,6 +2385,7 @@ mod tests {
 
         let rolling = pending(
             Some(&catalog),
+            &CampaignRules::default(),
             &DraftChoices {
                 method: Some(AbilityMethod::Roll),
                 base: None,
@@ -1915,6 +2400,7 @@ mod tests {
 
         let done = pending(
             Some(&catalog),
+            &CampaignRules::default(),
             &DraftChoices {
                 method: Some(AbilityMethod::StandardArray),
                 base: Some(scores(15, 14, 13, 12, 10, 8)),
@@ -1927,7 +2413,17 @@ mod tests {
             None,
             &[],
         );
-        assert!(done.is_empty(), "{done:?}");
+        // The class and the background each owe their starting equipment.
+        assert_eq!(
+            done.iter()
+                .map(|item| (item.step, item.label.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (Step::Equipment, "Choose Cleric starting equipment"),
+                (Step::Equipment, "Choose Acolyte starting equipment"),
+            ],
+            "{done:?}"
+        );
         assert_eq!(modifier(8), -1);
         assert_eq!(modifier(15), 2);
 
@@ -1939,7 +2435,14 @@ mod tests {
             class: Some("Compendium.dnd5e.classes24.Item.phbclcGone0000".into()),
             ..DraftChoices::default()
         };
-        let lost = pending(Some(&catalog), &stale, "Al", None, &[]);
+        let lost = pending(
+            Some(&catalog),
+            &CampaignRules::default(),
+            &stale,
+            "Al",
+            None,
+            &[],
+        );
         assert_eq!(lost.len(), 3, "{lost:?}");
         assert!(
             lost.iter()
@@ -1955,6 +2458,7 @@ mod tests {
         };
         let to_do = pending(
             Some(&catalog),
+            &CampaignRules::default(),
             &classed,
             "Al",
             None,
@@ -2052,6 +2556,39 @@ mod tests {
     }
 
     #[test]
+    fn disabled_packs_offer_no_item_choices() {
+        let enabled = catalog();
+        let mut catalog = catalog();
+        catalog.packs.retain(|pack| pack.id != "dnd5e.feats24");
+        // A pick saved while the feats were enabled.
+        let versatile_key = {
+            let open = super::decisions(
+                &enabled,
+                &DraftChoices {
+                    species: Some(HUMAN.into()),
+                    ..DraftChoices::default()
+                },
+                1,
+            );
+            decision(&open, "Versatile").key.clone()
+        };
+        let choices = DraftChoices {
+            species: Some(HUMAN.into()),
+            picks: BTreeMap::from([(versatile_key, vec![SKILLED.to_owned()])]),
+            ..DraftChoices::default()
+        };
+        let found = decisions(&catalog, &choices, 1);
+        // The player chooses Versatile's feat, so a disabled pack offers none,
+        // and the saved Skilled pick no longer opens Skilled's own decisions.
+        let versatile = decision(&found, "Versatile");
+        assert!(
+            matches!(&versatile.kind, DecisionKind::Unsupported { .. }),
+            "{versatile:?}"
+        );
+        assert!(found.iter().all(|d| d.owner_name != "Skilled"), "{found:?}");
+    }
+
+    #[test]
     fn acolyte_asi_allows_two_one_or_three_ones() {
         let catalog = catalog();
         let choices = DraftChoices {
@@ -2102,11 +2639,25 @@ mod tests {
         answered.base = Some(base);
         let found = super::decisions(&catalog, &answered, 1);
         // The bonus stays on the to do list until every point is assigned.
-        let before = pending(Some(&catalog), &answered, "Al", None, &found);
+        let before = pending(
+            Some(&catalog),
+            &CampaignRules::default(),
+            &answered,
+            "Al",
+            None,
+            &found,
+        );
         assert!(before.iter().any(|item| item.key == asi.key), "{before:?}");
         answered.asi.insert(asi.key.clone(), two_one);
         let found = super::decisions(&catalog, &answered, 1);
-        let after = pending(Some(&catalog), &answered, "Al", None, &found);
+        let after = pending(
+            Some(&catalog),
+            &CampaignRules::default(),
+            &answered,
+            "Al",
+            None,
+            &found,
+        );
         assert!(!after.iter().any(|item| item.key == asi.key), "{after:?}");
         let totals = totals(&found, &answered, None);
         assert_eq!((totals.int, totals.wis, totals.dex), (14, 11, 14));
@@ -2223,7 +2774,14 @@ mod tests {
             ..DraftChoices::default()
         };
         let decisions = decisions(&catalog, &human, 1);
-        let to_do = pending(Some(&catalog), &human, "Al", None, &decisions);
+        let to_do = pending(
+            Some(&catalog),
+            &CampaignRules::default(),
+            &human,
+            "Al",
+            None,
+            &decisions,
+        );
         // The species fills its slot; its own two choices stay open, and the
         // background is still unpicked.
         assert!(!to_do.iter().any(|item| item.key == "species"), "{to_do:?}");
@@ -2253,7 +2811,14 @@ mod tests {
             .picks
             .insert(versatile.key.clone(), vec![SKILLED.to_owned()]);
         let found = super::decisions(&catalog, &answered, 1);
-        let to_do = pending(Some(&catalog), &answered, "Al", None, &found);
+        let to_do = pending(
+            Some(&catalog),
+            &CampaignRules::default(),
+            &answered,
+            "Al",
+            None,
+            &found,
+        );
         assert!(
             !to_do
                 .iter()
@@ -2702,10 +3267,303 @@ mod tests {
         );
 
         // The pending list no longer asks for an unanswerable spell pick.
-        let to_do = pending(Some(&catalog), &choices, "Al", None, &decisions);
+        let to_do = pending(
+            Some(&catalog),
+            &CampaignRules::default(),
+            &choices,
+            "Al",
+            None,
+            &decisions,
+        );
         assert!(
             to_do.iter().all(|item| !item.label.contains("Cantrip")),
             "{to_do:?}"
         );
+    }
+
+    #[test]
+    fn cleric_kit_lists_linked_items_gold_and_manual_focus() {
+        let catalog = catalog();
+        let choices = DraftChoices {
+            class: Some(CLERIC.into()),
+            background: Some(ACOLYTE.into()),
+            ..DraftChoices::default()
+        };
+        let plans = equipment_plans(&catalog, &choices, &CampaignRules::default());
+        assert_eq!(
+            plans
+                .iter()
+                .map(|plan| plan.owner.as_str())
+                .collect::<Vec<_>>(),
+            [CLERIC, ACOLYTE]
+        );
+
+        // The class has one top-level AND, so one kit and the wealth.
+        let cleric = plan(&plans, CLERIC);
+        assert_eq!(cleric.owner_name, "Cleric");
+        assert_eq!(
+            cleric
+                .options
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            ["kit", "gold"]
+        );
+        let kit = &cleric.options[0];
+        assert_eq!(
+            kit.label,
+            "Kit: Chain Shirt, Shield, Mace, any holy focus, Priest's Pack, 7 GP"
+        );
+        // The PHB-prefixed links resolve to the SRD documents through the
+        // world's redirect, and `count: null` is one.
+        assert_eq!(
+            kit.items
+                .iter()
+                .map(|item| (item.uuid.as_str(), item.count))
+                .collect::<Vec<_>>(),
+            [(CHAIN_SHIRT, 1), (SHIELD, 1), (MACE, 1), (PRIESTS_PACK, 1)]
+        );
+        assert_eq!(kit.gp, 7);
+        assert_eq!(kit.wealth, None);
+        // A focus category is not a document; the DM hands it out.
+        assert_eq!(kit.manual, ["any holy focus"]);
+
+        // The background's kit is a second plan of the same shape.
+        let acolyte = plan(&plans, ACOLYTE);
+        assert_eq!(acolyte.options[0].items.len(), 4);
+        assert_eq!(acolyte.options[0].gp, 8);
+        assert_eq!(acolyte.options[0].manual, ["any holy focus"]);
+
+        // Every owner without a choice is on the to do list; answering one
+        // leaves the other.
+        let rules = CampaignRules::default();
+        let mut answered = choices.clone();
+        let found = decisions(&catalog, &answered, 1);
+        let to_do = pending(Some(&catalog), &rules, &answered, "Al", None, &found);
+        assert_eq!(
+            to_do
+                .iter()
+                .filter(|item| item.step == Step::Equipment)
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "Choose Cleric starting equipment",
+                "Choose Acolyte starting equipment"
+            ]
+        );
+        answered.equipment.insert(CLERIC.into(), "kit".into());
+        let to_do = pending(Some(&catalog), &rules, &answered, "Al", None, &found);
+        assert_eq!(
+            to_do
+                .iter()
+                .filter(|item| item.step == Step::Equipment)
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Choose Acolyte starting equipment"]
+        );
+
+        // A replaced class takes its equipment answer with it; the background's
+        // stays.
+        answered.equipment.insert(ACOLYTE.into(), "gold".into());
+        answered.select(Slot::Class, Some(BARD.into()));
+        prune_picks(&catalog, &mut answered, 1);
+        assert_eq!(answered.equipment.get(CLERIC), None);
+        assert_eq!(
+            answered.equipment.get(ACOLYTE).map(String::as_str),
+            Some("gold")
+        );
+    }
+
+    #[test]
+    fn gold_option_uses_wealth() {
+        let catalog = catalog();
+        let plans = equipment_plans(&catalog, &with_class(CLERIC), &CampaignRules::default());
+        let gold = plans[0]
+            .options
+            .iter()
+            .find(|option| option.id == "gold")
+            .expect("gold");
+        // The class table's 110 GP, not the kit's own 7.
+        assert_eq!(gold.label, "110 GP");
+        assert_eq!(gold.wealth.as_deref(), Some("110"));
+        assert_eq!(gold.gp, 0);
+        assert!(gold.items.is_empty() && gold.manual.is_empty());
+
+        // A stored choice is the plan's, and only while it is offered.
+        let mut choices = with_class(CLERIC);
+        choices.equipment.insert(CLERIC.into(), "gold".into());
+        assert_eq!(
+            plans[0]
+                .chosen(&choices)
+                .map(|option| option.label.as_str()),
+            Some("110 GP")
+        );
+        choices.equipment.insert(CLERIC.into(), "kit2".into());
+        assert!(plans[0].chosen(&choices).is_none());
+    }
+
+    #[test]
+    fn equipment_mode_restricts_options() {
+        let catalog = catalog();
+        let choices = with_class(CLERIC);
+        let offered = |mode: EquipmentMode| {
+            equipment_plans(
+                &catalog,
+                &choices,
+                &CampaignRules {
+                    equipment: mode,
+                    ..CampaignRules::default()
+                },
+            )
+            .into_iter()
+            .next()
+            .map(|plan| {
+                plan.options
+                    .into_iter()
+                    .map(|option| option.id)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+        };
+        assert_eq!(offered(EquipmentMode::Kit), ["kit"]);
+        assert_eq!(offered(EquipmentMode::Gold), ["gold"]);
+        assert_eq!(offered(EquipmentMode::Either), ["kit", "gold"]);
+
+        // The server stores only what the mode offers, for its own owners only.
+        let gold = equipment_plans(
+            &catalog,
+            &choices,
+            &CampaignRules {
+                equipment: EquipmentMode::Gold,
+                ..CampaignRules::default()
+            },
+        );
+        assert_eq!(validate_equipment(&gold, CLERIC, "gold"), Ok(()));
+        assert_eq!(validate_equipment(&gold, CLERIC, "kit"), Err("not_offered"));
+        assert_eq!(
+            validate_equipment(&gold, ACOLYTE, "gold"),
+            Err("not_offered")
+        );
+        let either = equipment_plans(&catalog, &choices, &CampaignRules::default());
+        assert_eq!(validate_equipment(&either, CLERIC, "kit"), Ok(()));
+        assert_eq!(
+            validate_equipment(&either, CLERIC, "kit2"),
+            Err("not_offered")
+        );
+    }
+
+    #[test]
+    fn equipment_needs_an_enabled_source() {
+        let mut catalog = catalog();
+        // A pack the GM turned off keeps its documents out of the root slots,
+        // though a kit may still resolve them.
+        catalog.packs.retain(|pack| pack.id != "dnd5e.classes24");
+        let choices = DraftChoices {
+            class: Some(CLERIC.into()),
+            background: Some(ACOLYTE.into()),
+            ..DraftChoices::default()
+        };
+        assert!(catalog.get(CLERIC).is_some());
+        assert!(!catalog.offers(CLERIC, Slot::Class.item_type()));
+        // Only the background's equipment is owed now, and only its decisions
+        // are walked.
+        let plans = equipment_plans(&catalog, &choices, &CampaignRules::default());
+        assert_eq!(
+            plans
+                .iter()
+                .map(|plan| plan.owner.as_str())
+                .collect::<Vec<_>>(),
+            [ACOLYTE]
+        );
+        let found = decisions(&catalog, &choices, 1);
+        assert!(found.iter().all(|decision| decision.step == Step::Origin));
+        let to_do = pending(
+            Some(&catalog),
+            &CampaignRules::default(),
+            &choices,
+            "Al",
+            None,
+            &found,
+        );
+        assert!(to_do.iter().any(|item| item.key == "class"), "{to_do:?}");
+    }
+
+    #[test]
+    fn fighter_or_offers_each_kit_and_gold() {
+        let catalog = catalog();
+        let plans = equipment_plans(&catalog, &with_class(FIGHTER), &CampaignRules::default());
+        let fighter = plan(&plans, FIGHTER);
+        // Each child of the top-level OR is an option, and the wealth a third.
+        assert_eq!(
+            fighter
+                .options
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            ["kit", "kit2", "gold"]
+        );
+
+        let heavy = &fighter.options[0];
+        assert_eq!(
+            heavy.label,
+            "Kit: Chain Mail, Greatsword, Flail, 8× Javelin, Dungeoneer's Pack, 4 GP"
+        );
+        assert_eq!(heavy.items[0].count, 1);
+        assert_eq!(
+            heavy.items[3],
+            EquipmentItem {
+                uuid: JAVELIN.into(),
+                count: 8
+            }
+        );
+        assert_eq!(heavy.gp, 4);
+        assert_eq!(heavy.wealth, None);
+        assert!(heavy.manual.is_empty(), "{heavy:?}");
+
+        let light = &fighter.options[1];
+        assert_eq!(light.items.len(), 7);
+        assert_eq!(light.gp, 11);
+        assert!(light.manual.is_empty(), "{light:?}");
+
+        assert_eq!(fighter.options[2].wealth.as_deref(), Some("155"));
+    }
+
+    #[test]
+    fn phb_uuid_redirects_to_srd_item() {
+        let catalog = catalog();
+        let handbook = "Compendium.dnd-players-handbook.equipment.Item.phbarmChainShirt";
+        // The 2024 kits name the premium module's pack; the world points that
+        // prefix at the SRD pack while the module is not active.
+        assert_eq!(
+            catalog.get(handbook).map(|item| item.name.as_str()),
+            Some("Chain Shirt")
+        );
+        assert_eq!(catalog.redirect(handbook).as_ref(), CHAIN_SHIRT);
+        // A pack id that merely starts with the redirected one is another pack.
+        let neighbour = "Compendium.dnd-players-handbook.equipment24.Item.phbarmChainShirt";
+        assert_eq!(catalog.redirect(neighbour).as_ref(), neighbour);
+        // The redirect leaves other prefixes alone.
+        assert_eq!(catalog.redirect(CLERIC).as_ref(), CLERIC);
+
+        // Without the world's redirect the same uuid names nothing, and the kit
+        // line degrades to the entry instead of guessing a document.
+        let mut bare = catalog.clone();
+        bare.redirects.clear();
+        assert!(bare.get(handbook).is_none());
+        assert_eq!(bare.redirect(handbook).as_ref(), handbook);
+        let plans = equipment_plans(&bare, &with_class(CLERIC), &CampaignRules::default());
+        assert!(plans[0].options[0].items.is_empty());
+        assert_eq!(
+            plans[0].options[0]
+                .manual
+                .iter()
+                .filter(|line| *line == "linked")
+                .count(),
+            4
+        );
+
+        // With it, the same kit embeds the SRD chain shirt.
+        let plans = equipment_plans(&catalog, &with_class(CLERIC), &CampaignRules::default());
+        assert_eq!(plans[0].options[0].items[0].uuid, CHAIN_SHIRT);
     }
 }

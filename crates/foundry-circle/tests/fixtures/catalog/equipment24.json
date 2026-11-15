@@ -1,0 +1,325 @@
+[
+  {
+    "uuid": "Compendium.dnd5e.equipment24.Item.phbarmChainShirt",
+    "name": "Chain Shirt",
+    "type": "equipment",
+    "img": "icons/equipment/chest/breastplate-scale-grey.webp",
+    "text": "",
+    "system": {
+      "identifier": "chain-shirt",
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "license": "CC-BY-4.0",
+        "book": ""
+      }
+    },
+    "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.equipment24.Item.phbarmShield0000",
+    "name": "Shield",
+    "type": "equipment",
+    "img": "icons/equipment/shield/round-wooden-boss-steel-brown.webp",
+    "text": "",
+    "system": {
+      "identifier": "shield",
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "license": "CC-BY-4.0",
+        "book": ""
+      }
+    },
+    "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.equipment24.Item.phbwepMace000000",
+    "name": "Mace",
+    "type": "weapon",
+    "img": "icons/weapons/maces/mace-flanged-steel.webp",
+    "text": "",
+    "system": {
+      "identifier": "mace",
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "license": "CC-BY-4.0",
+        "book": ""
+      }
+    },
+    "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.equipment24.Item.phbagPriestsPack",
+    "name": "Priest's Pack",
+    "type": "container",
+    "img": "icons/containers/bags/pack-engraved-leather-blue.webp",
+    "text": "",
+    "system": {
+      "identifier": "priests-pack",
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "license": "CC-BY-4.0",
+        "book": ""
+      }
+    },
+    "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.equipment24.Item.phbarmChainMail0",
+    "name": "Chain Mail",
+    "type": "equipment",
+    "img": "icons/equipment/chest/breastplate-metal-scaled-grey.webp",
+    "text": "",
+    "system": {
+      "identifier": "chain-mail",
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "license": "CC-BY-4.0",
+        "book": ""
+      }
+    },
+    "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.equipment24.Item.phbwepGreatsword",
+    "name": "Greatsword",
+    "type": "weapon",
+    "img": "icons/weapons/swords/greatsword-crossguard-steel.webp",
+    "text": "",
+    "system": {
+      "identifier": "greatsword",
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "license": "CC-BY-4.0",
+        "book": ""
+      }
+    },
+    "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.equipment24.Item.phbwepFlail00000",
+    "name": "Flail",
+    "type": "weapon",
+    "img": "icons/weapons/maces/flail-ball-grey.webp",
+    "text": "",
+    "system": {
+      "identifier": "flail",
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "license": "CC-BY-4.0",
+        "book": ""
+      }
+    },
+    "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.equipment24.Item.phbwepJavelin000",
+    "name": "Javelin",
+    "type": "weapon",
+    "img": "icons/weapons/polearms/javelin-flared.webp",
+    "text": "",
+    "system": {
+      "identifier": "javelin",
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "license": "CC-BY-4.0",
+        "book": ""
+      }
+    },
+    "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.equipment24.Item.phbagDungeoneers",
+    "name": "Dungeoneer's Pack",
+    "type": "container",
+    "img": "icons/containers/bags/pack-simple-stitched-leather-tan.webp",
+    "text": "",
+    "system": {
+      "identifier": "dungeoneers-pack",
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "license": "CC-BY-4.0",
+        "book": ""
+      }
+    },
+    "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.equipment24.Item.phbarmStuddedLea",
+    "name": "Studded Leather Armor",
+    "type": "equipment",
+    "img": "icons/equipment/chest/breastplate-rivited-red.webp",
+    "text": "",
+    "system": {
+      "identifier": "studded-leather-armor",
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "license": "CC-BY-4.0",
+        "book": ""
+      }
+    },
+    "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.equipment24.Item.phbwepScimitar00",
+    "name": "Scimitar",
+    "type": "weapon",
+    "img": "icons/weapons/swords/scimitar-worn-blue.webp",
+    "text": "",
+    "system": {
+      "identifier": "scimitar",
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "license": "CC-BY-4.0",
+        "book": ""
+      }
+    },
+    "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.equipment24.Item.phbwepShortsword",
+    "name": "Shortsword",
+    "type": "weapon",
+    "img": "icons/weapons/swords/sword-guard-worn-purple.webp",
+    "text": "",
+    "system": {
+      "identifier": "shortsword",
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "license": "CC-BY-4.0",
+        "book": ""
+      }
+    },
+    "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.equipment24.Item.phbwepLongbow000",
+    "name": "Longbow",
+    "type": "weapon",
+    "img": "icons/weapons/bows/longbow-recurve-leather-brown.webp",
+    "text": "",
+    "system": {
+      "identifier": "longbow",
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "license": "CC-BY-4.0",
+        "book": ""
+      }
+    },
+    "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.equipment24.Item.phbamoArrows0000",
+    "name": "Arrows",
+    "type": "consumable",
+    "img": "icons/weapons/ammunition/arrows-broadhead-white.webp",
+    "text": "",
+    "system": {
+      "identifier": "arrows",
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "license": "CC-BY-4.0",
+        "book": ""
+      }
+    },
+    "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.equipment24.Item.phbagQuiver00000",
+    "name": "Quiver",
+    "type": "container",
+    "img": "icons/containers/ammunition/arrows-quiver-black.webp",
+    "text": "",
+    "system": {
+      "identifier": "quiver",
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "license": "CC-BY-4.0",
+        "book": ""
+      }
+    },
+    "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.equipment24.Item.phbtulCalligraph",
+    "name": "Calligrapher's Supplies",
+    "type": "tool",
+    "img": "icons/tools/scribal/pen-steel-grey-brown.webp",
+    "text": "",
+    "system": {
+      "identifier": "calligraphers-supplies",
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "license": "CC-BY-4.0",
+        "book": ""
+      }
+    },
+    "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.equipment24.Item.phbagBook0000000",
+    "name": "Book",
+    "type": "loot",
+    "img": "icons/sundries/books/book-worn-brown.webp",
+    "text": "",
+    "system": {
+      "identifier": "book",
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "license": "CC-BY-4.0",
+        "book": ""
+      }
+    },
+    "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.equipment24.Item.phbagRobe0000000",
+    "name": "Robe",
+    "type": "equipment",
+    "img": "icons/equipment/back/mantle-collared-black.webp",
+    "text": "",
+    "system": {
+      "identifier": "robe",
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "license": "CC-BY-4.0",
+        "book": ""
+      }
+    },
+    "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.equipment24.Item.phbagParchment00",
+    "name": "Parchment",
+    "type": "loot",
+    "img": "icons/sundries/scrolls/scroll-plain-tan.webp",
+    "text": "",
+    "system": {
+      "identifier": "parchment",
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "license": "CC-BY-4.0",
+        "book": ""
+      }
+    },
+    "traits": {}
+  }
+]

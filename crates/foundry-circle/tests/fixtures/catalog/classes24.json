@@ -32,6 +32,64 @@
           "formula": "@scale.cleric.max-prepared"
         }
       },
+      "startingEquipment": [
+        {
+          "type": "AND",
+          "requiresProficiency": false,
+          "_id": "hRVywVtYMIyj47LI",
+          "group": "",
+          "sort": 100000
+        },
+        {
+          "type": "linked",
+          "requiresProficiency": false,
+          "_id": "bGGpwQNPkEm90Aak",
+          "group": "hRVywVtYMIyj47LI",
+          "sort": 200000,
+          "key": "Compendium.dnd-players-handbook.equipment.Item.phbarmChainShirt"
+        },
+        {
+          "type": "linked",
+          "requiresProficiency": false,
+          "_id": "XN2TO8Ned2z0tGU1",
+          "group": "hRVywVtYMIyj47LI",
+          "sort": 300000,
+          "key": "Compendium.dnd-players-handbook.equipment.Item.phbarmShield0000"
+        },
+        {
+          "type": "linked",
+          "requiresProficiency": false,
+          "_id": "2TqR6FTmfE5pF3uU",
+          "group": "hRVywVtYMIyj47LI",
+          "sort": 400000,
+          "key": "Compendium.dnd-players-handbook.equipment.Item.phbwepMace000000"
+        },
+        {
+          "type": "focus",
+          "requiresProficiency": false,
+          "_id": "DJWicB3geFrbTgwZ",
+          "group": "hRVywVtYMIyj47LI",
+          "sort": 500000,
+          "key": "holy"
+        },
+        {
+          "type": "linked",
+          "requiresProficiency": false,
+          "_id": "svexQM2NoMbtszQz",
+          "group": "hRVywVtYMIyj47LI",
+          "sort": 600000,
+          "key": "Compendium.dnd-players-handbook.equipment.Item.phbagPriestsPack"
+        },
+        {
+          "type": "currency",
+          "requiresProficiency": false,
+          "_id": "OFKWmgXVMYpoL44K",
+          "group": "hRVywVtYMIyj47LI",
+          "sort": 700000,
+          "key": "gp",
+          "count": 7
+        }
+      ],
       "wealth": "110",
       "advancement": {
         "NCN5ZAV8TtveRR4d": {
@@ -159,6 +217,12 @@
       "U6GGwY4ZKiXqXBQN": {
         "grants": [{ "key": "weapon:sim", "label": "Simple" }],
         "choices": []
+      }
+    },
+    "equipment": {
+      "labels": {
+        "DJWicB3geFrbTgwZ": "any holy focus",
+        "OFKWmgXVMYpoL44K": "7 GP"
       }
     }
   },
@@ -1600,6 +1664,179 @@
             ]
           }
         ]
+      }
+    }
+  },
+  {
+    "uuid": "Compendium.dnd5e.classes24.Item.phbftrFighter000",
+    "name": "Fighter",
+    "type": "class",
+    "img": "systems/dnd5e/icons/classes/fighter.webp",
+    "text": "",
+    "system": {
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "revision": 2,
+        "book": "",
+        "page": "",
+        "license": "CC-BY-4.0"
+      },
+      "identifier": "fighter",
+      "levels": 1,
+      "hd": { "denomination": "d10", "spent": 0, "additional": "" },
+      "primaryAbility": { "value": ["str", "dex"], "all": false },
+      "spellcasting": {
+        "progression": "none",
+        "ability": "",
+        "preparation": { "formula": "" }
+      },
+      "startingEquipment": [
+        {
+          "type": "OR",
+          "requiresProficiency": false,
+          "_id": "bT680hdYfCJkbk1M",
+          "group": "",
+          "sort": 100000
+        },
+        {
+          "type": "AND",
+          "requiresProficiency": false,
+          "_id": "NgcVsnjvVJsL3xLw",
+          "group": "bT680hdYfCJkbk1M",
+          "sort": 200000
+        },
+        {
+          "type": "linked",
+          "requiresProficiency": false,
+          "_id": "2AgjcVGUTGP1cqCS",
+          "group": "NgcVsnjvVJsL3xLw",
+          "sort": 400000,
+          "key": "Compendium.dnd-players-handbook.equipment.Item.phbarmChainMail0"
+        },
+        {
+          "type": "linked",
+          "requiresProficiency": false,
+          "_id": "B4b5Em0xc9EDUtan",
+          "group": "NgcVsnjvVJsL3xLw",
+          "sort": 500000,
+          "key": "Compendium.dnd-players-handbook.equipment.Item.phbwepGreatsword"
+        },
+        {
+          "type": "linked",
+          "requiresProficiency": false,
+          "_id": "eMuasr6qhYhh0zsn",
+          "group": "NgcVsnjvVJsL3xLw",
+          "sort": 600000,
+          "key": "Compendium.dnd-players-handbook.equipment.Item.phbwepFlail00000"
+        },
+        {
+          "type": "linked",
+          "requiresProficiency": false,
+          "_id": "iLcbTWDnJuSDtfC1",
+          "group": "NgcVsnjvVJsL3xLw",
+          "sort": 700000,
+          "key": "Compendium.dnd-players-handbook.equipment.Item.phbwepJavelin000",
+          "count": 8
+        },
+        {
+          "type": "linked",
+          "requiresProficiency": false,
+          "_id": "HXnWybFbmiQJ7jxw",
+          "group": "NgcVsnjvVJsL3xLw",
+          "sort": 800000,
+          "key": "Compendium.dnd-players-handbook.equipment.Item.phbagDungeoneers"
+        },
+        {
+          "type": "currency",
+          "requiresProficiency": false,
+          "_id": "p1ZUaxjV31PhyHR8",
+          "group": "NgcVsnjvVJsL3xLw",
+          "sort": 1600000,
+          "key": "gp",
+          "count": 4
+        },
+        {
+          "type": "AND",
+          "requiresProficiency": false,
+          "_id": "mXHlWriN3u7VGUmQ",
+          "group": "bT680hdYfCJkbk1M",
+          "sort": 300000
+        },
+        {
+          "type": "linked",
+          "requiresProficiency": false,
+          "_id": "07VK1qiy28AWgHWE",
+          "group": "mXHlWriN3u7VGUmQ",
+          "sort": 900000,
+          "key": "Compendium.dnd-players-handbook.equipment.Item.phbarmStuddedLea"
+        },
+        {
+          "type": "linked",
+          "requiresProficiency": false,
+          "_id": "q8p43JwNYPAJFk0v",
+          "group": "mXHlWriN3u7VGUmQ",
+          "sort": 1000000,
+          "key": "Compendium.dnd-players-handbook.equipment.Item.phbwepScimitar00"
+        },
+        {
+          "type": "linked",
+          "requiresProficiency": false,
+          "_id": "Z0BQ8xiUO9TdCpeY",
+          "group": "mXHlWriN3u7VGUmQ",
+          "sort": 1100000,
+          "key": "Compendium.dnd-players-handbook.equipment.Item.phbwepShortsword"
+        },
+        {
+          "type": "linked",
+          "requiresProficiency": false,
+          "_id": "7UT2I5hEuyETwaw8",
+          "group": "mXHlWriN3u7VGUmQ",
+          "sort": 1200000,
+          "key": "Compendium.dnd-players-handbook.equipment.Item.phbwepLongbow000"
+        },
+        {
+          "type": "linked",
+          "requiresProficiency": false,
+          "_id": "RAZO2ywuqreGQheI",
+          "group": "mXHlWriN3u7VGUmQ",
+          "sort": 1300000,
+          "key": "Compendium.dnd-players-handbook.equipment.Item.phbamoArrows0000",
+          "count": 20
+        },
+        {
+          "type": "linked",
+          "requiresProficiency": false,
+          "_id": "jzEWEiEKl0djfd2u",
+          "group": "mXHlWriN3u7VGUmQ",
+          "sort": 1400000,
+          "key": "Compendium.dnd-players-handbook.equipment.Item.phbagQuiver00000"
+        },
+        {
+          "type": "linked",
+          "requiresProficiency": false,
+          "_id": "gf3zQAZHgglaMuN1",
+          "group": "mXHlWriN3u7VGUmQ",
+          "sort": 1500000,
+          "key": "Compendium.dnd-players-handbook.equipment.Item.phbagDungeoneers"
+        },
+        {
+          "type": "currency",
+          "requiresProficiency": false,
+          "_id": "iKY1fXbUjuUt6zaT",
+          "group": "mXHlWriN3u7VGUmQ",
+          "sort": 1700000,
+          "key": "gp",
+          "count": 11
+        }
+      ],
+      "wealth": "155",
+      "advancement": {}
+    },
+    "equipment": {
+      "labels": {
+        "p1ZUaxjV31PhyHR8": "4 GP",
+        "iKY1fXbUjuUt6zaT": "11 GP"
       }
     }
   }

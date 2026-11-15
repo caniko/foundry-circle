@@ -188,6 +188,25 @@ pub async fn whoami(session: &Session) -> Result<serde_json::Value> {
     Ok(response.json().await?)
 }
 
+/// Where the running game is entered, or `None` while no game is ready.
+///
+/// The returned URL is the play host's `/_circle/enter`, which runs its own
+/// OIDC login and Foundry handoff. Open it in the system browser (RFC 8252);
+/// never render it inside an app's webview.
+pub async fn join_url(session: &Session) -> Result<Option<String>> {
+    let request = client()?.get(format!("{}/api/v1/session", session.server));
+    let response = authorized(session, request).await?;
+    if !response.status().is_success() {
+        return Err(rejection(response).await);
+    }
+    #[derive(Deserialize)]
+    struct Status {
+        #[serde(rename = "joinUrl")]
+        join_url: Option<String>,
+    }
+    Ok(response.json::<Status>().await?.join_url)
+}
+
 /// Convert `input` for upload into `staging`, returning the converted path.
 ///
 /// A thin wrapper over [`media_oxide::foundry::convert`]: the output lands in

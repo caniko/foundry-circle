@@ -118,7 +118,11 @@ let converted = convert(
 let foundry_path = upload(&session, AssetKind::Token, &converted).await?;
 ```
 
-`convert` is blocking (it spawns `ffmpeg`); `login`, `whoami`, and `upload` are
-async on tokio. Errors are typed: `Exists`, `Expired`, `Forbidden`,
+`convert` is blocking (it spawns `ffmpeg`); `login`, `whoami`, `join_url`, and
+`upload` are async on tokio. Errors are typed: `Exists`, `Expired`, `Forbidden`,
 `NotConfigured`, `Rejected { status, message }`, `TooLarge`, `InvalidName`,
 and the transport variants.
+
+(`join_url` returns the play host's `/_circle/enter` once a game is running,
+and `None` otherwise; open it in the system browser so the play host does its
+own OIDC login and Foundry handoff.)

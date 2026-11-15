@@ -6,7 +6,9 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use foundry_circle_upload::{AssetKind, Error, MAX_UPLOAD_BYTES, Session, login_with, upload};
+use foundry_circle_upload::{
+    AssetKind, Error, MAX_UPLOAD_BYTES, Session, join_url, login_with, upload,
+};
 use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -272,6 +274,35 @@ async fn upload_maps_unauthorized_to_expired() {
         .await
         .expect_err("expired");
     assert!(matches!(error, Error::Expired), "unexpected {error:?}");
+}
+
+#[tokio::test]
+async fn join_url_reads_the_play_link_and_sends_the_session() {
+    let server = FakeServer::spawn(|_| {
+        FakeResponse::json(
+            200,
+            r#"{"session":null,"unmanaged":false,"joinUrl":"https://play.example/_circle/enter"}"#,
+        )
+    })
+    .await;
+
+    let url = join_url(&server.session()).await.expect("join url");
+    assert_eq!(url.as_deref(), Some("https://play.example/_circle/enter"));
+
+    let records = server.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].method, "GET");
+    assert_eq!(records[0].path(), "/api/v1/session");
+    assert_eq!(
+        records[0].header("cookie"),
+        Some("foundry_circle_session=secret")
+    );
+
+    let idle = FakeServer::spawn(|_| {
+        FakeResponse::json(200, r#"{"session":null,"unmanaged":false,"joinUrl":null}"#)
+    })
+    .await;
+    assert_eq!(join_url(&idle.session()).await.expect("join url"), None);
 }
 
 #[tokio::test]

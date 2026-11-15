@@ -20,6 +20,25 @@ Admins can call `POST /api/v1/world/commands` with `chat.create`, `dice.roll`,
 `idempotencyKey`. Events and JSON-patch
 mutations are not implemented.
 
+## Character builder
+
+Session zero runs in the console. A GM opens character creation for an adopted
+world and picks the ability methods the players may use; PostgreSQL holds the
+rules and the drafts (`campaign_rules`, `character_drafts`) while Foundry stays
+authoritative for world documents. Nothing here writes to Foundry yet.
+
+- `GET /api/console/characters` lists your drafts and, for GMs, the session-zero
+  rules and the party board; `/api/console/characters/{id}` is one draft.
+- Server functions: `characters_view`, `builder_view`, `save_rules`,
+  `create_draft`, `update_draft`, `roll_abilities`, `grant_reroll` and
+  `delete_draft`. Every mutation rejects a missing session with
+  `not_signed_in`, a wrong role with `permission_denied`, and re-validates the
+  scores, the name, the draft's owner and the campaign's open flag.
+- Ability scores follow the chosen method: the standard array, 27-point buy,
+  4d6 drop lowest or manual. Rolls come from the server's OS random source,
+  are written once per draft, and `update_draft` never writes the `rolls`
+  column.
+
 ## Asset upload
 
 A DM converts assets on their own machine with

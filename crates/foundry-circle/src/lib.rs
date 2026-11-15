@@ -18,7 +18,13 @@ pub mod adoption;
 #[cfg(feature = "server")]
 pub mod http;
 
+pub mod builder;
+
+mod builder_ui;
+
 pub mod driver;
+
+use builder_ui::{BuilderPage, CharactersPage};
 
 /// What the signed-in account may do in the console.  Resolved from the OIDC
 /// groups claim: admin outranks GM, and any other access-group member plays.
@@ -185,6 +191,38 @@ async fn revoke_sessions(subject: String) -> Result<Option<String>, ServerFnErro
 /// game; this only renders what it was told, so nothing here is authorization.
 #[component]
 pub fn App() -> Element {
+    rsx! {
+        Router::<Route> {}
+    }
+}
+
+pub(crate) use routes::Route;
+
+/// The console's pages; anything else renders the lobby, as every path did
+/// before the router existed.
+mod routes {
+    // The pinned dioxus-router derive emits a diverging match arm; the allow is
+    // scoped to its expansion so the rest of the crate keeps the lint.
+    #![allow(unreachable_code)]
+
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Routable)]
+    pub(crate) enum Route {
+        #[route("/api/console", LobbyPage)]
+        Lobby {},
+        #[route("/api/console/characters", CharactersPage)]
+        Characters {},
+        #[route("/api/console/characters/:id", BuilderPage)]
+        Builder { id: String },
+        #[route("/:..segments", FallbackPage)]
+        Fallback { segments: Vec<String> },
+    }
+}
+
+/// The lobby as a route: it needs the server view before it can render.
+#[component]
+fn LobbyPage() -> Element {
     let view = use_server_future(console_view)?;
     let refresh = EventHandler::new(move |()| {
         // A copy of the resource: restarting reloads the server view.
@@ -197,6 +235,15 @@ pub fn App() -> Element {
     };
     rsx! {
         Lobby { view, refresh }
+    }
+}
+
+/// Any other path is still the lobby.
+#[component]
+fn FallbackPage(segments: Vec<String>) -> Element {
+    let _ = segments;
+    rsx! {
+        LobbyPage {}
     }
 }
 
@@ -392,13 +439,94 @@ pub const STYLES: &str = r##"
     transition-duration: .01ms;
   }
 }
+
+/* Character builder: rule forms, ability rows, the party table and the sticky
+   "to do" bar. Palette values only through the broker aliases. */
+.builder-form {
+  display: grid;
+  gap: .5rem;
+  margin: 0 0 1.5rem;
+  border: 1px solid var(--tb-ui-border);
+  border-radius: .5rem;
+  padding: .75rem;
+}
+
+.builder-form legend {
+  font-weight: 700;
+}
+
+.builder-abilities {
+  display: grid;
+  gap: .25rem;
+  margin: 1rem 0;
+}
+
+.builder-ability {
+  display: grid;
+  grid-template-columns: 8rem 6rem 3rem;
+  align-items: center;
+  gap: .5rem;
+}
+
+.builder-ability__score {
+  font: inherit;
+  padding: .25rem;
+}
+
+.builder-ability__modifier,
+.builder-points {
+  color: var(--tb-ui-foreground-muted);
+}
+
+.builder-party {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.builder-party :where(th, td) {
+  border-bottom: 1px solid var(--tb-ui-border);
+  padding: .375rem .5rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.builder-dice {
+  display: inline-block;
+  margin-right: .75rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .08em;
+}
+
+.builder-pending {
+  margin: 1rem 0;
+  padding-left: 1.25rem;
+}
+
+.builder-sticky {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: .5rem;
+  margin-top: 1.5rem;
+  border-top: 1px solid var(--tb-ui-border);
+  background: var(--tb-ui-background-alt);
+  padding: .75rem 0;
+}
+
+@media (max-width: 30rem) {
+  .builder-ability {
+    grid-template-columns: 1fr 5rem 2.5rem;
+  }
+}
 "##;
 
-/// Pure lobby rendering. `App` resolves the server view and delegates here so
-/// every view is renderable without a server.
+/// Pure lobby rendering. `LobbyPage` resolves the server view and delegates
+/// here so every view is renderable without a server.
 #[component]
 fn Lobby(view: ConsoleView, refresh: EventHandler<()>) -> Element {
-    let accent = orange();
     let account = match &view {
         ConsoleView::SignedOut => None,
         ConsoleView::Denied { name } => Some(name.clone()),
@@ -473,6 +601,16 @@ fn Lobby(view: ConsoleView, refresh: EventHandler<()>) -> Element {
         }
     };
     rsx! {
+        ConsoleShell { account, {content} }
+    }
+}
+
+/// The document head, brand header and one main landmark, shared by every
+/// console page. `account` is the display name when the page knows it.
+#[component]
+fn ConsoleShell(account: Option<String>, children: Element) -> Element {
+    let accent = orange();
+    rsx! {
         document::Title { "Foundry Circle" }
         document::Stylesheet { href: tartan_ui_dioxus::SHARED_STYLES }
         document::Style { {stylesheet()} }
@@ -483,6 +621,7 @@ fn Lobby(view: ConsoleView, refresh: EventHandler<()>) -> Element {
                 div { class: "lobby-header__inner",
                     a { class: "lobby-brand", href: "/api/console", "Foundry Circle" }
                     div { class: "lobby-account",
+                        a { class: "tartan-button", href: "/api/console/characters", "Characters" }
                         if let Some(name) = account {
                             span { class: "lobby-account__name", {name} }
                             form { class: "lobby-signout", method: "post", action: "/api/auth/logout",
@@ -494,7 +633,7 @@ fn Lobby(view: ConsoleView, refresh: EventHandler<()>) -> Element {
                     }
                 }
             }
-            main { id: "main", class: "lobby-main", tabindex: "-1", {content} }
+            main { id: "main", class: "lobby-main", tabindex: "-1", {children} }
         }
     }
 }

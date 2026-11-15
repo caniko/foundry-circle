@@ -910,11 +910,24 @@ pub(crate) async fn insert_audit(
     outcome: &str,
     details: Value,
 ) -> Result<(), sqlx::Error> {
+    insert_audit_for(executor, "game_session", subject, action, outcome, details).await
+}
+
+/// The same writer for a surface that names its own resource.
+pub(crate) async fn insert_audit_for(
+    executor: impl sqlx::PgExecutor<'_>,
+    resource: &str,
+    subject: Option<&str>,
+    action: &str,
+    outcome: &str,
+    details: Value,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO audit_log (subject, action, resource, outcome, details) VALUES ($1, $2, 'game_session', $3, $4)",
+        "INSERT INTO audit_log (subject, action, resource, outcome, details) VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(subject)
     .bind(action)
+    .bind(resource)
     .bind(outcome)
     .bind(details)
     .execute(executor)

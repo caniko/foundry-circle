@@ -4,6 +4,12 @@ All notable changes to Foundry Circle are documented here.
 
 ## Unreleased
 
+- Add session zero to the console: a GM opens character creation for an adopted
+  world and chooses the ability methods, players create drafts and set ability
+  scores by the standard array, point buy, a server roll (4d6 drop lowest, OS
+  random, written once per draft) or a manual array, and the GM board lists
+  every draft with its honest rolls. Drafts and rules live in PostgreSQL; no
+  Foundry write happens until approval.
 - Package the SQL migrations with the broker: the Nix source filter dropped
   `crates/foundry-circle/migrations`, so the packaged server ran an empty
   migrator and every login failed on a missing table. A `packaged-migrations`

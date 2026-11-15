@@ -25,6 +25,11 @@
         default = "present";
         description = "present seeds the package once and records initialization; absent clears that marker without changing the target.";
       };
+      update = lib.mkOption {
+        type = lib.types.enum ["seed" "replace"];
+        default = "seed";
+        description = "replace overwrites in-place edits when the declared version changes.";
+      };
       version = lib.mkOption {
         type = lib.types.str;
         default = "";
@@ -46,7 +51,7 @@
       then entry.id
       else provenance.id or name;
   in {
-    inherit (entry) kind state;
+    inherit (entry) kind state update;
     inherit id version;
     storePath =
       if entry.package == null

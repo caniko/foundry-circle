@@ -82,6 +82,7 @@ All notable changes to Foundry Circle are documented here.
   scripts, failing closed with `module_missing`/`module_outdated`; the source
   toggles, the last sync time and the SRD 5.2.1 attribution render in the
   console.
+- Allow declarative packages to opt into replacement when their version changes.
 - Add session zero to the console: a GM opens character creation for an adopted
   world and chooses the ability methods, players create drafts and set ability
   scores by the standard array, point buy, a server roll (4d6 drop lowest, OS

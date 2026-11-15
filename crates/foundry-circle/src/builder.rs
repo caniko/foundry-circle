@@ -92,7 +92,7 @@ impl Default for CampaignRules {
 }
 
 /// The six scores in book order.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Scores {
     pub str: u8,
     pub dex: u8,
@@ -170,6 +170,8 @@ pub struct DraftChoices {
     pub background: Option<String>,
     /// Decision key → trait keys or item uuids.
     pub picks: BTreeMap<String, Vec<String>>,
+    /// Decision key → ability → the bonus the player assigned there.
+    pub asi: BTreeMap<String, BTreeMap<String, u8>>,
 }
 
 impl DraftChoices {
@@ -207,6 +209,16 @@ impl Slot {
             Self::Background => &mut choices.background,
         }
     }
+
+    /// The document this slot names, if the draft filled it.
+    fn chosen(self, choices: &DraftChoices) -> Option<&str> {
+        match self {
+            Self::Class => &choices.class,
+            Self::Species => &choices.species,
+            Self::Background => &choices.background,
+        }
+        .as_deref()
+    }
 }
 
 /// One change the builder sends; the server re-validates all of it.
@@ -214,9 +226,23 @@ impl Slot {
 #[serde(rename_all = "camelCase")]
 pub enum DraftPatch {
     Name(String),
-    Abilities { method: AbilityMethod, base: Scores },
-    Select { slot: Slot, uuid: Option<String> },
-    Pick { key: String, values: Vec<String> },
+    Abilities {
+        method: AbilityMethod,
+        base: Scores,
+    },
+    Select {
+        slot: Slot,
+        uuid: Option<String>,
+    },
+    Pick {
+        key: String,
+        values: Vec<String>,
+    },
+    Asi {
+        key: String,
+        /// Ability key → the bonus the player assigned there.
+        deltas: BTreeMap<String, u8>,
+    },
 }
 
 /// Where an unfinished draft needs the player.
@@ -401,6 +427,18 @@ pub struct ClassDetails {
     pub decisions: Vec<Decision>,
 }
 
+/// One chosen origin root (species or background) as its step shows it.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OriginDetails {
+    pub uuid: String,
+    pub name: String,
+    pub source: String,
+    /// The features the root grants, with their descriptions.
+    pub features: Vec<Feature>,
+    pub decisions: Vec<Decision>,
+}
+
 /// One granted feature: its name and plain-text description.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -532,9 +570,18 @@ pub enum DecisionKind {
         options: Vec<Opt>,
     },
     Asi {
+        /// How many points the player assigns across `open`.
         points: u8,
+        /// The most one ability may take.
         cap: u8,
+        /// The abilities the player may improve, in book order.
         open: Vec<String>,
+        /// Ability → points the configuration assigns itself; they count toward
+        /// the score ceiling but never the player's `points`.
+        #[serde(default)]
+        fixed: BTreeMap<String, u8>,
+        /// The configured score ceiling; 20 when absent.
+        max: Option<u8>,
     },
     Size {
         options: Vec<String>,
@@ -940,19 +987,36 @@ fn walk(
                         .flatten()
                         .filter_map(Value::as_str)
                         .collect();
+                    // A fixed bonus is pre-assigned: it counts toward the score
+                    // ceiling, not the player's points (`ability-score-improvement.mjs`).
+                    let fixed = configuration["fixed"]
+                        .as_object()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|(key, value)| {
+                            let value =
+                                value.as_u64().and_then(|value| u8::try_from(value).ok())?;
+                            (value > 0).then(|| (key.clone(), value))
+                        })
+                        .collect();
                     Some(DecisionKind::Asi {
                         points: configuration["points"]
                             .as_u64()
                             .map_or(0, |points| u8::try_from(points).unwrap_or(u8::MAX)),
+                        // The system writes no cap when an ability is unbounded.
                         cap: configuration["cap"]
                             .as_u64()
-                            .map_or(0, |cap| u8::try_from(cap).unwrap_or(u8::MAX)),
+                            .map_or(u8::MAX, |cap| u8::try_from(cap).unwrap_or(u8::MAX)),
                         open: Scores::LABELS
                             .iter()
                             .map(|(key, _)| *key)
                             .filter(|key| !locked.contains(key))
                             .map(str::to_owned)
                             .collect(),
+                        fixed,
+                        max: configuration["max"]
+                            .as_u64()
+                            .map(|max| u8::try_from(max).unwrap_or(u8::MAX)),
                     })
                 }
                 "Subclass" | "AbilityScoreImprovement" => Some(DecisionKind::Unsupported {
@@ -1002,31 +1066,43 @@ pub fn decisions(catalog: &Catalog, choices: &DraftChoices, level: u8) -> Vec<De
     found.decisions
 }
 
-/// Drop every pick the draft's roots no longer open: a replaced root's own and
+/// Drop every answer the draft's roots no longer open: a replaced root's own and
 /// nested decisions, and the sub-decisions of an item it no longer picks. The
-/// walker produces keys only for the current roots, so this is the one rule.
+/// walker produces keys only for the current roots, so this is the one rule,
+/// and it covers the ability bonuses beside the picks.
 pub fn prune_picks(catalog: &Catalog, choices: &mut DraftChoices, level: u8) {
     let keys: BTreeSet<String> = decisions(catalog, choices, level)
         .into_iter()
         .map(|decision| decision.key)
         .collect();
     choices.picks.retain(|key, _| keys.contains(key));
+    choices.asi.retain(|key, _| keys.contains(key));
 }
 
-/// The classes the enabled sources offer, by source then name.
-pub fn classes(catalog: &Catalog) -> Vec<ClassOption> {
-    let mut classes: Vec<ClassOption> = catalog
+/// The documents of one item type the enabled sources offer, by source then name.
+fn offered(catalog: &Catalog, item_type: &str) -> Vec<ClassOption> {
+    let mut options: Vec<ClassOption> = catalog
         .items
         .iter()
-        .filter(|item| item.item_type == "class")
+        .filter(|item| item.item_type == item_type)
         .map(|item| ClassOption {
             uuid: item.uuid.clone(),
             name: item.name.clone(),
             source: catalog.source(&item.uuid),
         })
         .collect();
-    classes.sort_by(|a, b| a.source.cmp(&b.source).then(a.name.cmp(&b.name)));
-    classes
+    options.sort_by(|a, b| a.source.cmp(&b.source).then(a.name.cmp(&b.name)));
+    options
+}
+
+/// The classes the enabled sources offer, by source then name.
+pub fn classes(catalog: &Catalog) -> Vec<ClassOption> {
+    offered(catalog, Slot::Class.item_type())
+}
+
+/// The species or backgrounds the enabled sources offer, by source then name.
+pub fn origin_options(catalog: &Catalog, slot: Slot) -> Vec<ClassOption> {
+    offered(catalog, slot.item_type())
 }
 
 /// The chosen class as its step shows it: hit die, primary ability, features
@@ -1068,11 +1144,55 @@ pub fn class_details(catalog: &Catalog, choices: &DraftChoices, level: u8) -> Op
     })
 }
 
-fn ability_label(key: &str) -> Option<&'static str> {
+/// The label of an ability key, as the pages word it.
+pub fn ability_label(key: &str) -> Option<&'static str> {
     Scores::LABELS
         .iter()
         .find(|(field, _)| *field == key)
         .map(|(_, label)| *label)
+}
+
+/// The label of a size key, as `CONFIG.DND5E.actorSizes` words it.
+pub fn size_label(key: &str) -> &str {
+    match key {
+        "tiny" => "Tiny",
+        "sm" => "Small",
+        "med" => "Medium",
+        "lg" => "Large",
+        "huge" => "Huge",
+        "grg" => "Gargantuan",
+        other => other,
+    }
+}
+
+/// One chosen origin root's features and decisions, from the same shared walk
+/// `decisions` makes: the origin roots walk in dnd5e's order (species, then
+/// background) so later choices see what earlier grants made the draft hold,
+/// and each root keeps its own part.
+pub fn origin_details(
+    catalog: &Catalog,
+    choices: &DraftChoices,
+    level: u8,
+    slot: Slot,
+) -> Option<OriginDetails> {
+    let mut found = Walk::default();
+    for root in [Slot::Species, Slot::Background] {
+        let Some(item) = root.chosen(choices).and_then(|uuid| catalog.get(uuid)) else {
+            continue;
+        };
+        let (features_from, decisions_from) = (found.features.len(), found.decisions.len());
+        walk(catalog, item, choices, level, Step::Origin, &mut found);
+        if root == slot {
+            return Some(OriginDetails {
+                uuid: item.uuid.clone(),
+                name: item.name.clone(),
+                source: catalog.source(&item.uuid),
+                features: found.features.split_off(features_from),
+                decisions: found.decisions.split_off(decisions_from),
+            });
+        }
+    }
+    None
 }
 
 /// What a draft may store for one decision: offered values only, each once,
@@ -1132,7 +1252,8 @@ pub fn validate_pick(decision: &Decision, values: &[String]) -> Result<(), &'sta
 }
 
 /// Whether a decision is answered: every pool holds its count and, for a size
-/// or an item choice, exactly what it asks for.
+/// or an item choice, exactly what it asks for. An ability bonus answers into
+/// `DraftChoices::asi`, so only `pending` and `validate_asi` can judge it.
 pub fn is_answered(decision: &Decision, values: &[String]) -> bool {
     validate_pick(decision, values).is_ok()
         && match &decision.kind {
@@ -1147,6 +1268,71 @@ pub fn is_answered(decision: &Decision, values: &[String]) -> bool {
             DecisionKind::Size { .. } => values.len() == 1,
             DecisionKind::Asi { .. } | DecisionKind::Unsupported { .. } => false,
         }
+}
+
+/// What a draft may store for one ability bonus: only the abilities the
+/// advancement leaves open, never more than `cap` on one of them, exactly
+/// `points` in all, and no score above 20 or the configured ceiling. The UI and
+/// `update_draft` share this one rule.
+pub fn validate_asi(
+    decision: &Decision,
+    deltas: &BTreeMap<String, u8>,
+    base: &Scores,
+) -> Result<(), &'static str> {
+    let DecisionKind::Asi {
+        points,
+        cap,
+        open,
+        fixed,
+        max,
+    } = &decision.kind
+    else {
+        return Err("unknown_decision");
+    };
+    if deltas.keys().any(|key| !open.contains(key)) {
+        return Err("asi_locked");
+    }
+    if deltas.values().any(|delta| delta > cap) {
+        return Err("asi_cap");
+    }
+    let assigned: u16 = deltas.values().map(|delta| u16::from(*delta)).sum();
+    if assigned != u16::from(*points) {
+        return Err("asi_points");
+    }
+    let ceiling = max.unwrap_or(20);
+    // A fixed bonus may land on a locked ability, so check all six.
+    for (key, _) in Scores::LABELS {
+        let score = base
+            .get(key)
+            .unwrap_or(0)
+            .saturating_add(fixed.get(key).copied().unwrap_or(0))
+            .saturating_add(deltas.get(key).copied().unwrap_or(0));
+        if score > ceiling {
+            return Err("asi_max");
+        }
+    }
+    Ok(())
+}
+
+/// The base scores plus every ability bonus the draft's decisions grant: each
+/// configuration's `fixed` bonus and the player's answered assignment. `except`
+/// leaves one decision out, which is the context that decision is judged in.
+pub fn totals(decisions: &[Decision], choices: &DraftChoices, except: Option<&str>) -> Scores {
+    let mut totals = choices.base.unwrap_or_default();
+    for decision in decisions {
+        let DecisionKind::Asi { fixed, .. } = &decision.kind else {
+            continue;
+        };
+        if except == Some(decision.key.as_str()) {
+            continue;
+        }
+        let answered = choices.asi.get(&decision.key).into_iter().flatten();
+        for (key, delta) in fixed.iter().chain(answered) {
+            let current = totals.get(key).unwrap_or(0);
+            totals.set(key, current.saturating_add(*delta));
+        }
+    }
+    totals
 }
 
 /// Every trait key the draft already holds: what its decisions grant plus what
@@ -1245,8 +1431,16 @@ pub struct BuilderData {
     pub classes: Vec<ClassOption>,
     /// The chosen class's features and the decisions they open.
     pub class: Option<ClassDetails>,
+    /// The species and backgrounds the enabled sources offer.
+    pub species: Vec<ClassOption>,
+    pub backgrounds: Vec<ClassOption>,
+    /// The chosen origin roots' features and the decisions they open.
+    pub species_details: Option<OriginDetails>,
+    pub background_details: Option<OriginDetails>,
     /// The trait keys the draft already holds, for "already have" marks.
     pub granted: Vec<String>,
+    /// Base scores plus every ability bonus, fixed and assigned.
+    pub totals: Scores,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -1335,8 +1529,8 @@ pub fn validate_scores(
 }
 
 /// The open steps of one draft, in the order the player should visit them.
-/// `catalog` is what tells a chosen class the enabled sources still offer; a
-/// caller without one cannot see a class fall out of the sources.
+/// `catalog` is what tells a chosen root the enabled sources still offer; a
+/// caller without one cannot see a root fall out of the sources.
 pub fn pending(
     catalog: Option<&Catalog>,
     choices: &DraftChoices,
@@ -1366,6 +1560,25 @@ pub fn pending(
             label: "Choose a class".into(),
         });
     }
+    for (slot, key, label) in [
+        (Slot::Species, "species", "Choose a species"),
+        (Slot::Background, "background", "Choose a background"),
+    ] {
+        let offered = match (slot.chosen(choices), catalog) {
+            (None, _) => false,
+            (Some(_), None) => true,
+            (Some(uuid), Some(catalog)) => catalog
+                .get(uuid)
+                .is_some_and(|item| item.item_type == slot.item_type()),
+        };
+        if !offered {
+            pending.push(Pending {
+                step: Step::Origin,
+                key: key.into(),
+                label: label.into(),
+            });
+        }
+    }
     let abilities = match (choices.method, choices.base) {
         (None, _) => Some(("method", "Choose an ability method")),
         (Some(AbilityMethod::Roll), _) if rolls.is_none() => Some(("roll", "Roll your abilities")),
@@ -1381,7 +1594,16 @@ pub fn pending(
     }
     for decision in decisions {
         let values: &[String] = choices.picks.get(&decision.key).map_or(&[], Vec::as_slice);
-        if !is_answered(decision, values) {
+        let answered = match &decision.kind {
+            DecisionKind::Asi { .. } => {
+                let empty = BTreeMap::new();
+                let deltas = choices.asi.get(&decision.key).unwrap_or(&empty);
+                let context = totals(decisions, choices, Some(&decision.key));
+                validate_asi(decision, deltas, &context).is_ok()
+            }
+            _ => is_answered(decision, values),
+        };
+        if !answered {
             pending.push(Pending {
                 step: decision.step,
                 key: decision.key.clone(),
@@ -1399,8 +1621,11 @@ mod tests {
 
     const CLERIC: &str = "Compendium.dnd5e.classes24.Item.phbclcCleric0000";
     const DIVINE_ORDER: &str = "Compendium.dnd5e.classes24.Item.phbclcDivineOrde";
+    const ACOLYTE: &str = "Compendium.dnd5e.origins24.Item.phbbgAcolyte0000";
     const HUMAN: &str = "Compendium.dnd5e.origins24.Item.phbspHuman000000";
+    const VERSATILE: &str = "Compendium.dnd5e.origins24.Item.phbsptVersatile0";
     const MAGIC_INITIATE: &str = "Compendium.dnd5e.feats24.Item.phbftMagicInitia";
+    const SKILLED: &str = "Compendium.dnd5e.feats24.Item.phbftSkilled0000";
     const PROTECTOR: &str = "Compendium.dnd5e.classes24.Item.phbDivineOrderPr";
     const THAUMATURGE: &str = "Compendium.dnd5e.classes24.Item.phbDivineOrderTh";
     const BARD: &str = "Compendium.dnd5e.classes24.Item.phbbrdBard000000";
@@ -1663,13 +1888,16 @@ mod tests {
     fn pending_lists_name_abilities_and_class() {
         let catalog = catalog();
         let empty = pending(Some(&catalog), &DraftChoices::default(), "  ", None, &[]);
-        assert_eq!(empty.len(), 3, "{empty:?}");
+        assert_eq!(empty.len(), 5, "{empty:?}");
         assert_eq!(empty[0].step, Step::Details);
         assert_eq!(empty[0].key, "name");
         assert_eq!(empty[1].step, Step::Class);
         assert_eq!(empty[1].key, "class");
-        assert_eq!(empty[2].step, Step::Abilities);
-        assert_eq!(empty[2].key, "method");
+        assert_eq!(empty[2].step, Step::Origin);
+        assert_eq!(empty[2].key, "species");
+        assert_eq!(empty[3].key, "background");
+        assert_eq!(empty[4].step, Step::Abilities);
+        assert_eq!(empty[4].key, "method");
 
         let rolling = pending(
             Some(&catalog),
@@ -1682,8 +1910,8 @@ mod tests {
             None,
             &[],
         );
-        assert_eq!(rolling.len(), 2, "{rolling:?}");
-        assert_eq!(rolling[1].key, "roll");
+        assert_eq!(rolling.len(), 4, "{rolling:?}");
+        assert_eq!(rolling[3].key, "roll");
 
         let done = pending(
             Some(&catalog),
@@ -1691,6 +1919,8 @@ mod tests {
                 method: Some(AbilityMethod::StandardArray),
                 base: Some(scores(15, 14, 13, 12, 10, 8)),
                 class: Some(CLERIC.into()),
+                species: Some(HUMAN.into()),
+                background: Some(ACOLYTE.into()),
                 ..DraftChoices::default()
             },
             "Al",
@@ -1710,9 +1940,11 @@ mod tests {
             ..DraftChoices::default()
         };
         let lost = pending(Some(&catalog), &stale, "Al", None, &[]);
-        assert_eq!(lost.len(), 1, "{lost:?}");
-        assert_eq!(lost[0].step, Step::Class);
-        assert_eq!(lost[0].label, "Choose a class");
+        assert_eq!(lost.len(), 3, "{lost:?}");
+        assert!(
+            lost.iter()
+                .any(|item| item.step == Step::Class && item.label == "Choose a class")
+        );
 
         // A class's open decisions join the same list, on the class step.
         let classed = DraftChoices {
@@ -1728,11 +1960,13 @@ mod tests {
             None,
             &decisions(&catalog, &classed, 1),
         );
-        assert_eq!(to_do.len(), 2, "{to_do:?}");
-        assert!(
-            to_do.iter().all(|item| item.step == Step::Class),
+        assert_eq!(
+            to_do.iter().filter(|item| item.step == Step::Class).count(),
+            2,
             "{to_do:?}"
         );
+        assert!(to_do.iter().any(|item| item.key == "species"));
+        assert!(to_do.iter().any(|item| item.key == "background"));
         assert!(to_do.iter().any(|item| item.label == "Divine Order Choice"));
         assert!(to_do.iter().any(|item| item.label == "Skill Proficiencies"));
     }
@@ -1806,7 +2040,7 @@ mod tests {
                 .iter()
                 .map(|option| option.value.as_str())
                 .collect::<Vec<_>>(),
-            [MAGIC_INITIATE]
+            [MAGIC_INITIATE, SKILLED]
         );
 
         // Human picks one of two sizes.
@@ -1815,6 +2049,263 @@ mod tests {
             panic!("{size:?}")
         };
         assert_eq!(options, &["sm".to_owned(), "med".to_owned()]);
+    }
+
+    #[test]
+    fn acolyte_asi_allows_two_one_or_three_ones() {
+        let catalog = catalog();
+        let choices = DraftChoices {
+            background: Some(ACOLYTE.into()),
+            ..DraftChoices::default()
+        };
+        let decisions = decisions(&catalog, &choices, 1);
+        let asi = decision(&decisions, "Background Ability Score Improvement");
+        let DecisionKind::Asi {
+            points, cap, open, ..
+        } = &asi.kind
+        else {
+            panic!("{asi:?}")
+        };
+        // Its configuration: three points, two on one ability, locked to the
+        // background's Intelligence, Wisdom and Charisma.
+        assert_eq!((*points, *cap), (3, 2));
+        assert_eq!(
+            open,
+            &["int".to_owned(), "wis".to_owned(), "cha".to_owned()]
+        );
+
+        let base = scores(15, 14, 13, 12, 10, 8);
+        let two_one = BTreeMap::from([("int".to_owned(), 2), ("wis".to_owned(), 1)]);
+        let three_ones = BTreeMap::from([
+            ("int".to_owned(), 1),
+            ("wis".to_owned(), 1),
+            ("cha".to_owned(), 1),
+        ]);
+        assert_eq!(validate_asi(asi, &two_one, &base), Ok(()));
+        assert_eq!(validate_asi(asi, &three_ones, &base), Ok(()));
+        // Every point is spent, and none of them twice on one ability.
+        assert_eq!(
+            validate_asi(asi, &BTreeMap::from([("int".to_owned(), 2)]), &base),
+            Err("asi_points")
+        );
+        assert_eq!(
+            validate_asi(asi, &BTreeMap::from([("int".to_owned(), 3)]), &base),
+            Err("asi_cap")
+        );
+        assert_eq!(
+            validate_asi(asi, &BTreeMap::new(), &base),
+            Err("asi_points")
+        );
+
+        // The answer shows as the total and leaves with its background.
+        let mut answered = choices;
+        answered.base = Some(base);
+        let found = super::decisions(&catalog, &answered, 1);
+        // The bonus stays on the to do list until every point is assigned.
+        let before = pending(Some(&catalog), &answered, "Al", None, &found);
+        assert!(before.iter().any(|item| item.key == asi.key), "{before:?}");
+        answered.asi.insert(asi.key.clone(), two_one);
+        let found = super::decisions(&catalog, &answered, 1);
+        let after = pending(Some(&catalog), &answered, "Al", None, &found);
+        assert!(!after.iter().any(|item| item.key == asi.key), "{after:?}");
+        let totals = totals(&found, &answered, None);
+        assert_eq!((totals.int, totals.wis, totals.dex), (14, 11, 14));
+        answered.select(Slot::Background, None);
+        prune_picks(&catalog, &mut answered, 1);
+        assert!(answered.asi.is_empty(), "{:?}", answered.asi);
+    }
+
+    #[test]
+    fn asi_rejects_locked_abilities_and_totals_above_twenty() {
+        let catalog = catalog();
+        let choices = DraftChoices {
+            background: Some(ACOLYTE.into()),
+            ..DraftChoices::default()
+        };
+        let decisions = decisions(&catalog, &choices, 1);
+        let asi = decision(&decisions, "Background Ability Score Improvement");
+
+        // Strength is outside the background's three.
+        let base = scores(10, 10, 10, 10, 10, 10);
+        assert_eq!(
+            validate_asi(
+                asi,
+                &BTreeMap::from([("str".to_owned(), 2), ("int".to_owned(), 1)]),
+                &base
+            ),
+            Err("asi_locked")
+        );
+
+        // 19 + 2 is 21; 18 + 2 is the ceiling of 20.
+        let two_one = BTreeMap::from([("int".to_owned(), 2), ("wis".to_owned(), 1)]);
+        assert_eq!(
+            validate_asi(asi, &two_one, &scores(10, 10, 10, 19, 10, 10)),
+            Err("asi_max")
+        );
+        assert_eq!(
+            validate_asi(asi, &two_one, &scores(10, 10, 10, 18, 10, 10)),
+            Ok(())
+        );
+
+        // A configuration's fixed bonus is pre-assigned: it counts toward the
+        // ceiling but never the player's points, and `max` raises the ceiling.
+        let mut fixed = asi.clone();
+        fixed.kind = DecisionKind::Asi {
+            points: 3,
+            cap: 2,
+            open: ["int", "wis", "cha"].map(str::to_owned).to_vec(),
+            fixed: BTreeMap::from([("wis".to_owned(), 1)]),
+            max: None,
+        };
+        assert_eq!(
+            validate_asi(&fixed, &two_one, &scores(10, 10, 10, 10, 19, 10)),
+            Err("asi_max")
+        );
+        // Totals carry every decision's fixed bonus, and each decision is judged
+        // against the base plus every other bonus: two +2s on a 18 cannot both pass.
+        let mut first = asi.clone();
+        first.kind = DecisionKind::Asi {
+            points: 2,
+            cap: 2,
+            open: vec!["int".to_owned()],
+            fixed: BTreeMap::from([("wis".to_owned(), 1)]),
+            max: None,
+        };
+        let mut second = first.clone();
+        second.key = format!("{}-second", first.key);
+        let both = [first.clone(), second.clone()];
+        let plus_two = BTreeMap::from([("int".to_owned(), 2)]);
+        let mut draft = DraftChoices {
+            base: Some(scores(10, 10, 10, 16, 10, 10)),
+            ..DraftChoices::default()
+        };
+        draft.asi.insert(first.key.clone(), plus_two.clone());
+        let all = totals(&both, &draft, None);
+        assert_eq!((all.int, all.wis), (18, 12));
+        assert_eq!(
+            validate_asi(
+                &second,
+                &plus_two,
+                &totals(&both, &draft, Some(&second.key))
+            ),
+            Ok(())
+        );
+        draft.base = Some(scores(10, 10, 10, 18, 10, 10));
+        assert_eq!(
+            validate_asi(
+                &second,
+                &plus_two,
+                &totals(&both, &draft, Some(&second.key))
+            ),
+            Err("asi_max")
+        );
+        fixed.kind = DecisionKind::Asi {
+            points: 3,
+            cap: 2,
+            open: ["int", "wis", "cha"].map(str::to_owned).to_vec(),
+            fixed: BTreeMap::new(),
+            max: Some(22),
+        };
+        assert_eq!(
+            validate_asi(&fixed, &two_one, &scores(10, 10, 10, 20, 10, 10)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn human_needs_size_and_an_origin_feat() {
+        let catalog = catalog();
+        let human = DraftChoices {
+            method: Some(AbilityMethod::StandardArray),
+            base: Some(scores(15, 14, 13, 12, 10, 8)),
+            class: Some(CLERIC.into()),
+            species: Some(HUMAN.into()),
+            ..DraftChoices::default()
+        };
+        let decisions = decisions(&catalog, &human, 1);
+        let to_do = pending(Some(&catalog), &human, "Al", None, &decisions);
+        // The species fills its slot; its own two choices stay open, and the
+        // background is still unpicked.
+        assert!(!to_do.iter().any(|item| item.key == "species"), "{to_do:?}");
+        assert!(to_do.iter().any(|item| item.key == "background"));
+        assert!(
+            to_do
+                .iter()
+                .any(|item| item.key == decision(&decisions, "Size").key
+                    && item.step == Step::Origin),
+            "{to_do:?}"
+        );
+        assert!(
+            to_do
+                .iter()
+                .any(|item| item.label == "Versatile" && item.step == Step::Origin),
+            "{to_do:?}"
+        );
+
+        // Answering both closes them.
+        let size = decision(&decisions, "Size");
+        let versatile = decision(&decisions, "Versatile");
+        let mut answered = human;
+        answered
+            .picks
+            .insert(size.key.clone(), vec!["med".to_owned()]);
+        answered
+            .picks
+            .insert(versatile.key.clone(), vec![SKILLED.to_owned()]);
+        let found = super::decisions(&catalog, &answered, 1);
+        let to_do = pending(Some(&catalog), &answered, "Al", None, &found);
+        assert!(
+            !to_do
+                .iter()
+                .any(|item| item.label == "Size" || item.label == "Versatile"),
+            "{to_do:?}"
+        );
+    }
+
+    #[test]
+    fn chosen_feat_decisions_appear_and_vanish_with_the_pick() {
+        let catalog = catalog();
+        let versatile = format!("{VERSATILE}#KB8IQLwyuL6SOFnv#0");
+        let skilled = format!("{SKILLED}#Mm4MAeZK89zGqmyH#0");
+        let mut choices = DraftChoices {
+            species: Some(HUMAN.into()),
+            picks: BTreeMap::from([(versatile.clone(), vec![SKILLED.to_owned()])]),
+            ..DraftChoices::default()
+        };
+
+        // Skilled's own trait choice arrives through the Versatile pick.
+        let found = decisions(&catalog, &choices, 1);
+        let feat = found
+            .iter()
+            .find(|decision| decision.key == skilled)
+            .unwrap_or_else(|| panic!("{found:?}"));
+        assert_eq!(feat.owner_name, "Skilled");
+        let DecisionKind::Trait { choices: pools, .. } = &feat.kind else {
+            panic!("{feat:?}")
+        };
+        assert_eq!(pools[0].count, 3);
+        assert_eq!(
+            validate_pick(
+                feat,
+                &[
+                    "skills:ins".to_owned(),
+                    "skills:per".to_owned(),
+                    "skills:ste".to_owned()
+                ]
+            ),
+            Ok(())
+        );
+
+        // Another feat takes them away with it.
+        choices
+            .picks
+            .insert(versatile, vec![MAGIC_INITIATE.to_owned()]);
+        prune_picks(&catalog, &mut choices, 1);
+        assert!(
+            decisions(&catalog, &choices, 1)
+                .iter()
+                .all(|decision| decision.key != skilled)
+        );
     }
 
     #[test]

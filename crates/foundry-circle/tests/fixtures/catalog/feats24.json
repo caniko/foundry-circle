@@ -66,5 +66,61 @@
       "prerequisites": { "level": null, "repeatable": true }
     },
     "traits": {}
+  },
+  {
+    "uuid": "Compendium.dnd5e.feats24.Item.phbftSkilled0000",
+    "name": "Skilled",
+    "type": "feat",
+    "img": "icons/commodities/treasure/medal-ribbon-blue.webp",
+    "text": "You gain proficiency in any combination of three skills or tools of your choice.Repeatable. You can take this feat more than once.",
+    "system": {
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "revision": 1,
+        "license": "CC-BY-4.0",
+        "book": ""
+      },
+      "identifier": "skilled",
+      "type": { "value": "feat", "subtype": "origin" },
+      "prerequisites": { "level": null, "repeatable": true },
+      "advancement": {
+        "Mm4MAeZK89zGqmyH": {
+          "_id": "Mm4MAeZK89zGqmyH",
+          "type": "Trait",
+          "configuration": {
+            "mode": "default",
+            "allowReplacements": false,
+            "grants": [],
+            "choices": [
+              {
+                "count": 3,
+                "pool": ["skills:*", "tool:*"]
+              }
+            ]
+          },
+          "value": {},
+          "level": 0,
+          "name": "",
+          "hint": ""
+        }
+      }
+    },
+    "traits": {
+      "Mm4MAeZK89zGqmyH": {
+        "grants": [],
+        "choices": [
+          {
+            "count": 3,
+            "options": [
+              { "key": "skills:ins", "label": "Insight" },
+              { "key": "skills:per", "label": "Perception" },
+              { "key": "skills:ste", "label": "Stealth" },
+              { "key": "tool:thief", "label": "Thieves' Tools" }
+            ]
+          }
+        ]
+      }
+    }
   }
 ]

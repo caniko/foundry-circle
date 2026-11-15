@@ -4,6 +4,16 @@ All notable changes to Foundry Circle are documented here.
 
 ## Unreleased
 
+- Add the origin step to the character builder: a draft picks a species and a
+  background from the campaign's enabled sources and the console walks their
+  dnd5e advancements like it walks a class's, so a size with more than one
+  option is a radio group, the Human's Versatile feat opens the origin feat it
+  grants, and the Acolyte's background bonus is the 2024 +2/+1 or +1/+1/+1 over
+  its Intelligence, Wisdom and Charisma, never above 20. `validate_asi` is the
+  one rule the page and `update_draft` share; ability bonuses live in
+  `DraftChoices::asi` and are pruned with the picks, the "to do" list gains
+  Species, Background and every unresolved size or bonus, and each abilities
+  row reads base + bonus = total with the modifier of the total.
 - Add the class step to the character builder: a draft picks a class from the
   campaign's enabled sources and the console walks that class's dnd5e
   advancements to list every decision a level-one character owes, including

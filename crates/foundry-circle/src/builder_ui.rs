@@ -17,8 +17,8 @@ use crate::{
     builder::{
         AbilityMethod, AbilityRoll, BuilderView, CampaignRules, CampaignView, CharactersView,
         ClassDetails, ClassOption, Decision, DecisionKind, DraftPatch, DraftSummary, Opt,
-        POINT_BUY_BUDGET, PackInfo, Pending, Rolls, SRD_ATTRIBUTION, Scores, Slot, Step, TraitMode,
-        modifier, point_buy_cost,
+        OriginDetails, POINT_BUY_BUDGET, PackInfo, Pending, Rolls, SRD_ATTRIBUTION, Scores, Slot,
+        Step, TraitMode, ability_label, modifier, point_buy_cost, size_label, validate_asi,
     },
 };
 
@@ -211,6 +211,10 @@ fn code_message(code: &str) -> &'static str {
         "pick_not_offered" => "That option is not one this feature offers.",
         "pick_duplicate" => "Choose each option once.",
         "pick_unsupported" => "The builder cannot resolve that choice yet.",
+        "asi_points" => "Assign every ability bonus point the background grants.",
+        "asi_cap" => "That ability cannot take more than the background allows.",
+        "asi_locked" => "The background does not improve that ability.",
+        "asi_max" => "No ability score may rise above 20.",
         "world_not_ready" => "Start the session and open the world, then sync again.",
         "world_mismatch" => "The running world is not this campaign's world.",
         "not_dnd5e" => "The running world does not use the dnd5e system.",
@@ -557,6 +561,7 @@ fn BuilderSheet(
             (step, count)
         })
         .collect();
+    let scores = data.totals;
     rsx! {
         DashboardHeader {
                 eyebrow: "Character builder".to_string(),
@@ -596,6 +601,24 @@ fn BuilderSheet(
                     patch,
                 }
             }
+            section { id: "origin", class: "builder-step-body", aria_label: "Origin",
+                h2 { "Origin" }
+                OriginStep {
+                    species: data.species.clone(),
+                    backgrounds: data.backgrounds.clone(),
+                    selected_species: data.choices.species.clone(),
+                    selected_background: data.choices.background.clone(),
+                    species_details: data.species_details.clone(),
+                    background_details: data.background_details.clone(),
+                    picks: data.choices.picks.clone(),
+                    asi: data.choices.asi.clone(),
+                    // The ASI field judges its own answer against every other bonus.
+                    base: base.map(|_| data.totals),
+                    granted: data.granted.clone(),
+                    editable,
+                    patch,
+                }
+            }
             div { id: "abilities",
                 SelectField {
                     id: "draft-method".to_string(),
@@ -617,7 +640,7 @@ fn BuilderSheet(
                 }
                 if let Some(base) = base {
                     if let Some(method) = method {
-                        AbilityScores { method, base, rolls: data.rolls.clone(), editable, patch }
+                        AbilityScores { method, base, totals: scores, rolls: data.rolls.clone(), editable, patch }
                     }
                 }
             }
@@ -647,11 +670,12 @@ fn BuilderSheet(
 }
 
 /// Six rows: pool selects for array and roll, number inputs for point buy and
-/// manual, each with its modifier.
+/// manual, each showing what the backgrounds add and the total score.
 #[component]
 fn AbilityScores(
     method: AbilityMethod,
     base: Scores,
+    totals: Scores,
     rolls: Option<Rolls>,
     editable: bool,
     patch: EventHandler<DraftPatch>,
@@ -682,6 +706,7 @@ fn AbilityScores(
                     label: label.to_string(),
                     method,
                     base,
+                    total: totals.get(field).unwrap_or(0),
                     pool: pool.clone(),
                     editable,
                     patch,
@@ -697,12 +722,15 @@ fn AbilityRow(
     label: String,
     method: AbilityMethod,
     base: Scores,
+    total: u8,
     pool: Vec<u8>,
     editable: bool,
     patch: EventHandler<DraftPatch>,
 ) -> Element {
     let value = base.get(&field).unwrap_or(0);
-    let modifier = modifier(value);
+    // The bonuses the background grants; the modifier reads the total score.
+    let bonus = total.saturating_sub(value);
+    let modifier = modifier(total);
     let modifier = if modifier >= 0 {
         format!("+{modifier}")
     } else {
@@ -765,7 +793,8 @@ fn AbilityRow(
         div { class: "builder-ability",
             span { class: "builder-ability__label", "{label}" }
             {control}
-            span { class: "builder-ability__modifier", "{modifier}" }
+            span { class: "builder-ability__math", "{value} + {bonus} = {total}" }
+            span { class: "builder-ability__modifier", "({modifier})" }
         }
     }
 }
@@ -884,21 +913,178 @@ fn ClassStep(
     }
 }
 
+/// The origin step: the sources' species and backgrounds, then the chosen
+/// roots' features and the choices they open.
+#[component]
+fn OriginStep(
+    species: Vec<ClassOption>,
+    backgrounds: Vec<ClassOption>,
+    selected_species: Option<String>,
+    selected_background: Option<String>,
+    species_details: Option<OriginDetails>,
+    background_details: Option<OriginDetails>,
+    picks: BTreeMap<String, Vec<String>>,
+    asi: BTreeMap<String, BTreeMap<String, u8>>,
+    base: Option<Scores>,
+    granted: Vec<String>,
+    editable: bool,
+    patch: EventHandler<DraftPatch>,
+) -> Element {
+    rsx! {
+        h3 { "Species" }
+        OriginList {
+            name: "species".to_string(),
+            missing: "No species here yet. The GM syncs the world's rules content and enables a pack with species.".to_string(),
+            options: species,
+            selected: selected_species,
+            slot: Slot::Species,
+            editable,
+            patch,
+        }
+        if let Some(details) = species_details {
+            OriginRoot { details, picks: picks.clone(), asi: asi.clone(), base, granted: granted.clone(), editable, patch }
+        }
+        h3 { "Background" }
+        OriginList {
+            name: "background".to_string(),
+            missing: "No backgrounds here yet. The GM syncs the world's rules content and enables a pack with backgrounds.".to_string(),
+            options: backgrounds,
+            selected: selected_background,
+            slot: Slot::Background,
+            editable,
+            patch,
+        }
+        if let Some(details) = background_details {
+            OriginRoot { details, picks, asi, base, granted, editable, patch }
+        }
+    }
+}
+
+/// One origin slot's radio list, grouped under its source.
+#[component]
+fn OriginList(
+    name: String,
+    missing: String,
+    options: Vec<ClassOption>,
+    selected: Option<String>,
+    slot: Slot,
+    editable: bool,
+    patch: EventHandler<DraftPatch>,
+) -> Element {
+    let mut groups: Vec<(String, Vec<ClassOption>)> = Vec::new();
+    for option in options {
+        match groups
+            .iter_mut()
+            .find(|(source, _)| *source == option.source)
+        {
+            Some((_, group)) => group.push(option),
+            None => groups.push((option.source.clone(), vec![option])),
+        }
+    }
+    rsx! {
+        if groups.is_empty() {
+            p { class: "tartan-muted", "{missing}" }
+        }
+        for (source, options) in groups {
+            fieldset { class: "builder-classes", key: "{name}-{source}",
+                legend { "{source}" }
+                for option in options {
+                    label { key: "{option.uuid}",
+                        input {
+                            r#type: "radio",
+                            name: "{name}",
+                            value: "{option.uuid}",
+                            checked: selected.as_deref() == Some(option.uuid.as_str()),
+                            disabled: !editable,
+                            onchange: {
+                                let uuid = option.uuid.clone();
+                                move |_| patch.call(DraftPatch::Select {
+                                    slot,
+                                    uuid: Some(uuid.clone()),
+                                })
+                            },
+                        }
+                        " {option.name}"
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One chosen origin root: its features and the decisions they open.
+#[component]
+fn OriginRoot(
+    details: OriginDetails,
+    picks: BTreeMap<String, Vec<String>>,
+    asi: BTreeMap<String, BTreeMap<String, u8>>,
+    base: Option<Scores>,
+    granted: Vec<String>,
+    editable: bool,
+    patch: EventHandler<DraftPatch>,
+) -> Element {
+    let OriginDetails {
+        name,
+        source,
+        features,
+        decisions,
+        ..
+    } = details;
+    rsx! {
+        p { class: "tartan-muted", "{name} · {source}" }
+        for feature in features {
+            DetailDisclosure { key: "{feature.name}", label: feature.name.clone(),
+                p { {feature.text.clone()} }
+            }
+        }
+        for decision in decisions.into_iter().filter(|decision| !decision.is_automatic()) {
+            DecisionField {
+                key: "{decision.key}",
+                picks: picks.get(&decision.key).cloned().unwrap_or_default(),
+                deltas: asi.get(&decision.key).cloned().unwrap_or_default(),
+                base,
+                granted: granted.clone(),
+                editable,
+                decision,
+                patch,
+            }
+        }
+    }
+}
+
 /// One decision as a native checkbox or radio group that stops at its count.
 #[component]
 fn DecisionField(
     decision: Decision,
     picks: Vec<String>,
+    #[props(default)] deltas: BTreeMap<String, u8>,
+    #[props(default)] base: Option<Scores>,
     granted: Vec<String>,
     editable: bool,
     patch: EventHandler<DraftPatch>,
 ) -> Element {
+    // An ability bonus is answered into its own map, with its own rule.
+    if let DecisionKind::Asi { .. } = &decision.kind {
+        return rsx! {
+            AsiField { decision, deltas, base, editable, patch }
+        };
+    }
     let pools: Vec<(u8, Vec<Opt>)> = match &decision.kind {
         DecisionKind::Trait { choices, .. } => choices
             .iter()
             .map(|pool| (pool.count, pool.options.clone()))
             .collect(),
         DecisionKind::Items { count, options } => vec![(*count, options.clone())],
+        DecisionKind::Size { options } => vec![(
+            1,
+            options
+                .iter()
+                .map(|size| Opt {
+                    value: size.clone(),
+                    label: size_label(size).to_owned(),
+                })
+                .collect(),
+        )],
         _ => Vec::new(),
     };
     // A pick the content no longer offers is not sent back.
@@ -920,10 +1106,6 @@ fn DecisionField(
         _ => None,
     };
     let unsupported = match &decision.kind {
-        DecisionKind::Asi { .. } => {
-            Some("Ability score increases are answered on the origin step.")
-        }
-        DecisionKind::Size { .. } => Some("Pick your size on the origin step."),
         DecisionKind::Unsupported { .. } => Some("The builder cannot resolve this choice yet."),
         DecisionKind::Trait { .. } | DecisionKind::Items { .. } if pools.is_empty() => {
             Some("The rules content did not resolve this choice.")
@@ -1051,6 +1233,175 @@ fn toggle(
         next.retain(|current| current != value);
     }
     next
+}
+
+/// A background's ability bonuses: the 2024 presets over the open abilities,
+/// then one select per open ability that keeps the total on the points granted.
+#[component]
+fn AsiField(
+    decision: Decision,
+    deltas: BTreeMap<String, u8>,
+    base: Option<Scores>,
+    editable: bool,
+    patch: EventHandler<DraftPatch>,
+) -> Element {
+    let DecisionKind::Asi {
+        points, cap, open, ..
+    } = &decision.kind
+    else {
+        return rsx! {
+            p { class: "tartan-muted", "The rules content did not resolve this choice." }
+        };
+    };
+    let (points, cap, open) = (*points, *cap, open.clone());
+    // `base` arrives as the draft's totals; take this decision's own bonus back
+    // out, so it is judged against the base plus every other bonus.
+    let mut base = base.unwrap_or_default();
+    if let DecisionKind::Asi { fixed, .. } = &decision.kind {
+        for (key, delta) in fixed.iter().chain(&deltas) {
+            base.set(key, base.get(key).unwrap_or(0).saturating_sub(*delta));
+        }
+    }
+    let key = decision.key.clone();
+    let two_one = preset(&open, points, cap, false);
+    let ones = preset(&open, points, cap, true);
+    let abilities: Vec<(String, String)> = open
+        .iter()
+        .map(|field| {
+            let label = ability_label(field).map_or(field.clone(), str::to_owned);
+            (field.clone(), label)
+        })
+        .collect();
+    // Only a complete, legal assignment is ever sent: the same rule the server
+    // re-runs in `update_draft`.
+    let send = move |next: BTreeMap<String, u8>,
+                     decision: Decision,
+                     patch: EventHandler<DraftPatch>,
+                     key: String| {
+        if validate_asi(&decision, &next, &base).is_ok() {
+            patch.call(DraftPatch::Asi { key, deltas: next });
+        }
+    };
+    rsx! {
+        fieldset { class: "builder-decision",
+            legend { "{decision.title}" }
+            if !decision.hint.is_empty() {
+                p { class: "tartan-muted", "{decision.hint}" }
+            }
+            p { class: "tartan-muted", "{points} points to assign, at most {cap} on one ability." }
+            for (value, label, chosen) in [
+                ("twoOne", "+2 / +1", two_one),
+                ("ones", "+1 / +1 / +1", ones),
+            ] {
+                label { key: "{value}",
+                    input {
+                        r#type: "radio",
+                        name: "{key}",
+                        value: "{value}",
+                        checked: deltas == chosen,
+                        disabled: !editable,
+                        onchange: {
+                            let next = chosen.clone();
+                            let decision = decision.clone();
+                            let key = key.clone();
+                            move |_| send(next.clone(), decision.clone(), patch, key.clone())
+                        },
+                    }
+                    " {label}"
+                }
+            }
+            div { class: "builder-asi",
+                for (field, label) in abilities {
+                    label { key: "{field}",
+                        {label}
+                        select {
+                            disabled: !editable,
+                            onchange: {
+                                let field = field.clone();
+                                let deltas = deltas.clone();
+                                let open = open.clone();
+                                let decision = decision.clone();
+                                let key = key.clone();
+                                move |event: FormEvent| {
+                                    let Ok(to) = event.value().parse::<u8>() else {
+                                        return;
+                                    };
+                                    let next = rebalance(&deltas, &open, &field, to, points, cap);
+                                    send(next, decision.clone(), patch, key.clone());
+                                }
+                            },
+                            for value in 0..=cap.min(points) {
+                                option {
+                                    value: "{value}",
+                                    selected: deltas.get(&field).copied().unwrap_or(0) == value,
+                                    "{value}"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The whole answer one ability change produces: the changed value stays and
+/// the others give way, or top up, so the total is exactly `points`.
+fn rebalance(
+    deltas: &BTreeMap<String, u8>,
+    open: &[String],
+    changed: &str,
+    to: u8,
+    points: u8,
+    cap: u8,
+) -> BTreeMap<String, u8> {
+    let mut next: BTreeMap<String, u8> = open
+        .iter()
+        .map(|key| {
+            let delta = deltas.get(key).copied().unwrap_or(0).min(cap);
+            (key.clone(), delta)
+        })
+        .collect();
+    next.insert(changed.to_owned(), to.min(cap).min(points));
+    let sum = |map: &BTreeMap<String, u8>| map.values().map(|delta| u16::from(*delta)).sum::<u16>();
+    let budget = u16::from(points);
+    for key in open.iter().rev().filter(|key| key.as_str() != changed) {
+        if sum(&next) <= budget {
+            break;
+        }
+        let over = u8::try_from(sum(&next) - budget).unwrap_or(u8::MAX);
+        if let Some(delta) = next.get_mut(key) {
+            *delta = delta.saturating_sub(over);
+        }
+    }
+    for key in open.iter().filter(|key| key.as_str() != changed) {
+        if sum(&next) >= budget {
+            break;
+        }
+        let short = u8::try_from(budget - sum(&next)).unwrap_or(u8::MAX);
+        let room = short.min(cap.saturating_sub(next.get(key).copied().unwrap_or(0)));
+        if let Some(delta) = next.get_mut(key) {
+            *delta += room;
+        }
+    }
+    next.retain(|_, delta| *delta > 0);
+    next
+}
+
+/// The two 2024 presets: the cap on the first open abilities then what is left,
+/// or one point on each open ability in turn.
+fn preset(open: &[String], points: u8, cap: u8, ones: bool) -> BTreeMap<String, u8> {
+    let mut deltas = BTreeMap::new();
+    let mut left = points;
+    for key in open {
+        if left == 0 {
+            break;
+        }
+        let give = if ones { 1 } else { left.min(cap) }.min(left);
+        deltas.insert(key.clone(), give);
+        left -= give;
+    }
+    deltas
 }
 
 /// A fresh valid assignment when the player switches method.
@@ -1247,7 +1598,12 @@ mod tests {
             srd_attribution: false,
             classes: Vec::new(),
             class: None,
+            species: Vec::new(),
+            backgrounds: Vec::new(),
+            species_details: None,
+            background_details: None,
             granted: Vec::new(),
+            totals: Scores::default(),
         }
     }
 
@@ -1589,6 +1945,31 @@ mod tests {
         assert!(html.contains("Skill Proficiencies"));
         assert!(html.contains("Divine Order Choice"));
         assert!(html.contains("2 to do"));
+    }
+
+    #[test]
+    fn ability_rows_show_base_bonus_total() {
+        let mut data = builder_data(CampaignRules::default());
+        // The Acolyte's +2 Intelligence and +1 Wisdom, on the standard array.
+        data.choices.asi.insert(
+            "Compendium.dnd5e.origins24.Item.phbbgAcolyte0000#kDI6zoUamHzFTvHG#0".into(),
+            BTreeMap::from([("int".to_owned(), 2), ("wis".to_owned(), 1)]),
+        );
+        // The server computes totals (fixed and assigned bonuses) for the page.
+        let base = data.choices.base.expect("standard array");
+        data.totals = Scores {
+            int: base.int + 2,
+            wis: base.wis + 1,
+            ..base
+        };
+        let html = render_sheet(BuilderView::Ready(Box::new(data)));
+
+        // Every row reads base + bonus = total, and the modifier follows the
+        // total rather than the base.
+        assert!(html.contains("15 + 0 = 15"), "{html}");
+        assert!(html.contains("12 + 2 = 14"), "{html}");
+        assert!(html.contains("10 + 1 = 11"), "{html}");
+        assert!(html.contains("(+2)"), "{html}");
     }
 
     #[test]

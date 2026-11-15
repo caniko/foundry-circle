@@ -1,0 +1,211 @@
+[
+  {
+    "uuid": "Compendium.dnd5e.origins24.Item.phbbgAcolyte0000",
+    "name": "Acolyte",
+    "type": "background",
+    "img": "icons/equipment/neck/necklace-runed-white-red.webp",
+    "text": "Ability Scores: Intelligence, Wisdom, CharismaFeat: Magic Initiate (Cleric)Skill Proficiencies: Insight and ReligionTool Proficiency: Calligrapher's SuppliesEquipment: Choose A or B: (A) Calligrapher's Supplies, Book (prayers), Holy Symbol, Parchment (10 sheets), Robe, 8 GP; or (B) 50 GP",
+    "system": {
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "revision": 2,
+        "license": "CC-BY-4.0",
+        "book": ""
+      },
+      "identifier": "acolyte",
+      "wealth": "50",
+      "advancement": {
+        "kDI6zoUamHzFTvHG": {
+          "_id": "kDI6zoUamHzFTvHG",
+          "type": "AbilityScoreImprovement",
+          "configuration": {
+            "cap": 2,
+            "fixed": {
+              "str": 0,
+              "dex": 0,
+              "con": 0,
+              "int": 0,
+              "wis": 0,
+              "cha": 0
+            },
+            "locked": ["str", "dex", "con"],
+            "points": 3
+          },
+          "value": {},
+          "level": 0,
+          "name": "Background Ability Score Improvement",
+          "hint": "Your background allows you to increase your Intelligence, Wisdom, and Charisma scores; increase one of them by 2 and a different one by 1, or increase all three by 1. None of these increases can raise a score above 20."
+        },
+        "Lk1ScjOCqRDtX2Tg": {
+          "_id": "Lk1ScjOCqRDtX2Tg",
+          "type": "Trait",
+          "configuration": {
+            "mode": "default",
+            "allowReplacements": false,
+            "grants": ["tool:art:calligrapher", "skills:ins", "skills:rel"],
+            "choices": []
+          },
+          "value": { "chosen": [] },
+          "level": 0,
+          "name": "Background Proficiencies",
+          "hint": "Your background grants you proficiency in Insight and Religion. It also grants you proficiency in Calligrapher's Supplies."
+        },
+        "ygyW1bVUTnCnjxY2": {
+          "_id": "ygyW1bVUTnCnjxY2",
+          "type": "ItemGrant",
+          "configuration": {
+            "items": [
+              {
+                "optional": false,
+                "uuid": "Compendium.dnd5e.feats24.Item.phbftMagicInitia"
+              }
+            ],
+            "optional": false,
+            "spell": null
+          },
+          "value": {},
+          "level": 0,
+          "name": "Background Feat",
+          "hint": "Your background grants you the Magic Initiate (Cleric) feat."
+        },
+        "McRHkSL3WnG2Po7g": {
+          "_id": "McRHkSL3WnG2Po7g",
+          "type": "Trait",
+          "configuration": {
+            "mode": "default",
+            "allowReplacements": false,
+            "grants": ["languages:standard:common"],
+            "choices": [
+              {
+                "count": 2,
+                "pool": ["languages:standard:*"]
+              }
+            ]
+          },
+          "value": { "chosen": [] },
+          "level": 0,
+          "name": "Choose Languages",
+          "hint": "Your character knows at least three languages: Common plus two languages you roll or choose from the Standard Languages table."
+        }
+      }
+    },
+    "traits": {
+      "Lk1ScjOCqRDtX2Tg": {
+        "grants": [
+          { "key": "tool:art:calligrapher", "label": "Calligrapher's Supplies" },
+          { "key": "skills:ins", "label": "Insight" },
+          { "key": "skills:rel", "label": "Religion" }
+        ],
+        "choices": []
+      },
+      "McRHkSL3WnG2Po7g": {
+        "grants": [{ "key": "languages:standard:common", "label": "Common" }],
+        "choices": [
+          {
+            "count": 2,
+            "options": [
+              { "key": "languages:standard:common", "label": "Common" },
+              { "key": "languages:standard:draconic", "label": "Draconic" },
+              { "key": "languages:standard:dwarvish", "label": "Dwarvish" },
+              { "key": "languages:standard:elvish", "label": "Elvish" },
+              { "key": "languages:standard:giant", "label": "Giant" },
+              { "key": "languages:standard:gnomish", "label": "Gnomish" },
+              { "key": "languages:standard:goblin", "label": "Goblin" },
+              { "key": "languages:standard:halfling", "label": "Halfling" },
+              { "key": "languages:standard:orc", "label": "Orc" },
+              { "key": "languages:standard:sign", "label": "Common Sign Language" }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "uuid": "Compendium.dnd5e.origins24.Item.phbspHuman000000",
+    "name": "Human",
+    "type": "race",
+    "img": "icons/environment/people/commoner.webp",
+    "text": "Human TraitsCreature Type: HumanoidSize: Medium (about 4–7 feet tall) or Small (about 2–4 feet tall), chosen when you select this speciesSpeed: 30 feetAs a Human, you have these special traits.",
+    "system": {
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "book": "",
+        "page": "",
+        "license": "CC-BY-4.0",
+        "revision": 2
+      },
+      "identifier": "human",
+      "advancement": {
+        "dLxv96vt2B2KOEe2": {
+          "_id": "dLxv96vt2B2KOEe2",
+          "type": "Size",
+          "configuration": {
+            "sizes": ["sm", "med"]
+          },
+          "level": 0,
+          "hint": "<p>Medium (about 4-7 feet tall) or Small (about 2-4 feet tall), chosen when you select this species</p>",
+          "value": {},
+          "name": "",
+          "flags": {}
+        },
+        "2H3yQa0PfjBgXw2W": {
+          "_id": "2H3yQa0PfjBgXw2W",
+          "type": "ItemGrant",
+          "configuration": {
+            "items": [
+              {
+                "uuid": "Compendium.dnd5e.origins24.Item.phbsptResourcefu",
+                "optional": false,
+                "sort": 0
+              },
+              {
+                "uuid": "Compendium.dnd5e.origins24.Item.phbsptSkillful00",
+                "optional": false,
+                "sort": 0
+              },
+              {
+                "uuid": "Compendium.dnd5e.origins24.Item.phbsptVersatile0",
+                "optional": false,
+                "sort": 0
+              }
+            ],
+            "optional": false,
+            "spell": null,
+            "sorting": "m"
+          },
+          "value": {},
+          "level": 0,
+          "hint": "",
+          "name": "Human Traits",
+          "flags": {}
+        }
+      },
+      "movement": {
+        "units": null,
+        "hover": false,
+        "speeds": {
+          "walk": "30"
+        },
+        "ignoredDifficultTerrain": []
+      },
+      "senses": {
+        "units": null,
+        "special": "",
+        "ranges": {
+          "darkvision": null,
+          "blindsight": null,
+          "tremorsense": null,
+          "truesight": null
+        }
+      },
+      "type": {
+        "value": "humanoid",
+        "custom": "",
+        "subtype": ""
+      }
+    },
+    "traits": {}
+  }
+]

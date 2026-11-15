@@ -4,6 +4,7 @@
 //! Drafts are control-plane state until approval; Foundry owns the Actor after
 //! that, so nothing here writes to a world.
 
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
@@ -12,14 +13,21 @@ use super::{AppState, Caller, auth, console_actor, console_caller, session};
 use crate::{
     Role,
     builder::{
-        AbilityMethod, BuilderData, BuilderView, CampaignRules, CampaignView, CharactersData,
-        CharactersView, DraftChoices, DraftPatch, DraftStatus, DraftSummary, Rolls, Scores,
-        pending, roll_sets, validate_scores,
+        AbilityMethod, BuilderData, BuilderView, CampaignRules, CampaignView, CatalogItem,
+        CharactersData, CharactersView, DraftChoices, DraftPatch, DraftStatus, DraftSummary,
+        PackInfo, Rolls, Scores, pending, roll_sets, validate_scores,
     },
+    driver::{FoundryDriver, WorldOp, WorldState},
 };
 
 /// An at most five drafts per player and world rule.
 const DRAFT_LIMIT: i64 = 5;
+
+/// One page of a pack's documents; the module has no server-side paging.
+const CATALOG_PAGE: u32 = 50;
+
+/// A saved `sources` list no longer than this; a world never has more packs.
+const SOURCE_LIMIT: usize = 200;
 
 /// The signed-in access-group member behind a builder mutation.
 /// Goes through `console_actor`, so it carries the lobby's exact-`Origin` check.
@@ -32,6 +40,7 @@ fn member() -> Result<(AppState, auth::Principal, Role), &'static str> {
 
 /// One draft row with the campaign rules it is built against.
 struct DraftRow {
+    world_id: String,
     subject: String,
     name: String,
     status: DraftStatus,
@@ -61,6 +70,7 @@ pub async fn characters_view() -> CharactersView {
             campaigns: Vec::new(),
             mine: Vec::new(),
             party: Vec::new(),
+            ready_world: None,
         }));
     };
     let campaigns = match campaigns(&pool, role).await {
@@ -85,11 +95,16 @@ pub async fn characters_view() -> CharactersView {
             Vec::new()
         })
     };
+    let snapshot = state.driver.snapshot();
+    let ready_world = (snapshot.state == WorldState::Ready)
+        .then_some(snapshot.id)
+        .flatten();
     CharactersView::Ready(Box::new(CharactersData {
         role,
         campaigns,
         mine,
         party,
+        ready_world,
     }))
 }
 
@@ -105,10 +120,14 @@ async fn campaigns(pool: &PgPool, role: Role) -> Result<Vec<CampaignView>, sqlx:
     .bind(role != Role::Player)
     .fetch_all(pool)
     .await?;
-    Ok(rows
-        .iter()
-        .map(|row| CampaignView {
-            world_id: row.try_get("world_id").unwrap_or_default(),
+    // ponytail: one catalog query per adopted world; batch if a host ever runs
+    // dozens of them.
+    let mut campaigns = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let world_id: String = row.try_get("world_id")?;
+        let (packs, synced_at) = catalog_rows(pool, &world_id).await?;
+        campaigns.push(CampaignView {
+            world_id,
             open: row.try_get("open").unwrap_or(false),
             rules: row
                 .try_get::<Option<Value>, _>("rules")
@@ -116,8 +135,43 @@ async fn campaigns(pool: &PgPool, role: Role) -> Result<Vec<CampaignView>, sqlx:
                 .flatten()
                 .and_then(|rules| serde_json::from_value(rules).ok())
                 .unwrap_or_default(),
-        })
-        .collect())
+            packs,
+            synced_at,
+        });
+    }
+    Ok(campaigns)
+}
+
+/// What the last sync stored for one world: its packs and when it last ran.
+async fn catalog_rows(
+    pool: &PgPool,
+    world_id: &str,
+) -> Result<(Vec<PackInfo>, Option<String>), sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT pack_id, label, source_book, rules_version,
+                jsonb_array_length(items) AS count,
+                to_char(synced_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') || ' UTC' AS synced_at
+           FROM builder_catalog
+          WHERE world_id = $1
+          ORDER BY label, pack_id",
+    )
+    .bind(world_id)
+    .fetch_all(pool)
+    .await?;
+    let mut synced_at: Option<String> = None;
+    let mut packs = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let at: String = row.try_get("synced_at")?;
+        synced_at = Some(synced_at.map_or_else(|| at.clone(), |known| known.max(at.clone())));
+        packs.push(PackInfo {
+            id: row.try_get("pack_id")?,
+            label: row.try_get("label")?,
+            source_book: row.try_get("source_book")?,
+            rules_version: row.try_get("rules_version")?,
+            count: row.try_get::<i32, _>("count").unwrap_or_default().max(0) as u32,
+        });
+    }
+    Ok((packs, synced_at))
 }
 
 /// Drafts as the characters page lists them; `only` narrows to one player.
@@ -193,6 +247,17 @@ async fn read_ready(pool: &PgPool, id: Uuid, subject: &str, role: Role) -> Build
     if role == Role::Player && draft.subject != subject {
         return BuilderView::Missing;
     }
+    let sources = &draft.rules.sources;
+    let srd_attribution = !sources.is_empty()
+        && sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM builder_catalog
+                             WHERE world_id = $1 AND pack_id = ANY($2) AND source_book = 'SRD 5.2')",
+        )
+        .bind(&draft.world_id)
+        .bind(sources)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false);
     BuilderView::Ready(Box::new(BuilderData {
         id: id.to_string(),
         editable: draft.status == DraftStatus::Draft && draft.open && draft.subject == subject,
@@ -203,6 +268,7 @@ async fn read_ready(pool: &PgPool, id: Uuid, subject: &str, role: Role) -> Build
         pending: pending(&draft.choices, &draft.name, draft.rolls.as_ref()),
         dm_note: draft.dm_note,
         choices: draft.choices,
+        srd_attribution,
     }))
 }
 
@@ -224,6 +290,7 @@ async fn draft_row(
     let Some(row) = row else { return Ok(None) };
     let status: String = row.try_get("status")?;
     Ok(Some(DraftRow {
+        world_id: row.try_get("world_id")?,
         subject: row.try_get("subject")?,
         name: row.try_get("name")?,
         status: DraftStatus::from_db(&status).ok_or_else(|| {
@@ -261,12 +328,16 @@ pub async fn save_rules(world_id: &str, open: bool, rules: CampaignRules) -> Opt
     let Some(pool) = state.database.pool().await else {
         return Some("database_unavailable".into());
     };
-    let rules = sanitize_rules(rules);
-    let value = serde_json::to_value(rules).ok()?;
     let mut transaction = match pool.begin().await {
         Ok(transaction) => transaction,
         Err(error) => return Some(database_code(error)),
     };
+    let mut rules = sanitize_rules(rules);
+    rules.sources = match known_sources(&mut transaction, world_id, rules.sources).await {
+        Ok(sources) => sources,
+        Err(error) => return Some(database_code(error)),
+    };
+    let value = serde_json::to_value(rules).ok()?;
     // The SELECT makes an unknown or unadopted world a refusal, not a row.
     let written = sqlx::query(
         "INSERT INTO campaign_rules (world_id, open, rules, updated_by)
@@ -322,8 +393,213 @@ fn sanitize_rules(rules: CampaignRules) -> CampaignRules {
         ability_methods: methods,
         starting_level: 1,
         equipment: rules.equipment,
-        // ponytail: sources arrive with the catalog sync; slice one persists none.
-        sources: Vec::new(),
+        sources: rules.sources,
+    }
+}
+
+/// The requested sources that the world's catalog actually holds; anything
+/// else a caller sends is dropped rather than stored.
+async fn known_sources(
+    transaction: &mut Transaction<'_, Postgres>,
+    world_id: &str,
+    requested: Vec<String>,
+) -> Result<Vec<String>, sqlx::Error> {
+    let mut wanted: Vec<String> = Vec::new();
+    for source in requested.into_iter().take(SOURCE_LIMIT) {
+        if !wanted.contains(&source) {
+            wanted.push(source);
+        }
+    }
+    if wanted.is_empty() {
+        return Ok(wanted);
+    }
+    let known: Vec<String> = sqlx::query_scalar(
+        "SELECT pack_id FROM builder_catalog WHERE world_id = $1 AND pack_id = ANY($2)",
+    )
+    .bind(world_id)
+    .bind(&wanted)
+    .fetch_all(&mut **transaction)
+    .await?;
+    Ok(wanted
+        .into_iter()
+        .filter(|source| known.contains(source))
+        .collect())
+}
+
+/// Snapshot the running world's Item packs into the catalog cache. Foundry
+/// stays the authority: the rows are a cache of its documents, keyed by uuid.
+pub async fn sync_catalog(world_id: &str) -> Result<Vec<PackInfo>, String> {
+    let (state, principal, role) = member().map_err(str::to_owned)?;
+    if role == Role::Player {
+        return Err("permission_denied".into());
+    }
+    let Some(pool) = state.database.pool().await else {
+        return Err("database_unavailable".into());
+    };
+    let snapshot = state.driver.snapshot();
+    if snapshot.state != WorldState::Ready {
+        return Err("world_not_ready".into());
+    }
+    if snapshot.id.as_deref() != Some(world_id) {
+        return Err("world_mismatch".into());
+    }
+    if snapshot.system_id.as_deref() != Some("dnd5e") {
+        return Err("not_dnd5e".into());
+    }
+    let system_version = snapshot.system_version.unwrap_or_default();
+    let reply = catalog_call(
+        state.driver.as_ref(),
+        WorldOp::CatalogPacks,
+        "the catalog pack list",
+    )
+    .await?;
+    let packs: Vec<PackInfo> = serde_json::from_value(reply["packs"].clone()).map_err(|error| {
+        tracing::warn!(%error, "the catalog pack list did not parse");
+        "foundry_unavailable".to_owned()
+    })?;
+
+    let mut synced: Vec<(PackInfo, Vec<CatalogItem>)> = Vec::with_capacity(packs.len());
+    for pack in packs {
+        let mut items = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let reply = catalog_call(
+                state.driver.as_ref(),
+                WorldOp::CatalogPage {
+                    pack: pack.id.clone(),
+                    after: after.clone(),
+                    limit: CATALOG_PAGE,
+                },
+                "a catalog page",
+            )
+            .await?;
+            let page: CatalogPage = serde_json::from_value(reply).map_err(|error| {
+                tracing::warn!(%error, pack = %pack.id, "a catalog page did not parse");
+                "foundry_unavailable".to_owned()
+            })?;
+            items.extend(page.items);
+            match page.next_cursor {
+                // A cursor that does not advance would page forever.
+                Some(cursor) if Some(&cursor) != after.as_ref() => after = Some(cursor),
+                Some(_) => return Err("foundry_unavailable".into()),
+                None => break,
+            }
+        }
+        synced.push((pack, items));
+    }
+
+    let mut transaction = pool.begin().await.map_err(database_code)?;
+    let first: i64 = sqlx::query_scalar("SELECT count(*) FROM builder_catalog WHERE world_id = $1")
+        .bind(world_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(database_code)?;
+    for (pack, items) in &synced {
+        let items = serde_json::to_value(items).map_err(|error| error.to_string())?;
+        sqlx::query(
+            "INSERT INTO builder_catalog
+                    (world_id, pack_id, label, source_book, rules_version, system_version, items, synced_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+             ON CONFLICT (world_id, pack_id) DO UPDATE
+                SET label = EXCLUDED.label, source_book = EXCLUDED.source_book,
+                    rules_version = EXCLUDED.rules_version, system_version = EXCLUDED.system_version,
+                    items = EXCLUDED.items, synced_at = now()",
+        )
+        .bind(world_id)
+        .bind(&pack.id)
+        .bind(&pack.label)
+        .bind(&pack.source_book)
+        .bind(&pack.rules_version)
+        .bind(&system_version)
+        .bind(items)
+        .execute(&mut *transaction)
+        .await
+        .map_err(database_code)?;
+    }
+    // A pack the world no longer offers leaves the cache, and with it every
+    // saved source the GM could no longer justify.
+    let ids: Vec<String> = synced.iter().map(|(pack, _)| pack.id.clone()).collect();
+    sqlx::query("DELETE FROM builder_catalog WHERE world_id = $1 AND pack_id <> ALL($2)")
+        .bind(world_id)
+        .bind(&ids)
+        .execute(&mut *transaction)
+        .await
+        .map_err(database_code)?;
+    if first == 0 {
+        // The first sync proposes the 2024 rules; a GM may still turn them off.
+        let modern: Vec<String> = synced
+            .iter()
+            .filter(|(pack, _)| pack.rules_version.as_deref() == Some("modern"))
+            .map(|(pack, _)| pack.id.clone())
+            .collect();
+        // Syncing before the rules were ever saved is the usual order, so the
+        // defaults need a (closed) campaign row to land in.
+        sqlx::query(
+            "INSERT INTO campaign_rules (world_id, open, rules, updated_by)
+             VALUES ($1, false, $2, $3) ON CONFLICT (world_id) DO NOTHING",
+        )
+        .bind(world_id)
+        .bind(serde_json::to_value(CampaignRules::default()).map_err(|error| error.to_string())?)
+        .bind(&principal.subject)
+        .execute(&mut *transaction)
+        .await
+        .map_err(database_code)?;
+        sqlx::query(
+            "UPDATE campaign_rules SET rules = jsonb_set(rules, '{sources}', $2), updated_at = now()
+              WHERE world_id = $1 AND COALESCE(jsonb_array_length(rules->'sources'), 0) = 0",
+        )
+        .bind(world_id)
+        .bind(json!(modern))
+        .execute(&mut *transaction)
+        .await
+        .map_err(database_code)?;
+    }
+    let mut info: Vec<PackInfo> = synced
+        .into_iter()
+        .map(|(pack, items)| PackInfo {
+            count: items.len() as u32,
+            ..pack
+        })
+        .collect();
+    info.sort_by(|a, b| a.label.cmp(&b.label).then(a.id.cmp(&b.id)));
+    audit(
+        &mut transaction,
+        &principal.subject,
+        "catalog.sync",
+        json!({
+            "worldId": world_id,
+            "packs": info.len(),
+            "items": info.iter().map(|pack| pack.count).sum::<u32>(),
+        }),
+    )
+    .await;
+    transaction.commit().await.map_err(database_code)?;
+    Ok(info)
+}
+
+/// One page of a pack's documents, in the module's own reply shape.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CatalogPage {
+    items: Vec<CatalogItem>,
+    next_cursor: Option<String>,
+}
+
+/// One catalog driver call; the module's refusals keep their own codes.
+async fn catalog_call(
+    driver: &dyn FoundryDriver,
+    op: WorldOp,
+    what: &str,
+) -> Result<Value, String> {
+    match driver.call(op).await {
+        Ok(reply) => Ok(reply),
+        Err(error) => {
+            let code = error.catalog_code();
+            if code == "foundry_unavailable" {
+                tracing::warn!(%error, what, "the catalog sync driver call failed");
+            }
+            Err(code.to_owned())
+        }
     }
 }
 

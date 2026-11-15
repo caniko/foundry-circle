@@ -4,6 +4,14 @@ All notable changes to Foundry Circle are documented here.
 
 ## Unreleased
 
+- Add the rules-content sync to the character builder: a GM snapshots the
+  running dnd5e world's Item packs into `builder_catalog` and picks the packs
+  players may build from. The reads come from a new companion Foundry module
+  (`foundry-module/`, packaged as `packages.<system>.foundry-circle-module`)
+  whose `game.modules.get("foundry-circle").api` the driver calls with fixed
+  scripts, failing closed with `module_missing`/`module_outdated`; the source
+  toggles, the last sync time and the SRD 5.2.1 attribution render in the
+  console.
 - Add session zero to the console: a GM opens character creation for an adopted
   world and chooses the ability methods, players create drafts and set ability
   scores by the standard array, point buy, a server roll (4d6 drop lowest, OS

@@ -1,0 +1,18 @@
+{
+  "id": "foundry-circle",
+  "title": "Foundry Circle",
+  "description": "Read-only compendium access for the Foundry Circle broker's character builder. Install and enable it; the broker calls game.modules.get(\"foundry-circle\").api.",
+  "version": "0.1.0",
+  "authors": [
+    {
+      "name": "Can H. Tartanoglu"
+    }
+  ],
+  "compatibility": {
+    "minimum": "14.367",
+    "verified": "14"
+  },
+  "esmodules": [
+    "foundry-circle.mjs"
+  ]
+}

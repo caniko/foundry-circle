@@ -39,6 +39,35 @@ authoritative for world documents. Nothing here writes to Foundry yet.
   are written once per draft, and `update_draft` never writes the `rolls`
   column.
 
+### Rules content
+
+Content is the world's own compendium packs, cached per world in
+`builder_catalog` by the GM's "Sync rules content" button; nothing is bundled
+and Foundry stays the authority. The sync reads packs through the companion
+Foundry module, which the broker drives from its own GM page
+(`WorldOp::CatalogPacks`, `WorldOp::CatalogPage`). It requires the world to be
+running and adopted, its system to be `dnd5e`, and the module below to be
+enabled; otherwise it reports `world_not_ready`, `world_mismatch`, `not_dnd5e`,
+`module_missing`, `module_outdated` or `foundry_unavailable`.
+
+Install the module from this flake:
+
+```nix
+services.foundryvtt.declarativePackages.foundry-circle.package =
+  inputs.foundry-circle.packages.${system}.foundry-circle-module;
+```
+
+then enable "Foundry Circle" in the world's Manage Modules. The reconciler
+seeds a package once and never replaces an existing directory, so upgrading
+the module takes three steps: deploy with `state = "absent"` (this clears the
+initialization marker), remove `Data/modules/foundry-circle`, then deploy with
+`state = "present"` again.
+
+Every Item pack the world offers becomes a source toggle in "Session zero"
+(labelled with its source book), and the first sync turns on the packs whose
+`rulesVersion` is `modern`. A draft whose enabled sources include SRD 5.2
+content shows the SRD 5.2.1 attribution.
+
 ## Asset upload
 
 A DM converts assets on their own machine with

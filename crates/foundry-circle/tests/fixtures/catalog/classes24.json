@@ -1,0 +1,165 @@
+[
+  {
+    "uuid": "Compendium.dnd5e.classes24.Item.phbclcCleric0000",
+    "name": "Cleric",
+    "type": "class",
+    "img": "systems/dnd5e/icons/classes/cleric.webp",
+    "text": "Class DetailsBecoming a Cleric …As a Level 1 CharacterGain all the traits in the Core Cleric Traits table.Gain the Cleric's level 1 features, which are listed in the Cleric Features table.As a Multiclass CharacterGain the following traits from the Core Cleric Traits table: Hit Point Die and training with Light and Medium armor and Shields.Gain the Cleric's level 1 features, which are listed in the Cleric Features table. See the multiclassing rules in chapter 2 to determine your available spell slots.",
+    "system": {
+      "source": {
+        "custom": "",
+        "rules": "2024",
+        "book": "",
+        "page": "",
+        "license": "CC-BY-4.0",
+        "revision": 2
+      },
+      "identifier": "cleric",
+      "levels": 1,
+      "hd": {
+        "denomination": "d8",
+        "spent": 0,
+        "additional": ""
+      },
+      "primaryAbility": {
+        "value": ["wis"],
+        "all": true
+      },
+      "spellcasting": {
+        "progression": "full",
+        "ability": "wis",
+        "preparation": {
+          "formula": "@scale.cleric.max-prepared"
+        }
+      },
+      "wealth": "110",
+      "advancement": {
+        "NCN5ZAV8TtveRR4d": {
+          "_id": "NCN5ZAV8TtveRR4d",
+          "type": "HitPoints",
+          "configuration": {},
+          "value": {},
+          "level": 1,
+          "name": "",
+          "hint": "",
+          "flags": {}
+        },
+        "rQCM2OtE22hoSikN": {
+          "_id": "rQCM2OtE22hoSikN",
+          "type": "ItemGrant",
+          "configuration": {
+            "items": [
+              {
+                "uuid": "Compendium.dnd5e.classes24.Item.phbclcSpellcasti",
+                "optional": false,
+                "sort": 0
+              },
+              {
+                "uuid": "Compendium.dnd5e.classes24.Item.phbclcDivineOrde",
+                "optional": false,
+                "sort": 0
+              }
+            ],
+            "optional": false,
+            "spell": null,
+            "sorting": "m"
+          },
+          "value": {},
+          "level": 1,
+          "name": "Class Features",
+          "hint": "",
+          "flags": {}
+        },
+        "Z9K5kHYMLvroIMpT": {
+          "_id": "Z9K5kHYMLvroIMpT",
+          "type": "Trait",
+          "configuration": {
+            "mode": "default",
+            "allowReplacements": false,
+            "grants": ["saves:wis", "saves:cha", "armor:med", "armor:shl"],
+            "choices": []
+          },
+          "value": { "chosen": [] },
+          "level": 1,
+          "name": "Armor Training",
+          "hint": "",
+          "flags": {},
+          "classRestriction": "primary"
+        },
+        "2wUNkQzS4vL9nR6D": {
+          "_id": "2wUNkQzS4vL9nR6D",
+          "type": "Trait",
+          "configuration": {
+            "mode": "default",
+            "allowReplacements": false,
+            "grants": [],
+            "choices": [
+              {
+                "count": 2,
+                "pool": [
+                  "skills:his",
+                  "skills:ins",
+                  "skills:med",
+                  "skills:per",
+                  "skills:rel"
+                ]
+              }
+            ]
+          },
+          "value": { "chosen": [] },
+          "level": 1,
+          "name": "Skill Proficiencies",
+          "hint": "",
+          "flags": {},
+          "classRestriction": "primary"
+        },
+        "U6GGwY4ZKiXqXBQN": {
+          "_id": "U6GGwY4ZKiXqXBQN",
+          "type": "Trait",
+          "configuration": {
+            "mode": "default",
+            "allowReplacements": false,
+            "grants": ["weapon:sim"],
+            "choices": []
+          },
+          "value": { "chosen": [] },
+          "level": 1,
+          "name": "Weapon Proficiencies",
+          "hint": "",
+          "flags": {},
+          "classRestriction": "primary"
+        }
+      }
+    },
+    "traits": {
+      "Z9K5kHYMLvroIMpT": {
+        "grants": [
+          { "key": "saves:wis", "label": "Wisdom" },
+          { "key": "saves:cha", "label": "Charisma" },
+          { "key": "armor:med", "label": "Medium" },
+          { "key": "armor:shl", "label": "Shields" }
+        ],
+        "choices": []
+      },
+      "2wUNkQzS4vL9nR6D": {
+        "grants": [],
+        "choices": [
+          {
+            "count": 2,
+            "options": [
+              { "key": "skills:his", "label": "History" },
+              { "key": "skills:ins", "label": "Insight" },
+              { "key": "skills:med", "label": "Medicine" },
+              { "key": "skills:per", "label": "Perception" },
+              { "key": "skills:rel", "label": "Religion" }
+            ]
+          }
+        ]
+      },
+      "U6GGwY4ZKiXqXBQN": {
+        "grants": [{ "key": "weapon:sim", "label": "Simple" }],
+        "choices": []
+      }
+    }
+  }
+]

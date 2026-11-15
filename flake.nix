@@ -108,6 +108,8 @@
         fileset = pkgs.lib.fileset.unions [
           (toolchain.craneLib.fileset.commonCargoSources ./.)
           ./crates/foundry-circle/migrations
+          # Unit tests `include_str!` the transcribed catalog fixtures.
+          ./crates/foundry-circle/tests/fixtures
         ];
       };
       commonArgs = {
@@ -415,6 +417,13 @@
         };
       };
       publishedPackages = [dioxusPackage fetchPackage];
+      # The companion Foundry module, installed from this checkout by a host's
+      # `declarativePackages` entry.
+      foundryModule = import ./nix/foundry-module.nix {
+        inherit (nixpkgs) lib;
+        inherit pkgs;
+        version = foundryVersion;
+      };
       devShell = toolchain.craneLib.devShell {
         checks = self.checks.${system};
         packages = with pkgs;
@@ -436,6 +445,7 @@
           foundryvtt-fetch = fetchPackage;
           foundryvtt-fetchd = fetchPackage;
           foundryvtt-fetch-hook = fetchPackage;
+          foundry-circle-module = foundryModule;
         }
         // pkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.isLinux || pkgs.stdenv.hostPlatform.isDarwin) {
           # A webkitgtk window on Linux, WKWebView on macOS.

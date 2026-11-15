@@ -624,8 +624,13 @@ pub async fn sync_catalog(world_id: &str) -> Result<Vec<PackInfo>, String> {
         return Err("not_dnd5e".into());
     }
     let system_version = snapshot.system_version.unwrap_or_default();
-    let reply = catalog_call(
+    let mut enable_attempted = false;
+    let reply = catalog_sync_call(
         state.driver.as_ref(),
+        &pool,
+        &principal.subject,
+        world_id,
+        &mut enable_attempted,
         WorldOp::CatalogPacks,
         "the catalog pack list",
     )
@@ -648,8 +653,12 @@ pub async fn sync_catalog(world_id: &str) -> Result<Vec<PackInfo>, String> {
         let mut items = Vec::new();
         let mut after: Option<String> = None;
         loop {
-            let reply = catalog_call(
+            let reply = catalog_sync_call(
                 state.driver.as_ref(),
+                &pool,
+                &principal.subject,
+                world_id,
+                &mut enable_attempted,
                 WorldOp::CatalogPage {
                     pack: pack.id.clone(),
                     after: after.clone(),
@@ -787,6 +796,38 @@ pub async fn sync_catalog(world_id: &str) -> Result<Vec<PackInfo>, String> {
 struct CatalogPage {
     items: Vec<CatalogItem>,
     next_cursor: Option<String>,
+}
+
+/// Retry one inactive-module read after enabling, at most once per sync.
+async fn catalog_sync_call(
+    driver: &dyn FoundryDriver,
+    pool: &sqlx::PgPool,
+    subject: &str,
+    world_id: &str,
+    attempted: &mut bool,
+    op: WorldOp,
+    what: &str,
+) -> Result<Value, String> {
+    let result = catalog_call(driver, op.clone(), what).await;
+    if !should_enable(&result, *attempted) {
+        return result;
+    }
+    *attempted = true;
+    let enabled = catalog_call(driver, WorldOp::ModuleEnable, "the module enable").await?;
+    let mut transaction = pool.begin().await.map_err(database_code)?;
+    audit(
+        &mut transaction,
+        subject,
+        "catalog.module_enable",
+        json!({"worldId": world_id, "enabled": enabled["enabled"]}),
+    )
+    .await;
+    transaction.commit().await.map_err(database_code)?;
+    catalog_call(driver, op, what).await
+}
+
+fn should_enable(result: &Result<Value, String>, attempted: bool) -> bool {
+    !attempted && matches!(result, Err(code) if code == "module_inactive")
 }
 
 /// One catalog driver call; the module's refusals keep their own codes.
@@ -1326,7 +1367,10 @@ async fn player_user(
 fn approval_code(error: &WorldError) -> String {
     match error {
         WorldError::Unsupported(code)
-            if matches!(code.as_str(), "module_missing" | "module_outdated") =>
+            if matches!(
+                code.as_str(),
+                "module_missing" | "module_inactive" | "module_outdated"
+            ) =>
         {
             code.clone()
         }
@@ -1582,4 +1626,16 @@ async fn audit(
 fn database_code(error: sqlx::Error) -> String {
     tracing::warn!(%error, "Foundry Circle character builder database operation failed");
     "database_unavailable".into()
+}
+
+#[cfg(test)]
+mod module_enable_tests {
+    use super::*;
+    #[test]
+    fn retries_only_inactive_once() {
+        assert!(should_enable(&Err("module_inactive".into()), false));
+        assert!(!should_enable(&Err("module_inactive".into()), true));
+        assert!(!should_enable(&Err("module_missing".into()), false));
+        assert!(!should_enable(&Ok(json!({})), false));
+    }
 }

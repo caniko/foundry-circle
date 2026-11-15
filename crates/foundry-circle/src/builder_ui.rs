@@ -282,8 +282,9 @@ fn code_message(code: &str) -> &'static str {
         "world_not_ready" => "Start the session and open the world, then try again.",
         "world_mismatch" => "The running world is not this campaign's world.",
         "not_dnd5e" => "The running world does not use the dnd5e system.",
-        "module_missing" => {
-            "Enable the Foundry Circle module in the world's Manage Modules, then sync again."
+        "module_missing" => "Install the Foundry Circle module, then sync again.",
+        "module_inactive" => {
+            "The Foundry Circle module is inactive; sync rules content and try again."
         }
         "module_outdated" => "The world runs an older Foundry Circle module; update it first.",
         "foundry_unavailable" => "Foundry did not answer the catalog read; try again.",

@@ -4,6 +4,8 @@ All notable changes to Foundry Circle are documented here.
 
 ## Unreleased
 
+- Enable the installed companion module automatically on catalog sync and reload the broker page.
+
 - Approve a submitted character into Foundry: the only world write. An admin, or
   the GM holding the running session for the draft's world, approves while the
   driver reports that world `Ready`; the draft row stays locked for the whole

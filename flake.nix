@@ -140,6 +140,9 @@
           # The desktop window is a GTK binary of its own; keep it out of the
           # headless CLI package and its dependency closure.
           cargoExtraArgs = "--workspace --all-features --exclude foundry-circle-desktop";
+          # Driver tests run the fixed Foundry scripts under node; check inputs
+          # stay out of the package's runtime closure.
+          nativeCheckInputs = [pkgs.nodejs];
         }));
       fetchPackage = cacheRust (toolchain.craneLib.buildPackage (commonArgs
         // {

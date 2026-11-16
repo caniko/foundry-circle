@@ -153,8 +153,8 @@ and Foundry stays the authority. The sync reads packs through the companion
 Foundry module, which the broker drives from its own GM page
 (`WorldOp::CatalogPacks`, `WorldOp::CatalogPage`). It requires the world to be
 running and adopted, its system to be `dnd5e`, and the module below to be
-enabled; otherwise it reports `world_not_ready`, `world_mismatch`, `not_dnd5e`,
-`module_missing`, `module_outdated` or `foundry_unavailable`.
+installed; otherwise it reports `world_not_ready`, `world_mismatch`, `not_dnd5e`,
+`module_missing`, `module_inactive`, `module_outdated` or `foundry_unavailable`.
 
 The module also reports the world's compendium uuid redirects
 (`uuidRedirects()`), which the sync stores per world in `builder_redirects`:
@@ -172,7 +172,8 @@ services.foundryvtt.declarativePackages.foundry-circle.package =
   inputs.foundry-circle.packages.${system}.foundry-circle-module;
 ```
 
-then enable "Foundry Circle" in the world's Manage Modules. The reconciler
+The first sync enables the module and reloads the broker's page; players
+pick it up on their next browser reload. The reconciler
 seeds a package once and never replaces an existing directory, so upgrading
 the module takes three steps: deploy with `state = "absent"` (this clears the
 initialization marker), remove `Data/modules/foundry-circle`, then deploy with

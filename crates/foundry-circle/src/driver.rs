@@ -73,6 +73,8 @@ pub enum WorldOp {
     },
     /// The world's Item packs, from the companion module's `catalogPacks`.
     CatalogPacks,
+    /// Enable the installed companion module in the current world.
+    ModuleEnable,
     /// One page of a pack's items, from the companion module's `catalogPage`.
     CatalogPage {
         pack: String,
@@ -138,6 +140,7 @@ impl WorldError {
     pub fn catalog_code(&self) -> &'static str {
         match self {
             Self::Unsupported(code) if code == "module_missing" => "module_missing",
+            Self::Unsupported(code) if code == "module_inactive" => "module_inactive",
             Self::Unsupported(code) if code == "module_outdated" => "module_outdated",
             _ => "foundry_unavailable",
         }
@@ -175,6 +178,7 @@ pub trait FoundryDriver: Send + Sync {
 #[derive(Clone)]
 pub struct FakeDriver {
     state: WorldState,
+    module: std::sync::Arc<std::sync::Mutex<(bool, std::collections::BTreeMap<String, bool>)>>,
     /// The draft ids it has already created an actor for, so a retried
     /// approval answers `created: false` instead of a second actor.
     created: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
@@ -198,6 +202,10 @@ impl FakeDriver {
     pub fn new(state: WorldState) -> Self {
         Self {
             state,
+            module: std::sync::Arc::new(std::sync::Mutex::new((
+                true,
+                std::collections::BTreeMap::from([("foundry-circle".into(), true)]),
+            ))),
             created: std::sync::Arc::default(),
             accounts: std::sync::Arc::default(),
         }
@@ -245,7 +253,36 @@ impl FoundryDriver for FakeDriver {
     ) -> Pin<Box<dyn Future<Output = Result<Value, WorldError>> + Send + '_>> {
         let result = if self.state == WorldState::Ready {
             validate_op(&op).and_then(|()| match op {
-                WorldOp::CharacterCreate { args } => self.character_create(&args),
+                WorldOp::ModuleEnable => {
+                    let mut module = self
+                        .module
+                        .lock()
+                        .expect("fake Foundry driver lock poisoned");
+                    if !module.0 {
+                        Err(WorldError::Unsupported("module_missing".into()))
+                    } else {
+                        let enabled = !module.1.get("foundry-circle").copied().unwrap_or(false);
+                        module.1.insert("foundry-circle".into(), true);
+                        Ok(json!({"enabled": enabled}))
+                    }
+                }
+                op @ (WorldOp::CatalogPacks
+                | WorldOp::CatalogPage { .. }
+                | WorldOp::CharacterCreate { .. }) => {
+                    let module = self
+                        .module
+                        .lock()
+                        .expect("fake Foundry driver lock poisoned");
+                    if !module.0 {
+                        Err(WorldError::Unsupported("module_missing".into()))
+                    } else if !module.1.get("foundry-circle").copied().unwrap_or(false) {
+                        Err(WorldError::Unsupported("module_inactive".into()))
+                    } else if let WorldOp::CharacterCreate { args } = op {
+                        self.character_create(&args)
+                    } else {
+                        fake_call(op)
+                    }
+                }
                 other => fake_call(other),
             })
         } else {
@@ -347,7 +384,9 @@ fn fake_call(op: WorldOp) -> Result<Value, WorldError> {
             Ok(json!({"items": items, "nextCursor": next_cursor}))
         }
         // Answered by `FakeDriver::call`, which keeps the actors it created.
-        WorldOp::CharacterCreate { .. } => Err(WorldError::Unsupported("character".into())),
+        WorldOp::CharacterCreate { .. } | WorldOp::ModuleEnable => {
+            Err(WorldError::Unsupported("character".into()))
+        }
     }
 }
 
@@ -439,7 +478,7 @@ pub(crate) fn validate_op(op: &WorldOp) -> Result<(), WorldError> {
                 return Err(WorldError::Invalid("action must be play or stop".into()));
             }
         }
-        WorldOp::CatalogPacks => {}
+        WorldOp::CatalogPacks | WorldOp::ModuleEnable => {}
         WorldOp::CatalogPage { pack, after, limit } => {
             if !(1..=50).contains(limit) {
                 return Err(WorldError::Invalid("limit must be 1..=50".into()));
@@ -856,13 +895,18 @@ mod live {
             let Some(sender) = self.ops.lock().await.clone() else {
                 return Err(WorldError::NotReady);
             };
+            let timeout = if matches!(request, Request::World(WorldOp::ModuleEnable)) {
+                NAVIGATION_TIMEOUT + OPERATION_TIMEOUT
+            } else {
+                OPERATION_TIMEOUT
+            };
             let (reply, response) = oneshot::channel();
             match tokio::time::timeout(OPERATION_TIMEOUT, sender.send((request, reply))).await {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => return Err(WorldError::NotReady),
                 Err(_) => return Err(WorldError::Timeout),
             }
-            match tokio::time::timeout(OPERATION_TIMEOUT, response).await {
+            match tokio::time::timeout(timeout, response).await {
                 Ok(Ok(result)) => result,
                 Ok(Err(_)) => Err(WorldError::NotReady),
                 Err(_) => Err(WorldError::Timeout),
@@ -1383,13 +1427,16 @@ mod live {
                 }
                 request = ops.recv() => {
                     let Some((request, reply)) = request else { return Ok(()); };
-                    let result = match tokio::time::timeout(OPERATION_TIMEOUT, evaluate_request(page, request)).await {
+                    if !should_execute(&reply) { continue; }
+                    let enabling = matches!(request, Request::World(WorldOp::ModuleEnable));
+                    let timeout = if enabling { NAVIGATION_TIMEOUT } else { OPERATION_TIMEOUT };
+                    let result = match tokio::time::timeout(timeout, evaluate_request(page, request)).await {
                         Ok(result) => result,
                         Err(_) => Err(WorldError::Timeout),
                     };
                     // A timed-out script may still be running in the page; drop
                     // the session so nothing else runs beside it.
-                    let stop = abandoned(&result);
+                    let stop = abandoned(&result) || (enabling && matches!(result, Err(WorldError::Browser)));
                     let _ = reply.send(result);
                     if stop {
                         return Err(Failure::Browser);
@@ -1397,6 +1444,10 @@ mod live {
                 }
             }
         }
+    }
+
+    fn should_execute(reply: &oneshot::Sender<Result<Value, WorldError>>) -> bool {
+        !reply.is_closed()
     }
 
     async fn evaluate_request(page: &Page, request: Request) -> Result<Value, WorldError> {
@@ -1487,7 +1538,9 @@ mod live {
     /// One fixed function per operation; the only caller data is a JSON literal
     /// produced by `serde_json::to_string`.
     async fn evaluate_op(page: &Page, op: WorldOp) -> Result<Value, WorldError> {
+        let enable = matches!(op, WorldOp::ModuleEnable);
         let (script, args) = match op {
+            WorldOp::ModuleEnable => (MODULE_ENABLE, json!({})),
             WorldOp::ListDocuments {
                 collection,
                 limit,
@@ -1522,7 +1575,13 @@ mod live {
             .into_value()
             .map_err(|_| WorldError::Browser)?;
         match reply {
-            Reply::Ok { ok } => Ok(ok),
+            Reply::Ok { ok } => {
+                if enable && ok["enabled"] == true {
+                    page.reload().await.map_err(|_| WorldError::Browser)?;
+                    wait_for_game(page).await?;
+                }
+                Ok(ok)
+            }
             Reply::Error { error, message } => Err(reply_error(error, message)),
         }
     }
@@ -1564,11 +1623,29 @@ mod live {
         };
     }"#;
 
+    const MODULE_ENABLE: &str = r#"async function() {
+        const args = __ARGS__;
+        const module = game.modules.get("foundry-circle");
+        if (!module) return { error: "unsupported", message: "module_missing" };
+        if (module.active) return { ok: { enabled: false } };
+        const config = foundry.utils.deepClone(game.settings.get("core", "moduleConfiguration"));
+        config["foundry-circle"] = true;
+        await game.settings.set("core", "moduleConfiguration", config);
+        // Foundry 14 client/helpers/client-settings.mjs:249-303 can return the
+        // unchanged value when Document.update is cancelled.
+        if (game.settings.get("core", "moduleConfiguration")["foundry-circle"] !== true)
+            return { error: "update_rejected" };
+        return { ok: { enabled: true } };
+    }"#;
+
     /// The companion module's catalog reads: the only caller data is the
     /// argument JSON, and every reply stays inside the fixed error vocabulary.
     const CATALOG_PACKS: &str = r#"async function() {
-        const api = game.modules.get("foundry-circle")?.api;
-        if (!api) return { error: "unsupported", message: "module_missing" };
+        const module = game.modules.get("foundry-circle");
+        if (!module) return { error: "unsupported", message: "module_missing" };
+        if (!module.active) return { error: "unsupported", message: "module_inactive" };
+        const api = module.api;
+        if (!api) return { error: "unsupported", message: "module_outdated" };
         if (api.apiVersion !== 1) return { error: "unsupported", message: "module_outdated" };
         // A module that predates uuidRedirects() answers no redirects, which is
         // a working world: the content names the packs it can resolve.
@@ -1578,8 +1655,11 @@ mod live {
 
     const CATALOG_PAGE: &str = r#"async function() {
         const args = __ARGS__;
-        const api = game.modules.get("foundry-circle")?.api;
-        if (!api) return { error: "unsupported", message: "module_missing" };
+        const module = game.modules.get("foundry-circle");
+        if (!module) return { error: "unsupported", message: "module_missing" };
+        if (!module.active) return { error: "unsupported", message: "module_inactive" };
+        const api = module.api;
+        if (!api) return { error: "unsupported", message: "module_outdated" };
         if (api.apiVersion !== 1) return { error: "unsupported", message: "module_outdated" };
         const reply = await api.catalogPage({ pack: args.pack, after: args.after, limit: args.limit });
         if (reply?.error) return reply;
@@ -1588,8 +1668,11 @@ mod live {
 
     const CHARACTER_CREATE: &str = r#"async function() {
         const args = __ARGS__;
-        const api = game.modules.get("foundry-circle")?.api;
-        if (!api) return { error: "unsupported", message: "module_missing" };
+        const module = game.modules.get("foundry-circle");
+        if (!module) return { error: "unsupported", message: "module_missing" };
+        if (!module.active) return { error: "unsupported", message: "module_inactive" };
+        const api = module.api;
+        if (!api) return { error: "unsupported", message: "module_outdated" };
         if (api.apiVersion !== 1) return { error: "unsupported", message: "module_outdated" };
         // A module older than the character write fails closed, never half-way.
         if (typeof api.createCharacter !== "function") {
@@ -1797,6 +1880,44 @@ mod live {
     mod tests {
         use super::*;
         use crate::{builder::Redirect, driver::CatalogPacks};
+
+        #[test]
+        fn module_enable_rejects_cancelled_setting_without_reload() {
+            let script = MODULE_ENABLE.replace("__ARGS__", "{}");
+            let program = format!(
+                r#"
+                const assert = require('node:assert/strict');
+                let reloads = 0;
+                const stored = {{ "foundry-circle": false }};
+                global.game = {{ modules: new Map([["foundry-circle", {{active: false}}]]),
+                    settings: {{get: () => stored, set: async () => stored}} }};
+                global.foundry = {{utils: {{deepClone: value => structuredClone(value)}}}};
+                (async () => {{
+                    const reply = await ({script})();
+                    if (reply.ok?.enabled === true) reloads++;
+                    assert.deepEqual(reply, {{error: "update_rejected"}});
+                    assert.equal(reloads, 0);
+                }})().catch(error => {{ console.error(error); process.exitCode = 1; }});
+            "#
+            );
+            assert!(
+                std::process::Command::new("node")
+                    .arg("-e")
+                    .arg(program)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+
+        #[tokio::test]
+        async fn abandoned_queued_request_is_skipped() {
+            let (reply, response) = oneshot::channel::<Result<Value, WorldError>>();
+            drop(response);
+            assert!(!should_execute(&reply));
+            let (reply, _response) = oneshot::channel::<Result<Value, WorldError>>();
+            assert!(should_execute(&reply));
+        }
 
         #[test]
         fn contract_validation_rejects_non_gm_and_mismatches() {
@@ -2061,11 +2182,11 @@ mod live {
         fn catalog_scripts_fail_closed_without_the_module() {
             for script in [CATALOG_PACKS, CATALOG_PAGE] {
                 assert!(
-                    script.contains(r#"game.modules.get("foundry-circle")?.api"#),
+                    script.contains(r#"game.modules.get("foundry-circle")"#),
                     "a catalog script must read the module API only"
                 );
                 assert!(script.contains(
-                    r#"if (!api) return { error: "unsupported", message: "module_missing" };"#
+                    r#"if (!module) return { error: "unsupported", message: "module_missing" };"#
                 ));
                 assert!(script.contains(
                     r#"if (api.apiVersion !== 1) return { error: "unsupported", message: "module_outdated" };"#
@@ -2232,11 +2353,11 @@ mod live {
         #[test]
         fn character_create_fails_closed_without_the_module_function() {
             assert!(
-                CHARACTER_CREATE.contains(r#"game.modules.get("foundry-circle")?.api"#),
+                CHARACTER_CREATE.contains(r#"game.modules.get("foundry-circle")"#),
                 "the script must read the module API only"
             );
             assert!(CHARACTER_CREATE.contains(
-                r#"if (!api) return { error: "unsupported", message: "module_missing" };"#
+                r#"if (!module) return { error: "unsupported", message: "module_missing" };"#
             ));
             assert!(CHARACTER_CREATE.contains(
                 r#"if (api.apiVersion !== 1) return { error: "unsupported", message: "module_outdated" };"#
@@ -2284,3 +2405,63 @@ pub(crate) use live::{
     DriverPage, FoundryUser, foundry_session_cookie, join_session, login_as, page_account,
     page_users, rotate_passwords,
 };
+
+#[cfg(all(test, feature = "server"))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn module_enable_preserves_other_modules_and_is_idempotent() {
+        let driver = FakeDriver::new(WorldState::Ready);
+        {
+            let mut module = driver.module.lock().unwrap();
+            module.1.insert("foundry-circle".into(), false);
+            module.1.insert("other".into(), true);
+        }
+        assert_eq!(
+            driver.call(WorldOp::ModuleEnable).await.unwrap(),
+            json!({"enabled": true})
+        );
+        assert_eq!(
+            driver.call(WorldOp::ModuleEnable).await.unwrap(),
+            json!({"enabled": false})
+        );
+        assert_eq!(driver.module.lock().unwrap().1.get("other"), Some(&true));
+    }
+
+    #[tokio::test]
+    async fn catalog_reports_inactive_module_separately() {
+        let driver = FakeDriver::new(WorldState::Ready);
+        driver
+            .module
+            .lock()
+            .unwrap()
+            .1
+            .insert("foundry-circle".into(), false);
+        assert_eq!(
+            driver
+                .call(WorldOp::CatalogPacks)
+                .await
+                .unwrap_err()
+                .catalog_code(),
+            "module_inactive"
+        );
+        driver.module.lock().unwrap().0 = false;
+        assert_eq!(
+            driver
+                .call(WorldOp::CatalogPacks)
+                .await
+                .unwrap_err()
+                .catalog_code(),
+            "module_missing"
+        );
+        assert_eq!(
+            driver
+                .call(WorldOp::ModuleEnable)
+                .await
+                .unwrap_err()
+                .catalog_code(),
+            "module_missing"
+        );
+    }
+}

@@ -173,11 +173,10 @@ services.foundryvtt.declarativePackages.foundry-circle.package =
 ```
 
 The first sync enables the module and reloads the broker's page; players
-pick it up on their next browser reload. The reconciler
-seeds a package once and never replaces an existing directory, so upgrading
-the module takes three steps: deploy with `state = "absent"` (this clears the
-initialization marker), remove `Data/modules/foundry-circle`, then deploy with
-`state = "present"` again.
+pick it up on their next browser reload. Declare it with `update = "replace"`:
+a deploy that carries a new module build then replaces
+`Data/modules/foundry-circle` when Foundry next starts, even though the
+module's version stays the workspace version.
 
 Every Item pack the world offers becomes a source toggle in "Session zero"
 (labelled with its source book), and the first sync turns on the packs whose
@@ -283,8 +282,8 @@ initialization marker; worlds and package directories remain mutable
 Foundry-owned state.
 
 Set `update = "replace"` on a declarative package to replace its directory
-when its declared version changes, overwriting in-place edits. The default,
-`"seed"`, preserves edits across version changes.
+when its declared version or its package output changes, overwriting in-place
+edits. The default, `"seed"`, preserves edits across both.
 
 `foundry-circle-upload` is the native asset client. `login` signs in through the
 system browser with a loopback PKCE redirect, `push` converts images and audio

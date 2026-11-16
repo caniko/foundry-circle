@@ -90,7 +90,9 @@ pub fn reconcile_files(
 /// `Data/systems`. The copied contents belong to Foundry and may be edited in
 /// place. The state file records that initialization happened once; later
 /// manifest changes, omissions, and target deletion do not reseed or remove
-/// the directory by default. Opted-in replacements follow version changes.
+/// the directory by default. Opted-in replacements follow a change of version
+/// or of the immutable output, so a package rebuilt from new files at the same
+/// version (the companion module tracks the workspace version) still lands.
 /// `state = "absent"` clears the marker without touching the target.
 pub fn reconcile(
     desired: DesiredManifest,
@@ -174,7 +176,10 @@ fn reconcile_locked(
             }
         }
         if let Some(previous_package) = previous.packages.get(&name) {
-            if replacing && previous_package.version != package.version {
+            if replacing
+                && (previous_package.version != package.version
+                    || previous_package.store_path != package.store_path)
+            {
                 remove_leftover(&staging)?;
                 remove_leftover(&backup)?;
                 let had_backup = replace_target(&path, &package.store_path, &staging, &backup)?;
@@ -622,6 +627,30 @@ mod tests {
             ledger.packages["module/demo"].store_path,
             temp.path().join("2")
         );
+    }
+
+    /// The companion module's version is the workspace version, so a fix to its
+    /// files changes only the output: that alone replaces an opted-in package,
+    /// and never a seeded one.
+    #[test]
+    fn replace_follows_a_new_output_at_the_same_version() {
+        let temp = tempfile::tempdir().unwrap();
+        for output in ["old", "new"] {
+            fs::create_dir_all(temp.path().join(output)).unwrap();
+            fs::write(temp.path().join(output).join("content"), output).unwrap();
+        }
+        let package = |output: &str, update: &str| DesiredPackage {
+            store_path: temp.path().join(output),
+            ..with_update(p(temp.path(), "module", "demo", "1"), update)
+        };
+        for (update, expected) in [("replace", &b"new"[..]), ("seed", &b"old"[..])] {
+            let data = temp.path().join(format!("data-{update}"));
+            let state = temp.path().join(format!("state-{update}.json"));
+            reconcile(manifest(vec![package("old", update)]), &data, &state).unwrap();
+            reconcile(manifest(vec![package("new", update)]), &data, &state).unwrap();
+            let content = fs::read(data.join("Data/modules/demo/content")).unwrap();
+            assert_eq!(content, expected, "{update}");
+        }
     }
 
     #[test]

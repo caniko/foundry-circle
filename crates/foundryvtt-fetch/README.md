@@ -47,7 +47,9 @@ foundryvtt-fetch reconcile \
 
 Initialization is recorded once. Existing directories, manual edits, omitted
 packages, and later target deletion are left alone; version changes do not
-overwrite them. An explicit `state = "absent"` clears the initialization
+overwrite them. A package declared with `update = "replace"` is instead
+replaced (and reseeded if deleted) when its version or its immutable output
+changes. An explicit `state = "absent"` clears the initialization
 marker without deleting the target. A legacy link to the recorded immutable
 output is materialized into a mutable copy once. The immutable package outputs
 are produced by `foundry-circle.lib.mkFoundryPackage` and are never modified

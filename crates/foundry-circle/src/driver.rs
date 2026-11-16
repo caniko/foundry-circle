@@ -1598,7 +1598,7 @@ mod live {
         }
     }
 
-    const LIST_DOCUMENTS: &str = r#"async function() {
+    const LIST_DOCUMENTS: &str = r#"async function () {
         const args = __ARGS__;
         const collection = game[args.collection];
         if (!collection) return { error: "unsupported", message: "unknown collection" };
@@ -1623,7 +1623,7 @@ mod live {
         };
     }"#;
 
-    const MODULE_ENABLE: &str = r#"async function() {
+    const MODULE_ENABLE: &str = r#"async function () {
         const args = __ARGS__;
         const module = game.modules.get("foundry-circle");
         if (!module) return { error: "unsupported", message: "module_missing" };
@@ -1640,7 +1640,7 @@ mod live {
 
     /// The companion module's catalog reads: the only caller data is the
     /// argument JSON, and every reply stays inside the fixed error vocabulary.
-    const CATALOG_PACKS: &str = r#"async function() {
+    const CATALOG_PACKS: &str = r#"async function () {
         const module = game.modules.get("foundry-circle");
         if (!module) return { error: "unsupported", message: "module_missing" };
         if (!module.active) return { error: "unsupported", message: "module_inactive" };
@@ -1653,7 +1653,7 @@ mod live {
         return { ok: { packs: await api.catalogPacks(), redirects } };
     }"#;
 
-    const CATALOG_PAGE: &str = r#"async function() {
+    const CATALOG_PAGE: &str = r#"async function () {
         const args = __ARGS__;
         const module = game.modules.get("foundry-circle");
         if (!module) return { error: "unsupported", message: "module_missing" };
@@ -1666,7 +1666,7 @@ mod live {
         return { ok: reply };
     }"#;
 
-    const CHARACTER_CREATE: &str = r#"async function() {
+    const CHARACTER_CREATE: &str = r#"async function () {
         const args = __ARGS__;
         const module = game.modules.get("foundry-circle");
         if (!module) return { error: "unsupported", message: "module_missing" };
@@ -1683,7 +1683,7 @@ mod live {
         return { ok: reply };
     }"#;
 
-    const GET_DOCUMENT: &str = r#"async function() {
+    const GET_DOCUMENT: &str = r#"async function () {
         const args = __ARGS__;
         const collection = game[args.collection];
         if (!collection) return { error: "unsupported", message: "unknown collection" };
@@ -1701,7 +1701,7 @@ mod live {
         };
     }"#;
 
-    const CHAT_CREATE: &str = r#"async function() {
+    const CHAT_CREATE: &str = r#"async function () {
         const args = __ARGS__;
         if (!game.messages || typeof ChatMessage === "undefined") {
             return { error: "unsupported", message: "chat is unavailable" };
@@ -1710,7 +1710,7 @@ mod live {
         return { ok: { id: message?.id ?? null, created: true } };
     }"#;
 
-    const DICE_ROLL: &str = r#"async function() {
+    const DICE_ROLL: &str = r#"async function () {
         const args = __ARGS__;
         if (typeof Roll === "undefined") {
             return { error: "unsupported", message: "rolls are unavailable" };
@@ -1722,7 +1722,7 @@ mod live {
         return { ok: { formula: roll.formula, total: roll.total, result: roll.result } };
     }"#;
 
-    const SCENE_ACTIVATE: &str = r#"async function() {
+    const SCENE_ACTIVATE: &str = r#"async function () {
         const args = __ARGS__;
         const scene = game.scenes?.get(args.id);
         if (!scene) return { error: "not_found", message: "scene not found" };
@@ -1730,7 +1730,7 @@ mod live {
         return { ok: { id: scene.id, active: true } };
     }"#;
 
-    const COMBAT_UPDATE: &str = r#"async function() {
+    const COMBAT_UPDATE: &str = r#"async function () {
         const args = __ARGS__;
         // game.combat follows the viewed scene, which a canvas-less session
         // does not have; resolve the active encounter from the collection.
@@ -1751,7 +1751,7 @@ mod live {
         return { ok: { action: args.action } };
     }"#;
 
-    const PLAYLIST_CONTROL: &str = r#"async function() {
+    const PLAYLIST_CONTROL: &str = r#"async function () {
         const args = __ARGS__;
         const playlist = game.playlists?.get(args.id);
         if (!playlist) return { error: "not_found", message: "playlist not found" };
@@ -1767,7 +1767,7 @@ mod live {
 
     /// The passwordless user list from `getJoinData`, over the page's socket.
     /// The socket is created with the page's own `session` cookie.
-    const JOIN_USERS: &str = r#"async function() {
+    const JOIN_USERS: &str = r#"async function () {
         const deadline = Date.now() + 10000;
         while (typeof io === "undefined") {
             if (Date.now() > deadline) return { error: "timeout" };
@@ -1805,7 +1805,7 @@ mod live {
         return { ok: { names: game.users.contents.map(user => user.name) } };
     }"#;
 
-    const ENSURE_USER: &str = r#"async function() {
+    const ENSURE_USER: &str = r#"async function () {
         const args = __ARGS__;
         if (typeof User === "undefined") {
             return { error: "unsupported", message: "users are unavailable" };
@@ -1830,7 +1830,7 @@ mod live {
         return { ok: { id: user.id, name: user.name, created } };
     }"#;
 
-    const SET_PASSWORD: &str = r#"async function() {
+    const SET_PASSWORD: &str = r#"async function () {
         const args = __ARGS__;
         const user = game.users.get(args.userId);
         if (!user) return { error: "not_found", message: "user not found" };
@@ -1840,7 +1840,7 @@ mod live {
         return { ok: { id: user.id } };
     }"#;
 
-    const ROTATE_PASSWORDS: &str = r#"async function() {
+    const ROTATE_PASSWORDS: &str = r#"async function () {
         const args = __ARGS__;
         let rotated = 0;
         for (const [id, password] of args.replacements) {
@@ -1870,7 +1870,7 @@ mod live {
         };
     }"#;
 
-    const SET_NO_CANVAS: &str = r#"async function() {
+    const SET_NO_CANVAS: &str = r#"async function () {
         if (!window.game?.settings?.set) return false;
         await window.game.settings.set('core', 'noCanvas', true);
         return true;
@@ -1880,6 +1880,40 @@ mod live {
     mod tests {
         use super::*;
         use crate::{builder::Redirect, driver::CatalogPacks};
+
+        /// `Page::evaluate` calls a script only when chromiumoxide 0.9's
+        /// `is_likely_js_function` sees `function ` with a space
+        /// (`src/utils.rs:78`); `async function()` is sent as an expression and
+        /// Chromium rejects it with "Function statements require a function name".
+        #[test]
+        fn every_script_is_called_as_a_function() {
+            for script in [
+                LIST_DOCUMENTS,
+                MODULE_ENABLE,
+                CATALOG_PACKS,
+                CATALOG_PAGE,
+                CHARACTER_CREATE,
+                GET_DOCUMENT,
+                CHAT_CREATE,
+                DICE_ROLL,
+                SCENE_ACTIVATE,
+                COMBAT_UPDATE,
+                PLAYLIST_CONTROL,
+                JOIN_USERS,
+                ENSURE_USER,
+                SET_PASSWORD,
+                ROTATE_PASSWORDS,
+                SET_NO_CANVAS,
+            ] {
+                let head = script.trim_start();
+                let head = head.strip_prefix("async ").unwrap_or(head).trim_start();
+                assert!(
+                    head.starts_with("function ") || head.starts_with("() =>"),
+                    "{}",
+                    &script[..40.min(script.len())]
+                );
+            }
+        }
 
         #[test]
         fn module_enable_rejects_cancelled_setting_without_reload() {

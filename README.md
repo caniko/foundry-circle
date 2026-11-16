@@ -138,12 +138,36 @@ The broker never sends JavaScript, only the one bounded JSON argument
 (`WorldOp::CharacterCreate`), which `POST /api/v1/world/commands` does not expose.
 
 **C4 and C5 must pass on a disposable dnd5e 6.1.0 world before canix pins this
-revision.** Build the fixture character (Human, Acolyte, Cleric 1) by hand there,
-approve the same draft, fetch both actors and compare `system.abilities`,
-`system.skills`, `system.tools`, `system.traits`, hit points and the multiset of
-item names; every granted item must carry `flags.dnd5e.sourceId` and
-`advancementOrigin`. The player must then open the sheet as owner and
-`game.users.get(id).character.id` must equal the new actor's id.
+revision.** `acceptance::live::c4_c5` runs both on a licensed host. It starts a
+second Foundry that listens only on a unix socket (no TCP port; the test
+forwards loopback to it), with copies of dnd5e and this checkout's module and a
+throwaway PostgreSQL. The broker's own code adopts the world, syncs its rules
+content and approves the fixture draft (Human, Acolyte, Cleric 1, from
+`tests/fixtures/acceptance/cleric.json`). In the GM's page the test builds the
+same character the way a player does: dropping each root on the sheet,
+answering dnd5e's advancement forms and dragging in the starting kit
+(`tests/fixtures/acceptance/reference.js`). C4 compares `system.abilities`,
+`system.skills`, `system.tools`, `system.traits`, hit points, currency and the
+multiset of item names with their quantities, and every item the reference received through an advancement must
+carry `flags.dnd5e.sourceId` and `advancementOrigin` on the approved actor. C5
+checks, from the player's own page, owner permission, an editable sheet and
+`game.users.get(id).character.id`. Rauthy sign-in, the server-function wrappers
+and the draft editing calls are outside the test; spell choices and kit entries
+that name a category ("any holy symbol") are left to the player on both sides
+and listed in the report.
+
+```sh
+FOUNDRY_ACCEPTANCE_FOUNDRY=<foundryvtt package>/bin/foundryvtt \
+FOUNDRY_ACCEPTANCE_DND5E=<foundry-system-dnd5e-6.1.0 package> \
+FOUNDRY_ACCEPTANCE_LICENSE=<a copy of the host's Config/license.json> \
+FOUNDRY_CHROMIUM=<chromium>/bin/chromium \
+FOUNDRY_ACCEPTANCE_REPORT_DIR=<evidence dir> \
+cargo test -p foundry-circle --all-features --lib -- --ignored --exact acceptance::live::c4_c5
+```
+
+It refuses to start while the production Foundry has an active world, and
+writes `report.json` (verdict, differences, C5 observations), both actors,
+the create arguments, a step transcript and the servers' logs.
 
 ### Rules content
 

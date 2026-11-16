@@ -1,0 +1,48 @@
+{
+  "name": "Fixture Cleric",
+  "method": "standardArray",
+  "base": { "str": 13, "dex": 12, "con": 14, "int": 8, "wis": 15, "cha": 10 },
+  "roots": { "species": "Human", "background": "Acolyte", "class": "Cleric" },
+  "equipment": { "Cleric": "kit", "Acolyte": "kit" },
+  "details": { "alignment": "Neutral Good", "backstory": "Raised in the temple." },
+  "answers": [
+    { "owner": "Human", "type": "size", "level": 0, "title": "Size", "values": ["med"] },
+    { "owner": "Skillful", "type": "trait", "level": 0, "title": "Skillful", "values": ["skills:prc"] },
+    { "owner": "Versatile", "type": "items", "level": 0, "title": "Versatile", "items": ["Skilled"] },
+    {
+      "owner": "Skilled",
+      "type": "trait",
+      "level": 0,
+      "title": "Skilled",
+      "values": ["skills:arc", "skills:ath", "skills:ste"]
+    },
+    {
+      "owner": "Acolyte",
+      "type": "asi",
+      "level": 0,
+      "title": "Background Ability Score Improvement",
+      "asi": { "wis": 2, "cha": 1 }
+    },
+    {
+      "owner": "Acolyte",
+      "type": "trait",
+      "level": 0,
+      "title": "Choose Languages",
+      "values": ["languages:standard:dwarvish", "languages:standard:elvish"]
+    },
+    {
+      "owner": "Cleric",
+      "type": "trait",
+      "level": 1,
+      "title": "Skill Proficiencies",
+      "values": ["skills:his", "skills:med"]
+    },
+    {
+      "owner": "Divine Order",
+      "type": "items",
+      "level": 1,
+      "title": "Divine Order Choice",
+      "items": ["Divine Order: Protector"]
+    }
+  ]
+}

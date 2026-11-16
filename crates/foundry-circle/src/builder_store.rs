@@ -392,7 +392,7 @@ async fn read_ready(pool: &PgPool, id: Uuid, subject: &str, role: Role) -> Build
 /// Every synced document of the world, the enabled sources' among them: the
 /// class step lists only the enabled packs' documents, while a kit's items and
 /// a feature a chosen document grants resolve in the world's other packs too.
-async fn catalog(
+pub(crate) async fn catalog(
     executor: impl sqlx::PgExecutor<'_>,
     world_id: &str,
     sources: &[String],
@@ -613,6 +613,15 @@ pub async fn sync_catalog(world_id: &str) -> Result<Vec<PackInfo>, String> {
     let Some(pool) = state.database.pool().await else {
         return Err("database_unavailable".into());
     };
+    sync_catalog_for(&state, &pool, &principal.subject, world_id).await
+}
+
+pub(crate) async fn sync_catalog_for(
+    state: &AppState,
+    pool: &PgPool,
+    subject: &str,
+    world_id: &str,
+) -> Result<Vec<PackInfo>, String> {
     let snapshot = state.driver.snapshot();
     if snapshot.state != WorldState::Ready {
         return Err("world_not_ready".into());
@@ -627,8 +636,8 @@ pub async fn sync_catalog(world_id: &str) -> Result<Vec<PackInfo>, String> {
     let mut enable_attempted = false;
     let reply = catalog_sync_call(
         state.driver.as_ref(),
-        &pool,
-        &principal.subject,
+        pool,
+        subject,
         world_id,
         &mut enable_attempted,
         WorldOp::CatalogPacks,
@@ -655,8 +664,8 @@ pub async fn sync_catalog(world_id: &str) -> Result<Vec<PackInfo>, String> {
         loop {
             let reply = catalog_sync_call(
                 state.driver.as_ref(),
-                &pool,
-                &principal.subject,
+                pool,
+                subject,
                 world_id,
                 &mut enable_attempted,
                 WorldOp::CatalogPage {
@@ -753,7 +762,7 @@ pub async fn sync_catalog(world_id: &str) -> Result<Vec<PackInfo>, String> {
         )
         .bind(world_id)
         .bind(serde_json::to_value(CampaignRules::default()).map_err(|error| error.to_string())?)
-        .bind(&principal.subject)
+        .bind(subject)
         .execute(&mut *transaction)
         .await
         .map_err(database_code)?;
@@ -777,7 +786,7 @@ pub async fn sync_catalog(world_id: &str) -> Result<Vec<PackInfo>, String> {
     info.sort_by(|a, b| a.label.cmp(&b.label).then(a.id.cmp(&b.id)));
     audit(
         &mut transaction,
-        &principal.subject,
+        subject,
         "catalog.sync",
         json!({
             "worldId": world_id,
@@ -1231,7 +1240,7 @@ async fn approval_checks(
 /// The approval itself, under the locked draft row. Foundry is the authority:
 /// nothing is written until it has created the actor, and the row only records
 /// what Foundry answered.
-async fn approve(
+pub(crate) async fn approve(
     state: &AppState,
     pool: &PgPool,
     id: Uuid,

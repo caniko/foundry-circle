@@ -40,12 +40,18 @@ pub struct DesiredPackage {
     pub id: String,
     #[serde(default = "default_state")]
     pub state: String,
+    #[serde(default = "default_update")]
+    pub update: String,
     pub version: String,
     pub store_path: PathBuf,
 }
 
 fn default_state() -> String {
     "present".to_owned()
+}
+
+fn default_update() -> String {
+    "seed".to_owned()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -84,8 +90,8 @@ pub fn reconcile_files(
 /// `Data/systems`. The copied contents belong to Foundry and may be edited in
 /// place. The state file records that initialization happened once; later
 /// manifest changes, omissions, and target deletion do not reseed or remove
-/// the directory. `state = "absent"` explicitly clears that initialization
-/// marker without touching the target.
+/// the directory by default. Opted-in replacements follow version changes.
+/// `state = "absent"` clears the marker without touching the target.
 pub fn reconcile(
     desired: DesiredManifest,
     data_dir: &Path,
@@ -135,6 +141,15 @@ fn reconcile_locked(
     // This keeps a bad target from leaving a partially initialized set.
     for package in present.values() {
         let path = target(data_dir, package);
+        for directory in [data_dir.join("Data"), path.parent().unwrap().to_path_buf()] {
+            match fs::symlink_metadata(&directory) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(ReconcileError::InvalidTarget(directory));
+                }
+                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
+                _ => {}
+            }
+        }
         if let Some(previous_package) = previous.packages.get(&key(&package.kind, &package.id)) {
             check_initialized_target(&path, &previous_package.store_path)?;
         } else {
@@ -146,8 +161,57 @@ fn reconcile_locked(
     for package in present.values() {
         let name = key(&package.kind, &package.id);
         let path = target(data_dir, package);
+        let staging = sibling(&path, "staging");
+        let backup = sibling(&path, "backup");
+        let replacing = package.update == "replace";
+        if replacing {
+            // Best effort here: an undeletable leftover must not block an unchanged
+            // package (and Foundry's start). A swap or reseed below needs a clean slate.
+            for leftover in [&staging, &backup] {
+                if let Err(error) = remove_leftover(leftover) {
+                    eprintln!("could not remove leftover {}: {error}", leftover.display());
+                }
+            }
+        }
         if let Some(previous_package) = previous.packages.get(&name) {
-            materialize_legacy_link(&path, &previous_package.store_path)?;
+            if replacing && previous_package.version != package.version {
+                remove_leftover(&staging)?;
+                remove_leftover(&backup)?;
+                let had_backup = replace_target(&path, &package.store_path, &staging, &backup)?;
+                let entry = packages.get_mut(&name).unwrap();
+                entry.version.clone_from(&package.version);
+                entry.store_path.clone_from(&package.store_path);
+                let state = ManagedState {
+                    schema_version: SCHEMA_VERSION,
+                    packages: packages.clone(),
+                };
+                if let Err(error) = write_state(state_path, &state) {
+                    if had_backup {
+                        if let Err(rollback) =
+                            fs::rename(&path, &staging).and_then(|()| fs::rename(&backup, &path))
+                        {
+                            return Err(io::Error::other(format!("{error}; rollback failed: {rollback}; original target preserved at {}", backup.display())).into());
+                        }
+                    } else {
+                        fs::rename(&path, &staging)?;
+                    }
+                    return Err(error);
+                }
+                if had_backup && let Err(error) = remove_leftover(&backup) {
+                    eprintln!("could not remove backup {}: {error}", backup.display());
+                }
+            } else if replacing && !path.exists() {
+                remove_leftover(&staging)?;
+                remove_leftover(&backup)?;
+                seed_if_missing(&path, &package.store_path)?;
+                packages
+                    .get_mut(&name)
+                    .unwrap()
+                    .store_path
+                    .clone_from(&package.store_path);
+            } else {
+                materialize_legacy_link(&path, &previous_package.store_path)?;
+            }
         } else {
             seed_if_missing(&path, &package.store_path)?;
             packages.insert(
@@ -201,6 +265,12 @@ fn validate_package(package: &DesiredPackage) -> Result<(), ReconcileError> {
         return Err(ReconcileError::UnsafeId(format!(
             "{} has invalid state {}",
             package.id, package.state
+        )));
+    }
+    if package.update != "seed" && package.update != "replace" {
+        return Err(ReconcileError::UnsafeId(format!(
+            "{} has invalid update policy {}",
+            package.id, package.update
         )));
     }
     if package.id.is_empty()
@@ -322,15 +392,66 @@ fn seed_if_missing(target: &Path, source: &Path) -> Result<(), ReconcileError> {
         .parent()
         .ok_or_else(|| ReconcileError::InvalidTarget(target.to_path_buf()))?;
     fs::create_dir_all(parent)?;
-    let temp = tempfile::tempdir_in(parent)?;
-    copy_tree(source, temp.path(), source)?;
+    let staging = sibling(target, "staging");
+    // An interrupted earlier seed may have left its staging behind; the name can
+    // never be another package (see `sibling`), so it is always safe to clear.
+    remove_leftover(&staging)?;
+    copy_tree(source, &staging, source)?;
     // The reconciliation lock serializes normal writers. The preflight above
     // also ensures we never intentionally replace an existing target.
     if fs::symlink_metadata(target).is_ok() {
-        return Ok(());
+        return remove_leftover(&staging);
     }
-    fs::rename(temp.path(), target)?;
+    fs::rename(&staging, target)?;
     Ok(())
+}
+
+/// A seed's or replace's staging, or a replace's backup, beside the target. The name carries
+/// `@`, which no package id may contain, so it can never be another package.
+fn sibling(target: &Path, purpose: &str) -> PathBuf {
+    target.with_file_name(format!(
+        ".{}@foundry-circle-{purpose}",
+        target.file_name().unwrap().to_string_lossy()
+    ))
+}
+
+fn remove_leftover(path: &Path) -> Result<(), ReconcileError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() => fs::remove_dir_all(path)?,
+        Ok(_) => fs::remove_file(path)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+fn replace_target(
+    target: &Path,
+    source: &Path,
+    staging: &Path,
+    backup: &Path,
+) -> Result<bool, ReconcileError> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| ReconcileError::InvalidTarget(target.to_path_buf()))?;
+    fs::create_dir_all(parent)?;
+    copy_tree(source, staging, source)?;
+    let had_backup = match fs::rename(target, backup) {
+        Ok(()) => true,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    if let Err(error) = fs::rename(staging, target) {
+        if had_backup && fs::rename(backup, target).is_err() {
+            return Err(io::Error::other(format!(
+                "{error}; original target preserved at {}",
+                backup.display()
+            ))
+            .into());
+        }
+        return Err(error.into());
+    }
+    Ok(had_backup)
 }
 
 fn materialize_legacy_link(target: &Path, source: &Path) -> Result<(), ReconcileError> {
@@ -426,8 +547,13 @@ fn write_state(path: &Path, state: &ManagedState) -> Result<(), ReconcileError> 
     serde_json::to_writer_pretty(temp.as_file_mut(), state)?;
     temp.as_file().sync_all()?;
     fs::rename(temp.into_temp_path(), path)?;
-    if let Some(parent) = path.parent() {
-        File::open(parent)?.sync_all()?;
+    if let Some(parent) = path.parent()
+        && let Err(error) = File::open(parent).and_then(|dir| dir.sync_all())
+    {
+        eprintln!(
+            "could not sync state directory {}: {error}",
+            parent.display()
+        );
     }
     Ok(())
 }
@@ -441,6 +567,7 @@ mod tests {
             kind: kind.into(),
             id: id.into(),
             state: "present".into(),
+            update: "seed".into(),
             version: version.into(),
             store_path: root.join(version),
         }
@@ -451,6 +578,277 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             packages,
         }
+    }
+
+    fn with_update(package: DesiredPackage, update: &str) -> DesiredPackage {
+        let mut value = serde_json::to_value(package).unwrap();
+        value["update"] = update.into();
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn replace_updates_content_and_ledger_on_version_change() {
+        let temp = tempfile::tempdir().unwrap();
+        for version in ["1", "2"] {
+            fs::create_dir_all(temp.path().join(version)).unwrap();
+            fs::write(temp.path().join(version).join("content"), version).unwrap();
+        }
+        let data = temp.path().join("data");
+        let state = temp.path().join("state.json");
+        let target = data.join("Data/modules/demo/content");
+        reconcile(
+            manifest(vec![with_update(
+                p(temp.path(), "module", "demo", "1"),
+                "replace",
+            )]),
+            &data,
+            &state,
+        )
+        .unwrap();
+        fs::write(&target, "manual").unwrap();
+        reconcile(
+            manifest(vec![with_update(
+                p(temp.path(), "module", "demo", "2"),
+                "replace",
+            )]),
+            &data,
+            &state,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"2");
+        let ledger = read_state(&state).unwrap();
+        assert_eq!(ledger.packages["module/demo"].version, "2");
+        assert_eq!(
+            ledger.packages["module/demo"].store_path,
+            temp.path().join("2")
+        );
+    }
+
+    #[test]
+    fn replacement_persists_before_later_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        for version in ["1", "2"] {
+            fs::create_dir_all(temp.path().join(version)).unwrap();
+            fs::write(temp.path().join(version).join("content"), version).unwrap();
+        }
+        let data = temp.path().join("data");
+        let state = temp.path().join("state.json");
+        let packages = |version| {
+            ["a", "b"]
+                .into_iter()
+                .map(|id| with_update(p(temp.path(), "module", id, version), "replace"))
+                .collect()
+        };
+        reconcile(manifest(packages("1")), &data, &state).unwrap();
+        let bad = temp.path().join("bad");
+        fs::create_dir(&bad).unwrap();
+        unix_fs::symlink("/outside", bad.join("invalid")).unwrap();
+        let mut next: Vec<DesiredPackage> = packages("2");
+        next[1].store_path = bad;
+        assert!(reconcile(manifest(next), &data, &state).is_err());
+        assert_eq!(fs::read(data.join("Data/modules/a/content")).unwrap(), b"2");
+        assert_eq!(
+            read_state(&state).unwrap().packages["module/a"].version,
+            "2"
+        );
+    }
+
+    #[test]
+    fn replacement_rolls_back_when_state_write_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        for version in ["1", "2"] {
+            fs::create_dir(temp.path().join(version)).unwrap();
+            fs::write(temp.path().join(version).join("content"), version).unwrap();
+        }
+        let data = temp.path().join("data");
+        let state = temp.path().join("state.json");
+        let package = |version| with_update(p(temp.path(), "module", "demo", version), "replace");
+        reconcile(manifest(vec![package("1")]), &data, &state).unwrap();
+        let previous = read_state(&state).unwrap();
+        let invalid_state = temp.path().join("directory");
+        fs::create_dir(&invalid_state).unwrap();
+        assert!(
+            reconcile_locked(
+                &manifest(vec![package("2")]),
+                &previous,
+                &data,
+                &invalid_state
+            )
+            .is_err()
+        );
+        assert_eq!(
+            fs::read(data.join("Data/modules/demo/content")).unwrap(),
+            b"1"
+        );
+        assert_eq!(
+            read_state(&state).unwrap().packages["module/demo"].version,
+            "1"
+        );
+    }
+
+    #[test]
+    fn replacement_cleans_leftovers_before_reseeding() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join("1")).unwrap();
+        fs::write(temp.path().join("1/content"), "desired").unwrap();
+        let data = temp.path().join("data");
+        let state = temp.path().join("state.json");
+        let package = with_update(p(temp.path(), "module", "demo", "1"), "replace");
+        reconcile(manifest(vec![package.clone()]), &data, &state).unwrap();
+        let parent = data.join("Data/modules");
+        fs::remove_dir_all(parent.join("demo")).unwrap();
+        for name in [
+            ".demo@foundry-circle-staging",
+            ".demo@foundry-circle-backup",
+        ] {
+            fs::create_dir(parent.join(name)).unwrap();
+        }
+        reconcile(manifest(vec![package]), &data, &state).unwrap();
+        assert_eq!(fs::read(parent.join("demo/content")).unwrap(), b"desired");
+        assert!(!parent.join(".demo@foundry-circle-staging").exists());
+        assert!(!parent.join(".demo@foundry-circle-backup").exists());
+    }
+
+    #[test]
+    fn replacement_persists_when_backup_removal_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        for version in ["1", "2"] {
+            fs::create_dir(temp.path().join(version)).unwrap();
+        }
+        let data = temp.path().join("data");
+        let state = temp.path().join("state.json");
+        let package = |version| with_update(p(temp.path(), "module", "demo", version), "replace");
+        reconcile(manifest(vec![package("1")]), &data, &state).unwrap();
+        let nested = data.join("Data/modules/demo/nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("file"), "old").unwrap();
+        fs::set_permissions(&nested, fs::Permissions::from_mode(0o500)).unwrap();
+        reconcile(manifest(vec![package("2")]), &data, &state).unwrap();
+        assert_eq!(
+            read_state(&state).unwrap().packages["module/demo"].version,
+            "2"
+        );
+        let backup = data.join("Data/modules/.demo@foundry-circle-backup/nested");
+        assert!(backup.exists());
+        // The same manifest again must not fail on the undeletable leftover.
+        reconcile(manifest(vec![package("2")]), &data, &state).unwrap();
+        fs::set_permissions(backup, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn an_interrupted_seed_does_not_block_the_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join("1")).unwrap();
+        fs::write(temp.path().join("1/content"), "seeded").unwrap();
+        let data = temp.path().join("data");
+        let state = temp.path().join("state.json");
+        // A first seed (default policy) that died after copying into staging.
+        let staging = data.join("Data/modules/.demo@foundry-circle-staging");
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join("partial"), "half").unwrap();
+        let package = p(temp.path(), "module", "demo", "1");
+        reconcile(manifest(vec![package]), &data, &state).unwrap();
+        let target = data.join("Data/modules/demo");
+        assert_eq!(fs::read(target.join("content")).unwrap(), b"seeded");
+        assert!(!target.join("partial").exists());
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn leftover_names_never_match_another_package() {
+        // The old naming (`.<id>.foundry-circle-backup`) was itself a valid id.
+        let temp = tempfile::tempdir().unwrap();
+        for version in ["1", "2"] {
+            fs::create_dir(temp.path().join(version)).unwrap();
+            fs::write(temp.path().join(version).join("content"), version).unwrap();
+        }
+        let data = temp.path().join("data");
+        let state = temp.path().join("state.json");
+        let demo = |version| with_update(p(temp.path(), "module", "demo", version), "replace");
+        let neighbour = DesiredPackage {
+            store_path: temp.path().join("1"),
+            ..p(temp.path(), "module", ".demo.foundry-circle-backup", "1")
+        };
+        reconcile(manifest(vec![demo("1"), neighbour.clone()]), &data, &state).unwrap();
+        reconcile(manifest(vec![demo("2"), neighbour]), &data, &state).unwrap();
+        let modules = data.join("Data/modules");
+        assert_eq!(fs::read(modules.join("demo/content")).unwrap(), b"2");
+        assert!(modules.join(".demo.foundry-circle-backup/content").exists());
+        // And the `@` in the real names can never be a package id.
+        let invalid = p(temp.path(), "module", "demo@foundry-circle-backup", "1");
+        assert!(reconcile(manifest(vec![invalid]), &data, &state).is_err());
+    }
+
+    #[test]
+    fn replace_same_version_preserves_edits() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("1")).unwrap();
+        let data = temp.path().join("data");
+        let state = temp.path().join("state.json");
+        let package = with_update(p(temp.path(), "module", "demo", "1"), "replace");
+        reconcile(manifest(vec![package.clone()]), &data, &state).unwrap();
+        let target = data.join("Data/modules/demo/content");
+        fs::write(&target, "manual").unwrap();
+        reconcile(manifest(vec![package]), &data, &state).unwrap();
+        assert_eq!(fs::read(target).unwrap(), b"manual");
+    }
+
+    #[test]
+    fn rejects_invalid_update_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let package = with_update(p(temp.path(), "module", "demo", "1"), "invalid");
+        assert!(validate_package(&package).is_err());
+    }
+
+    #[test]
+    fn replace_reseeds_missing_target() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("1")).unwrap();
+        fs::write(temp.path().join("1/content"), "seed").unwrap();
+        let data = temp.path().join("data");
+        let state = temp.path().join("state.json");
+        let package = with_update(p(temp.path(), "module", "demo", "1"), "replace");
+        reconcile(manifest(vec![package.clone()]), &data, &state).unwrap();
+        let target = data.join("Data/modules/demo");
+        fs::remove_dir_all(&target).unwrap();
+        reconcile(manifest(vec![package]), &data, &state).unwrap();
+        assert_eq!(fs::read(target.join("content")).unwrap(), b"seed");
+    }
+
+    #[test]
+    fn failed_replacement_preserves_target_and_ledger() {
+        let temp = tempfile::tempdir().unwrap();
+        for version in ["1", "2"] {
+            fs::create_dir_all(temp.path().join(version)).unwrap();
+        }
+        unix_fs::symlink("/outside", temp.path().join("2/bad")).unwrap();
+        let data = temp.path().join("data");
+        let state = temp.path().join("state.json");
+        reconcile(
+            manifest(vec![with_update(
+                p(temp.path(), "module", "demo", "1"),
+                "replace",
+            )]),
+            &data,
+            &state,
+        )
+        .unwrap();
+        let target = data.join("Data/modules/demo/content");
+        fs::write(&target, "manual").unwrap();
+        let before = fs::read(&state).unwrap();
+        assert!(
+            reconcile(
+                manifest(vec![with_update(
+                    p(temp.path(), "module", "demo", "2"),
+                    "replace"
+                )]),
+                &data,
+                &state
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(target).unwrap(), b"manual");
+        assert_eq!(fs::read(state).unwrap(), before);
     }
 
     #[test]

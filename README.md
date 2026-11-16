@@ -282,6 +282,10 @@ and initially seeds mutable module/system directories from
 initialization marker; worlds and package directories remain mutable
 Foundry-owned state.
 
+Set `update = "replace"` on a declarative package to replace its directory
+when its declared version changes, overwriting in-place edits. The default,
+`"seed"`, preserves edits across version changes.
+
 `foundry-circle-upload` is the native asset client. `login` signs in through the
 system browser with a loopback PKCE redirect, `push` converts images and audio
 with ffmpeg to Foundry's token, map, tile, artwork, and audio policy, and

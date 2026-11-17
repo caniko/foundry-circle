@@ -7,6 +7,7 @@ on:
   push:
     branches:
       - "trunk"
+      - "simit/update/**"
     tags-ignore: ["**"]
   pull_request:
   workflow_dispatch:
@@ -121,6 +122,7 @@ jobs:
         env:
           ATTIC_TOKEN: ${{ secrets.attic_token || secrets.ATTIC_TOKEN }}
           HARBOR_ATTIC_MANIFEST: attic-paths.txt
+          HARBOR_ATTIC_BUILT_PATHS: "1"
         run: |
           for attempt in 1 2 3; do
             nix run '.#push-flake-inputs' && exit 0

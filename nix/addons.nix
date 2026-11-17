@@ -28,7 +28,7 @@
       update = lib.mkOption {
         type = lib.types.enum ["seed" "replace"];
         default = "seed";
-        description = "replace overwrites in-place edits when the declared version changes.";
+        description = "replace overwrites in-place edits when the declared version or the package output changes.";
       };
       version = lib.mkOption {
         type = lib.types.str;

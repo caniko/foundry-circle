@@ -277,10 +277,17 @@ async function buildCharacter(args) {
     actor.reset();
   }
 
-  // The kit's documents, each with the quantity the rules list.
+  // The kit's documents, each with the quantity the rules list. A pack arrives
+  // with its contents, as a sheet drop creates it: the system's own
+  // `createWithContents` gives every item a fresh id, `_stats` from
+  // `fromCompendium`, and the pack's id as `system.container`
+  // (module/documents/item.mjs, `Item5e.createWithContents`).
   for ( const entry of args.items ?? [] ) {
-    const item = await add(entry.uuid);
-    item.updateSource({ "system.quantity": entry.quantity });
+    const document = await fromUuid(entry.uuid);
+    if ( !document ) throw new Error(`the world has no ${entry.uuid}`);
+    const [data, ...contents] = await CONFIG.Item.documentClass.createWithContents([document]);
+    data.system.quantity = entry.quantity;
+    actor.updateSource({ items: [data, ...contents] });
   }
 
   // Starting gold: the kits' own coin plus any wealth formula the draft chose

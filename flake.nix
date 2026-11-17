@@ -430,7 +430,7 @@
       devShell = toolchain.craneLib.devShell {
         checks = self.checks.${system};
         packages = with pkgs;
-          [cargo-deny cargo-nextest cargo-audit jq pre-commit rust-analyzer]
+          [cargo-deny cargo-nextest cargo-audit jq postgresql pre-commit rust-analyzer]
           ++ desktopNativeBuildInputs
           ++ preCommit.enabledPackages;
         # Building the workspace reaches the desktop crate, which needs the

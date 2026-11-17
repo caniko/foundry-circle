@@ -12,6 +12,9 @@ use tartan_ui_dioxus::{
 };
 use theme_broker::{Mode, role, stylesheet};
 
+#[cfg(all(test, feature = "server"))]
+mod acceptance;
+
 #[cfg(feature = "server")]
 pub mod adoption;
 

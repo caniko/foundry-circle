@@ -2,10 +2,11 @@
 
 All notable changes to Foundry Circle are documented here.
 
-## Unreleased
+## [Unreleased]
+
+## [0.1.0] - 2026-11-21
 
 - Enable the installed companion module automatically on catalog sync and reload the broker page.
-
 - Approve a submitted character into Foundry: the only world write. An admin, or
   the GM holding the running session for the draft's world, approves while the
   driver reports that world `Ready`; the draft row stays locked for the whole
@@ -134,7 +135,4 @@ platforms` names the matrix, and the `binstall-metadata` checks carry the
 - Add fail-closed declarative module/system add, version, rollback, and tombstone reconciliation.
 - Add the Nix package and NixOS module interfaces consumed by Canix.
 - Fix the local PostgreSQL URL (empty-host userinfo form rejected by sqlx), report ready once the database is up even with no world launched, and add GM/player lobby roles (`oidc.gmGroup`, `foundryWorld.playBaseUrl`) with a live-game card from Foundry `/api/status`.
-
-## 0.1.0 - 2026-07-16
-
 - Bootstrap the PostgreSQL-backed Rust control plane and Dioxus/tartan-ui operator console.

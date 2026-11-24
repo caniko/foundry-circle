@@ -46,7 +46,6 @@
   hookWrapper = pkgs.writeShellScript "foundryvtt-fetch-hook-wrapper" ''
     exec ${lib.escapeShellArg hook} \
       --socket ${lib.escapeShellArg cfg.socketPath} \
-      --nix ${lib.escapeShellArg "${pkgs.nix}/bin/nix"} \
       "$@"
   '';
 in {

@@ -1612,9 +1612,8 @@ async fn persist_tokens(
     }
 }
 
-/// Why a subject-wide revocation could not complete. Every entry point turns
-/// this into a 503: the browser must not be told the sessions are gone while
-/// the database still has them.
+/// Why a subject-wide database revocation could not complete. The play gate
+/// still denies an identity already confirmed revoked by the provider.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RevokeError {
     /// The database pool is not ready.
@@ -1772,7 +1771,7 @@ fn session_cookie(host: LoginHost, token: &str, ttl: Duration) -> String {
     )
 }
 
-fn expired_session_cookie(host: LoginHost) -> String {
+pub(crate) fn expired_session_cookie(host: LoginHost) -> String {
     format!(
         "{}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax",
         host.cookie_name()

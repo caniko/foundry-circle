@@ -10,7 +10,7 @@
 use axum::{
     extract::State,
     http::{HeaderMap, HeaderValue, StatusCode, header},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{AppendHeaders, Html, IntoResponse, Redirect, Response},
 };
 use oidc_app_auth::SessionToken;
 use serde_json::json;
@@ -117,12 +117,14 @@ pub fn decide(facts: &GateFacts<'_>) -> Decision {
     }
 }
 
-/// The path Foundry's Express router will see: query and fragment removed,
-/// percent escapes decoded once, and lowercased (Express routes
-/// case-insensitively by default). `/setupx` stays `/setupx`.
+/// Match Foundry's case-insensitive routes after decoding once, ignoring the
+/// query, fragment, and trailing slashes. Keep the root and `/setupx` distinct.
 fn normalized_path(uri: &str) -> String {
     let path = uri.split(['?', '#']).next().unwrap_or(uri);
-    percent_decode(path).to_ascii_lowercase()
+    let mut path = percent_decode(path).to_ascii_lowercase();
+    let min_len = usize::from(path.starts_with('/'));
+    path.truncate(path.trim_end_matches('/').len().max(min_len));
+    path
 }
 
 fn percent_decode(value: &str) -> String {
@@ -198,18 +200,13 @@ pub async fn gate(State(state): State<AppState>, headers: HeaderMap) -> Response
         Some(row) => match auth::revalidate(auth, &pool, row).await {
             auth::Revalidated::Valid(principal) => Some(principal),
             auth::Revalidated::Revoked => {
-                if let Err(error) = auth::revoke_subject(
+                let cleanup = auth::revoke_subject(
                     &state,
                     &row.principal.subject,
                     auth::RevokeReason::Revoked,
                 )
-                .await
-                {
-                    tracing::warn!(error = %error, "failed to revoke a rejected play session");
-                    return (StatusCode::SERVICE_UNAVAILABLE, "session revocation failed")
-                        .into_response();
-                }
-                return lobby_redirect(platform, Denial::NoAccess);
+                .await;
+                return revoked_play_response(platform, cleanup);
             }
             auth::Revalidated::Stale => {
                 auth::invalidate_session(&pool, &row.token_hash).await;
@@ -557,21 +554,30 @@ async fn play_principal(
             Ok(None)
         }
         PlaySession::Revoke => {
-            if let Err(error) =
+            let cleanup =
                 auth::revoke_subject(state, &row.principal.subject, auth::RevokeReason::Revoked)
-                    .await
-            {
-                tracing::warn!(error = %error, "failed to revoke a rejected play session");
-                return Err(
-                    (StatusCode::SERVICE_UNAVAILABLE, "session revocation failed").into_response(),
-                );
-            }
-            Err(lobby_redirect(platform, Denial::NoAccess))
+                    .await;
+            Err(revoked_play_response(platform, cleanup))
         }
         PlaySession::Unavailable => {
             Err((StatusCode::SERVICE_UNAVAILABLE, "Rauthy is unavailable").into_response())
         }
     }
+}
+
+fn revoked_play_response(platform: &str, cleanup: Result<(), auth::RevokeError>) -> Response {
+    if let Err(error) = cleanup {
+        tracing::warn!(%error, "failed to revoke a rejected play session");
+    }
+    // Identity is already revoked. A 5xx would leave the WebSocket open.
+    (
+        AppendHeaders([(
+            header::SET_COOKIE,
+            auth::expired_session_cookie(LoginHost::Play),
+        )]),
+        lobby_redirect(platform, Denial::NoAccess),
+    )
+        .into_response()
 }
 
 /// The holder's way into Foundry Setup on the play host.
@@ -880,11 +886,49 @@ mod tests {
 
     #[test]
     fn path_normalization_matches_express_routing() {
+        assert_eq!(normalized_path("/"), "/");
         assert_eq!(normalized_path("/setup?x=1"), "/setup");
         assert_eq!(normalized_path("/Setup#frag"), "/setup");
         assert_eq!(normalized_path("/%73etup"), "/setup");
         assert_eq!(normalized_path("/%2573etup"), "/%73etup");
         assert_eq!(normalized_path(""), "");
+    }
+
+    #[test]
+    fn trailing_slashes_follow_the_join_and_auth_rules() {
+        let running = Some(SessionPhase::Running);
+        for uri in ["/join/", "/join//", "/JOIN%2f?x=1"] {
+            assert_eq!(
+                denial(&facts(true, true, running, "POST", uri)),
+                Denial::JoinBlocked
+            );
+            assert!(allowed(&facts(true, false, running, "GET", uri)));
+        }
+        for uri in ["/auth/", "/auth//", "/AUTH%2F?x=1"] {
+            assert_eq!(
+                denial(&facts(true, false, running, "GET", uri)),
+                Denial::SetupOnly
+            );
+            assert!(allowed(&facts(true, true, running, "GET", uri)));
+        }
+    }
+
+    #[test]
+    fn confirmed_revocation_redirects_and_clears_cookie_even_if_cleanup_fails() {
+        for cleanup in [Err(sqlx::Error::PoolClosed.into()), Ok(())] {
+            let response = revoked_play_response("https://lobby.example", cleanup);
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            assert_eq!(
+                response.headers()[header::LOCATION],
+                "https://lobby.example/api/console?reason=no_access"
+            );
+            assert_eq!(
+                response.headers()[header::SET_COOKIE].to_str().unwrap(),
+                format!(
+                    "{PLAY_SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax"
+                )
+            );
+        }
     }
 
     #[test]
